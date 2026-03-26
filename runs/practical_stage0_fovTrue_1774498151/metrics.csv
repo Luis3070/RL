@@ -1,0 +1,7 @@
+episode,stage_id,stage_name,own_score,opp_score,mean_reward,steps,takeover_ready_rate,takeover_success_rate,goal_rate_w50,win_rate_w50,policy_loss,value_loss,entropy,elapsed_s,episode_wall_s,mean_env_step_ms,mean_bridge_ms,process_memory_mb,stability_score,bridge_reconnect_count,contract_validation_rate,non_pipe_rate,not_playing_rate
+1,0,1v0_approach_800,0,0,-7.3645,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,4.1,4.127,3.624,0.571,0.0,0.9978,0,0.0,0.0,0.0
+2,0,1v0_approach_800,0,0,58.9623,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,8.4,4.306,3.501,0.555,0.0,0.9978,0,0.0,0.0,0.0
+3,0,1v0_approach_800,0,0,-209.1018,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,12.9,4.495,3.51,0.562,0.0,0.9978,0,0.0,0.0,0.0
+4,0,1v0_approach_800,0,0,65.97,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,17.3,4.395,3.518,0.55,0.0,0.9978,0,0.0,0.0,0.0
+5,0,1v0_approach_800,0,0,-7.1686,455,0.0,0.0,0.0,0.0,-0.00179,0.23543,-0.01419,22.5,5.132,3.481,0.551,0.0,0.9978,0,0.0,0.0,0.0
+6,0,1v0_approach_800,0,0,-10.4428,455,0.0,0.0,0.0,0.0,-0.00179,0.23543,-0.01419,26.8,4.353,3.491,0.55,0.0,0.9978,0,0.0,0.0,0.0

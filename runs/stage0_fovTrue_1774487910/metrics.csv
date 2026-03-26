@@ -1,0 +1,4 @@
+episode,stage_id,stage_name,own_score,opp_score,mean_reward,steps,takeover_ready_rate,takeover_success_rate,goal_rate_w50,win_rate_w50,policy_loss,value_loss,entropy,elapsed_s
+1,0,1v0_approach_800,0,0,-125.6936,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,276.2
+2,0,1v0_approach_800,0,0,-6.4878,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,562.6
+3,0,1v0_approach_800,0,0,-50.799,455,0.0,0.0,0.0,0.0,0.0,0.0,0.0,849.1
