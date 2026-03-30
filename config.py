@@ -15,6 +15,7 @@ from bhuman_cfg_parser import (
     load_contract, AllConfigs,
     VALID_TACTIC_NAMES, VALID_STRATEGY_NAME,
 )
+from runtime_paths import resolve_cfg_root as _shared_resolve_cfg_root
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,8 +39,8 @@ from bhuman_cfg_parser import (
 #   sidecar.backend_label -> "real" | "contract_validation" | "python_stub"
 #   sidecar.is_real_backend -> True/False
 #
-# Until a real C++ bridge exists, "bhuman_sidecar" mode effectively runs
-# as "contract_validation". This is by design — honest about limitations.
+# "bhuman_sidecar" first attempts the real backend. If the bridge is not
+# available, it falls back explicitly to contract_validation mode.
 
 EXECUTION_MODE: str = os.environ.get("RL_EXECUTION_MODE", "bhuman_sidecar")
 
@@ -50,28 +51,8 @@ EXECUTION_MODE: str = os.environ.get("RL_EXECUTION_MODE", "bhuman_sidecar")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def resolve_cfg_root() -> str | None:
-    """
-    Resolve BHuman CFG root: .env override, then repo-relative fallback.
-    Importable by smoke tests and sidecar for consistent resolution.
-    Returns None if no real CFGs found (parser will use defaults).
-    """
-    env_val = os.environ.get("BHUMAN_CFG_ROOT", "").strip()
-    if env_val and os.path.isdir(env_val):
-        return env_val
-
-    # Repo-relative: RL/ is sibling of SabanaHerons2026-ScaledDimensions/
-    rl_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(rl_dir, "..", "SabanaHerons2026-ScaledDimensions",
-                     "SabanaHerons2026-ScaledDimensions", "Config"),
-        os.path.join(rl_dir, "..", "SabanaHerons2026-ScaledDimensions", "Config"),
-    ]
-    for candidate in candidates:
-        resolved = os.path.normpath(candidate)
-        if os.path.isdir(resolved):
-            return resolved
-
-    return None  # defaults embebidos
+    """Resolve the shared BHuman CFG root for runtime and smoke tests."""
+    return _shared_resolve_cfg_root()
 
 
 # Keep backward compat alias
@@ -196,7 +177,7 @@ SIM = SimConfig()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OBSERVATION SPACE — Alineado con contrato BHuman
-# Total: 61 floats por agente (MAPPO_Plan_3Fases.md)
+# Total: 60 floats por agente
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -208,7 +189,7 @@ class ObsConfig:
       Self pose (x, y, θ)           = 3
       Self velocity (vx, vy, ω)     = 3
       Self state (upright, battery)  = 2
-      Self role (one_hot 5 roles)    = 5  (defenderL, defenderR, forwardL, forwardR, position_role)
+      Self role (one_hot 4 roles)    = 4  (defenderL, defenderR, forwardL, forwardR)
       Self active flag               = 1
       Goal info (opening, relative)  = 2
       Ball (x, y, vx, vy, age, team) = 6
@@ -216,13 +197,13 @@ class ObsConfig:
       4 Opponents × 3               = 12
       Game (playing, own, opp, time) = 4
       Tactic (one_hot 2: t121, t13)  = 2
-    Total = 61
+    Total = 60
     """
     # Self (16)
     self_pose_size:   int = 3    # x, y, theta
     self_vel_size:    int = 3    # vx, vy, omega
     self_state_size:  int = 2    # is_upright, battery
-    self_role_size:   int = 5    # one_hot: defenderL, defenderR, forwardL, forwardR, position_role
+    self_role_size:   int = 4    # one_hot: defenderL, defenderR, forwardL, forwardR
     self_active_size: int = 1    # is_active_agent flag
     self_goal_size:   int = 2    # goal_opening_angle, goal_relative_angle
 
@@ -247,7 +228,7 @@ class ObsConfig:
     def self_total(self) -> int:
         return (self.self_pose_size + self.self_vel_size + self.self_state_size
                 + self.self_role_size + self.self_active_size
-                + self.self_goal_size)                         # 16
+                + self.self_goal_size)                         # 15
 
     @property
     def tm_total(self) -> int:
@@ -260,11 +241,11 @@ class ObsConfig:
     @property
     def total(self) -> int:
         return (self.self_total + self.ball_size + self.tm_total
-                + self.opp_total + self.game_size + self.tactic_size)  # 61
+                + self.opp_total + self.game_size + self.tactic_size)  # 60
 
 
 OBS = ObsConfig()
-assert OBS.total == 61, f"OBS size mismatch: {OBS.total}"
+assert OBS.total == 60, f"OBS size mismatch: {OBS.total}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

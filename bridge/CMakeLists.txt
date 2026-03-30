@@ -58,6 +58,17 @@ if(DEFINED BHUMAN_PREFIX)
             CONFIGURATION=$<CONFIG>
         )
 
+        if(WINDOWS)
+            set(RLBRIDGE_ONNXRUNTIME_DLL
+                "${BHUMAN_PREFIX}/Util/onnxruntime/lib/Windows/onnxruntime.dll")
+            if(EXISTS "${RLBRIDGE_ONNXRUNTIME_DLL}")
+                add_custom_command(TARGET RLBridge POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${RLBRIDGE_ONNXRUNTIME_DLL}"
+                        "$<TARGET_FILE_DIR:RLBridge>/onnxruntime.dll")
+            endif()
+        endif()
+
         set_property(TARGET RLBridge PROPERTY FOLDER "Apps")
         set_property(TARGET RLBridge PROPERTY
             RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_PREFIX}/Build/${PLATFORM}/RLBridge/$<CONFIG>")

@@ -37,6 +37,8 @@ from bhuman_cfg_parser import (
     get_home_poses, MACRO_TYPES, MACRO_END_REASONS, TAKEOVER_SKILLS,
 )
 
+TAKEOVER_MACRO_TYPES = frozenset(mt for mt in MACRO_TYPES if mt != "none")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ESTADOS INTERNOS
@@ -99,6 +101,7 @@ class MacroState:
     handoff_ready: bool = False
     takeover_active: bool = False
     takeover_grace_counter: int = 0
+    event_recorded: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,7 +356,7 @@ class ScriptedOpponent:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OBSERVATION BUILDER — 61 floats per agent
+# OBSERVATION BUILDER — 60 floats per agent
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ObservationBuilder:
@@ -379,16 +382,16 @@ class ObservationBuilder:
         obs[idx + 5] = agent.omega  / NORM.vel_theta
         obs[idx + 6] = 1.0 if agent.is_upright else 0.0
         obs[idx + 7] = agent.battery
-        # Role one-hot (5 roles: defenderL, defenderR, forwardL, forwardR, position_role)
+        # Role one-hot (4 roles: defenderL, defenderR, forwardL, forwardR)
         role_idx = ROLES.index(agent.role) if agent.role in ROLES else 0
         obs[idx + 8 + role_idx] = 1.0
         # Active agent flag
-        obs[idx + 13] = 1.0 if agent.is_active else 0.0
+        obs[idx + 12] = 1.0 if agent.is_active else 0.0
         # Goal info
         pos = agent.pos
-        obs[idx + 14] = _goal_opening_angle(pos) / NORM.theta
-        obs[idx + 15] = _goal_relative_angle(pos, agent.theta) / NORM.theta
-        return idx + OBS.self_total  # +16
+        obs[idx + 13] = _goal_opening_angle(pos) / NORM.theta
+        obs[idx + 14] = _goal_relative_angle(pos, agent.theta) / NORM.theta
+        return idx + OBS.self_total  # +15
 
     def _write_ball(self, obs, idx, ball, agent):
         obs[idx]     = ball.pos[0] / NORM.pos_x
@@ -491,10 +494,17 @@ class HandoffTakeoverManager:
     def __init__(self, contract: "AllConfigs"):
         self._handoff_cfg = contract.handoff
         self._kick_info = contract.kick_info
+        self._takeover_timeout_frames = contract.handoff.takeover_timeout_frames
         self.macro = MacroState()
 
     def reset(self):
         self.macro = MacroState()
+
+    def set_takeover_timeout_frames(self, frames: int) -> None:
+        self._takeover_timeout_frames = max(1, int(frames))
+
+    def force_end(self, reason: str, success: bool) -> None:
+        self._end_macro(reason, success)
 
     def compute_handoff_ready(self, agent: AgentState,
                               ball: BallState,
@@ -554,7 +564,7 @@ class HandoffTakeoverManager:
             self.macro.macro_duration_frames += 1
 
             # Timeout
-            if self.macro.macro_duration_frames >= self._handoff_cfg.takeover_timeout_frames:
+            if self.macro.macro_duration_frames >= self._takeover_timeout_frames:
                 self._end_macro("timeout", False)
                 return self.macro
 
@@ -603,7 +613,7 @@ class HandoffTakeoverManager:
             ready = self.compute_handoff_ready(agent, ball, game)
             self.macro.handoff_ready = ready
 
-            if ready:
+            if ready and sidecar_macro_type in TAKEOVER_MACRO_TYPES:
                 self._start_macro(active_agent_id, game.step_count,
                                   macro_type=sidecar_macro_type)
 
@@ -621,12 +631,15 @@ class HandoffTakeoverManager:
         self.macro.macro_end_reason = "none"
         self.macro.macro_success = None
         self.macro.takeover_grace_counter = 0
+        self.macro.event_recorded = False
 
     def _end_macro(self, reason: str, success: bool):
         self.macro.macro_active = False
         self.macro.takeover_active = False
+        self.macro.handoff_ready = False
         self.macro.macro_end_reason = reason
         self.macro.macro_success = success
+        self.macro.event_recorded = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -694,6 +707,219 @@ class BHumanTakeoverSimulator:
         return updated_agent, ball, kick_executed
 
 
+class RealSidecarPhysicsExecutor:
+    """
+    Applies physical effects from the real sidecar output without inventing
+    a separate decision policy.
+
+    Decision semantics come from the real bridge. Python only rolls those
+    semantics forward inside the 2D training world.
+    """
+
+    def __init__(self, movement: NaoMovementModel, contract: "AllConfigs"):
+        self._movement = movement
+        self._kick_info = contract.kick_info
+        self._kick_entries = {
+            entry.kick_type: entry for entry in contract.kick_info.kicks
+        }
+        self._last_kick_timestamps: Dict[str, int] = {}
+
+    def reset(self) -> None:
+        self._last_kick_timestamps.clear()
+
+    def apply(self,
+              agent: AgentState,
+              ball: BallState,
+              output: Any,
+              agents: Dict[str, AgentState],
+              dt: float) -> Tuple[AgentState, BallState, bool, bool]:
+        if not agent.is_upright:
+            return agent, ball, False, False
+
+        updated_agent = self._apply_agent_motion(agent, ball, output, dt)
+
+        if self._has_new_kick(agent.agent_id, output):
+            return updated_agent, self._apply_kick(updated_agent, ball, output, agents), True, False
+
+        if output.motion_request == "dribble":
+            dribble_ball, dribble_progress = self._apply_dribble(updated_agent, ball, output)
+            return updated_agent, dribble_ball, False, dribble_progress
+
+        return updated_agent, ball, False, False
+
+    def _apply_agent_motion(self,
+                            agent: AgentState,
+                            ball: BallState,
+                            output: Any,
+                            dt: float) -> AgentState:
+        target_pos, target_theta = self._resolve_motion_target(agent, ball, output)
+        return self._movement.step(agent, target_pos, target_theta, dt)
+
+    def _resolve_motion_target(self,
+                               agent: AgentState,
+                               ball: BallState,
+                               output: Any) -> Tuple[np.ndarray, float]:
+        if output.behavior_walking_to is not None:
+            target_pos = np.array(output.behavior_walking_to, dtype=np.float32)
+        elif output.motion_walk_target is not None:
+            target_pos = np.array(output.motion_walk_target[:2], dtype=np.float32)
+        elif output.skill_target is not None:
+            target_pos = np.array(output.skill_target, dtype=np.float32)
+        elif output.motion_request in {"walkToBallAndKick", "dribble"}:
+            target_pos = ball.pos.copy()
+        else:
+            vx, vy, _ = output.motion_speed
+            if abs(vx) > 1e-6 or abs(vy) > 1e-6:
+                cos_t = math.cos(agent.theta)
+                sin_t = math.sin(agent.theta)
+                vx_field = vx * cos_t - vy * sin_t
+                vy_field = vx * sin_t + vy * cos_t
+                target_pos = agent.pos + np.array([vx_field, vy_field], dtype=np.float32) * max(dt, 0.2)
+            else:
+                target_pos = agent.pos.copy()
+
+        if output.motion_walk_target is not None:
+            target_theta = float(output.motion_walk_target[2])
+        elif output.motion_target_direction is not None:
+            target_theta = float(output.motion_target_direction)
+        elif output.skill_target_direction is not None:
+            target_theta = float(output.skill_target_direction)
+        elif output.behavior_shooting_to is not None:
+            shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
+            target_theta = math.atan2(shoot_to[1] - agent.pos[1], shoot_to[0] - agent.pos[0])
+        else:
+            delta = target_pos - agent.pos
+            if float(np.linalg.norm(delta)) > 1e-6:
+                target_theta = math.atan2(delta[1], delta[0])
+            else:
+                target_theta = agent.theta
+
+        return target_pos, target_theta
+
+    def _has_new_kick(self, agent_id: str, output: Any) -> bool:
+        if output.last_kick_type in (None, "", "none", "unavailable"):
+            return False
+        timestamp = int(output.last_kick_timestamp or 0)
+        if timestamp <= 0:
+            return False
+        last_timestamp = self._last_kick_timestamps.get(agent_id, -1)
+        if timestamp <= last_timestamp:
+            return False
+        self._last_kick_timestamps[agent_id] = timestamp
+        return True
+
+    def _apply_kick(self,
+                    agent: AgentState,
+                    ball: BallState,
+                    output: Any,
+                    agents: Dict[str, AgentState]) -> BallState:
+        direction = self._resolve_kick_direction(agent, output, agents)
+        speed = self._kick_speed(output)
+        contact_offset = AGENT.min_robot_distance + BALL.radius + 25.0
+        return BallState(
+            pos=agent.pos + direction * contact_offset,
+            vel=direction * speed,
+            last_touched_by=agent.agent_id,
+            seen_age_ms=0.0,
+        )
+
+    def _apply_dribble(self,
+                       agent: AgentState,
+                       ball: BallState,
+                       output: Any) -> Tuple[BallState, bool]:
+        distance = float(np.linalg.norm(agent.pos - ball.pos))
+        if distance > AGENT.ball_interaction_range:
+            return ball, False
+
+        direction = self._direction_from_agent(agent, output)
+        contact_offset = AGENT.radius + BALL.radius + 10.0
+        dribble_speed = max(
+            150.0,
+            min(self._kick_info.ball_velocity_max * 0.45,
+                max(agent.speed_scalar, output.behavior_speed, 180.0)),
+        )
+        next_pos = agent.pos + direction * contact_offset
+        dribble_ball = BallState(
+            pos=next_pos,
+            vel=direction * dribble_speed,
+            last_touched_by=agent.agent_id,
+            seen_age_ms=0.0,
+        )
+        progress = float(next_pos[0] - ball.pos[0]) > 40.0
+        return dribble_ball, progress
+
+    def _resolve_kick_direction(self,
+                                agent: AgentState,
+                                output: Any,
+                                agents: Dict[str, AgentState]) -> np.ndarray:
+        if output.pass_target_player_number is not None:
+            target_agent = self._agent_from_player_number(output.pass_target_player_number, agents)
+            if target_agent is not None:
+                delta = target_agent.pos - agent.pos
+                norm = float(np.linalg.norm(delta))
+                if norm > 1e-6:
+                    return delta / norm
+
+        if output.behavior_shooting_to is not None:
+            shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
+            delta = shoot_to - agent.pos
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return delta / norm
+
+        if output.skill_target is not None:
+            target = np.array(output.skill_target, dtype=np.float32)
+            delta = target - agent.pos
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return delta / norm
+
+        return self._direction_from_agent(agent, output)
+
+    def _direction_from_agent(self, agent: AgentState, output: Any) -> np.ndarray:
+        if output.motion_target_direction is not None:
+            theta = float(output.motion_target_direction)
+        elif output.skill_target_direction is not None:
+            theta = float(output.skill_target_direction)
+        else:
+            theta = agent.theta
+        return np.array([math.cos(theta), math.sin(theta)], dtype=np.float32)
+
+    def _agent_from_player_number(self,
+                                  player_number: Any,
+                                  agents: Dict[str, AgentState]) -> Optional[AgentState]:
+        try:
+            index = int(player_number) - 1
+        except (TypeError, ValueError):
+            return None
+
+        ordered_ids = sorted(
+            agents.keys(),
+            key=lambda aid: int(aid.rsplit("_", 1)[-1]) if "_" in aid else 10_000,
+        )
+        if 0 <= index < len(ordered_ids):
+            return agents.get(ordered_ids[index])
+        return None
+
+    def _kick_speed(self, output: Any) -> float:
+        kick_key = output.last_kick_type
+        if kick_key in (None, "", "none", "unavailable"):
+            kick_key = output.kick_type
+
+        entry = self._kick_entries.get(str(kick_key))
+        kick_length = float(output.kick_length or 0.0)
+        if entry is not None:
+            span = max(1.0, entry.range_max - entry.range_min)
+            alpha = float(np.clip((kick_length - entry.range_min) / span, 0.0, 1.0))
+            return float(entry.ball_velocity_min + alpha * (entry.ball_velocity_max - entry.ball_velocity_min))
+
+        if kick_length <= 0.0:
+            return float(self._kick_info.ball_velocity_max)
+
+        ratio = float(np.clip(kick_length / max(1.0, self._kick_info.forward_fast_max), 0.35, 1.0))
+        return ratio * float(self._kick_info.ball_velocity_max)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN ENVIRONMENT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -727,6 +953,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._scripted_ai  = ScriptedOpponent(self._movement)
         self._obs_builder  = ObservationBuilder()
         self._handoff_mgr  = HandoffTakeoverManager(CONTRACT)
+        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
 
         # Execution mode
         self._execution_mode = EXECUTION_MODE
@@ -735,6 +962,7 @@ class NaoSoccerEnv(ParallelEnv):
         # Takeover simulator: ONLY for python_stub_smoke_only mode.
         # In bhuman_sidecar mode, the takeover simulator is NOT used.
         self._takeover_sim = None
+        self._sidecar_physics = None
         if EXECUTION_MODE == "python_stub_smoke_only":
             self._takeover_sim = BHumanTakeoverSimulator(self._movement, CONTRACT)
 
@@ -743,6 +971,7 @@ class NaoSoccerEnv(ParallelEnv):
             from bhuman_sidecar import BHumanDecisionSidecar
             self._sidecar = BHumanDecisionSidecar(CONTRACT,
                                                    execution_mode=EXECUTION_MODE)
+            self._sidecar_physics = RealSidecarPhysicsExecutor(self._movement, CONTRACT)
 
         # PettingZoo
         self.possible_agents = [f"agent_{i}" for i in range(SIM.num_agents)]
@@ -818,9 +1047,12 @@ class NaoSoccerEnv(ParallelEnv):
 
         self._fov_filter.reset(self.agents)
         self._handoff_mgr.reset()
+        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
         if self._sidecar is not None:
             # Reset the real bridge / sidecar state at episode boundaries.
             self._sidecar.reset()
+        if self._sidecar_physics is not None:
+            self._sidecar_physics.reset()
 
         # Init smoothing
         self._prev_actions = {aid: np.zeros(ACTION.size, dtype=np.float32) for aid in self.agents}
@@ -907,8 +1139,14 @@ class NaoSoccerEnv(ParallelEnv):
                 game=self._game,
             )
             # Sidecar decides active_agent — use it
-            if sidecar_output.active_agent is not None:
+            if sidecar_output.active_agent in self._agents_state:
                 self._active_agent_id = sidecar_output.active_agent
+                for aid, agent in self._agents_state.items():
+                    agent.is_active = (aid == self._active_agent_id)
+            elif sidecar_output.active_agent is not None:
+                # Ignore padded / non-trainable teammates as env owners.
+                self._select_active_agent()
+            elif sidecar_output.backend == "real" and self._active_agent_id in self._agents_state:
                 for aid, agent in self._agents_state.items():
                     agent.is_active = (aid == self._active_agent_id)
             else:
@@ -920,6 +1158,8 @@ class NaoSoccerEnv(ParallelEnv):
         # 3. HANDOFF CHECK + BHUMAN TAKEOVER
         # ═══════════════════════════════════════════════════════════════
         takeover_kick = False
+        takeover_progress = False
+        macro_resolved_pre_physics = False
         sidecar_macro_type = "none"
         if sidecar_output is not None:
             sidecar_macro_type = sidecar_output.macro_type
@@ -946,11 +1186,27 @@ class NaoSoccerEnv(ParallelEnv):
                         agent, self._ball, SIM.dt
                     )
                     self._agents_state[self._active_agent_id] = agent
+                elif (
+                    sidecar_output is not None
+                    and sidecar_output.backend == "real"
+                    and self._sidecar_physics is not None
+                ):
+                    agent = self._agents_state[self._active_agent_id]
+                    agent, self._ball, takeover_kick, takeover_progress = self._sidecar_physics.apply(
+                        agent, self._ball, sidecar_output, self._agents_state, SIM.dt
+                    )
+                    self._agents_state[self._active_agent_id] = agent
+
+                    if takeover_kick and sidecar_output.skill_request in {"shoot", "pass"}:
+                        self._handoff_mgr.force_end("completed", True)
+                        macro_resolved_pre_physics = True
+                    elif takeover_progress and sidecar_output.macro_type in {
+                        "playBall_dribble", "playBall_duel"
+                    }:
+                        self._handoff_mgr.force_end("completed", True)
+                        macro_resolved_pre_physics = True
                 else:
-                    # bhuman_sidecar / contract_validation_mode:
-                    # NO local physics simulation. Sidecar provides decision
-                    # evidence only. Macro tracks duration/end but does not
-                    # fake physical execution.
+                    # contract_validation_mode keeps semantic evidence only.
                     pass
 
         # ═══════════════════════════════════════════════════════════════
@@ -1001,15 +1257,22 @@ class NaoSoccerEnv(ParallelEnv):
         # 7. POST-TAKEOVER UPDATE
         # ═══════════════════════════════════════════════════════════════
         if self._stage.takeover_required:
-            macro = self._handoff_mgr.update(
-                self._agents_state, self._ball, self._game,
-                self._active_agent_id,
-                goal_scored=goal_scored, goal_conceded=goal_conceded,
-                ball_out=self._ball_out_this_step,
-                sidecar_macro_type=sidecar_macro_type,
-            )
+            if macro_resolved_pre_physics:
+                macro = self._handoff_mgr.macro
+            else:
+                macro = self._handoff_mgr.update(
+                    self._agents_state, self._ball, self._game,
+                    self._active_agent_id,
+                    goal_scored=goal_scored, goal_conceded=goal_conceded,
+                    ball_out=self._ball_out_this_step,
+                    sidecar_macro_type=sidecar_macro_type,
+                )
             # Record takeover events
-            if macro.macro_end_reason != "none" and macro.macro_success is not None:
+            if (
+                macro.macro_end_reason != "none"
+                and macro.macro_success is not None
+                and not macro.event_recorded
+            ):
                 self._episode_takeover_count += 1
                 if macro.macro_success:
                     self._episode_takeover_success += 1
@@ -1019,6 +1282,7 @@ class NaoSoccerEnv(ParallelEnv):
                     "end_reason": macro.macro_end_reason,
                     "success": macro.macro_success,
                 })
+                macro.event_recorded = True
 
         # ═══════════════════════════════════════════════════════════════
         # 8. UPDATE GAME STATE
@@ -1049,6 +1313,7 @@ class NaoSoccerEnv(ParallelEnv):
         # ═══════════════════════════════════════════════════════════════
         # 10. EPISODE TERMINATION
         # ═══════════════════════════════════════════════════════════════
+        live_agent_ids = list(self.agents)
         truncated = self._game.step_count >= self._stage.episode_steps
         terminated = False
 
@@ -1057,12 +1322,16 @@ class NaoSoccerEnv(ParallelEnv):
         terminateds["__all__"] = terminated
         truncateds["__all__"] = truncated
 
+        observations = self._build_observations(agent_ids=live_agent_ids)
+        infos = self._build_infos(
+            goal_scored,
+            goal_conceded,
+            sidecar_output=sidecar_output,
+            agent_ids=live_agent_ids,
+        )
+
         if truncated:
             self.agents = []
-
-        observations = self._build_observations()
-        infos = self._build_infos(goal_scored, goal_conceded,
-                                  sidecar_output=sidecar_output)
 
         return observations, rewards, terminateds, truncateds, infos
 
@@ -1262,11 +1531,13 @@ class NaoSoccerEnv(ParallelEnv):
 
     # ── Observations ──────────────────────────────────────────────────
 
-    def _build_observations(self):
+    def _build_observations(self, agent_ids=None):
         observations = {}
         all_agents = list(self._agents_state.values())
+        if agent_ids is None:
+            agent_ids = self.agents
 
-        for aid in self.agents:
+        for aid in agent_ids:
             agent = self._agents_state[aid]
             visible_opps = self._fov_filter.get_visible_opponents(
                 aid, agent.pos, agent.theta, self._opponents_state
@@ -1358,8 +1629,13 @@ class NaoSoccerEnv(ParallelEnv):
             return False
         return self._fov_filter._is_in_fov(agent.pos, agent.theta, self._ball.pos)
 
-    def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None):
+    def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None):
         macro = self._handoff_mgr.macro
+        if agent_ids is None:
+            agent_ids = self.agents
+        effective_macro_type = macro.macro_type
+        if sidecar_output is not None and not macro.macro_active:
+            effective_macro_type = sidecar_output.macro_type
         base_info = {
             "own_score": self._game.own_score,
             "opp_score": self._game.opp_score,
@@ -1372,7 +1648,8 @@ class NaoSoccerEnv(ParallelEnv):
             "handoff_ready": macro.handoff_ready,
             "takeover_active": macro.takeover_active,
             "macro_active": macro.macro_active,
-            "macro_type": macro.macro_type,
+            "macro_type": effective_macro_type,
+            "takeover_macro_type": macro.macro_type,
             "macro_duration_frames": macro.macro_duration_frames,
             "macro_end_reason": macro.macro_end_reason,
             "macro_success": macro.macro_success,
@@ -1389,9 +1666,19 @@ class NaoSoccerEnv(ParallelEnv):
         }
         # Sidecar-enriched fields
         if sidecar_output is not None:
+            base_info["sidecar_macro_type"] = sidecar_output.macro_type
+            base_info["sidecar_current_tactic"] = sidecar_output.current_tactic
             base_info["sidecar_skill_request"] = sidecar_output.skill_request
+            base_info["sidecar_skill_target"] = sidecar_output.skill_target
+            base_info["sidecar_skill_target_direction"] = sidecar_output.skill_target_direction
             base_info["sidecar_motion_request"] = sidecar_output.motion_request
+            base_info["sidecar_motion_walk_target"] = sidecar_output.motion_walk_target
+            base_info["sidecar_motion_target_direction"] = sidecar_output.motion_target_direction
+            base_info["sidecar_motion_executed_phase"] = sidecar_output.motion_executed_phase
             base_info["sidecar_behavior_status"] = sidecar_output.behavior_status
+            base_info["sidecar_behavior_speed"] = sidecar_output.behavior_speed
+            base_info["sidecar_behavior_walking_to"] = sidecar_output.behavior_walking_to
+            base_info["sidecar_behavior_shooting_to"] = sidecar_output.behavior_shooting_to
             base_info["sidecar_strategy_status"] = sidecar_output.strategy_status
             base_info["sidecar_activation_graph"] = [
                 n.to_dict() if hasattr(n, "to_dict") else str(n)
@@ -1400,6 +1687,9 @@ class NaoSoccerEnv(ParallelEnv):
             base_info["sidecar_kick_type"] = sidecar_output.kick_type
             base_info["sidecar_kick_length"] = sidecar_output.kick_length
             base_info["sidecar_last_kick_type"] = sidecar_output.last_kick_type
+            base_info["sidecar_last_kick_timestamp"] = sidecar_output.last_kick_timestamp
+            base_info["sidecar_pass_target_player_number"] = sidecar_output.pass_target_player_number
+            base_info["sidecar_pass_origin_player_number"] = sidecar_output.pass_origin_player_number
             base_info["sidecar_backend"] = sidecar_output.backend
             base_info["sidecar_contract_validation_mode"] = sidecar_output.contract_validation_mode
             base_info["takeover_simulator_active"] = (self._takeover_sim is not None)
@@ -1408,13 +1698,14 @@ class NaoSoccerEnv(ParallelEnv):
             base_info["bridge_metadata"] = dict(sidecar_output.bridge_metadata)
             for key, value in sidecar_output.bridge_metadata.items():
                 base_info[f"bridge_{key}"] = value
-        return {aid: base_info.copy() for aid in self.agents}
+        return {aid: base_info.copy() for aid in agent_ids}
 
     # ── Utilities ─────────────────────────────────────────────────────
 
     def set_stage(self, stage_cfg):
         self._stage = stage_cfg
         self._fov_filter = FOVFilter(use_fov=self._use_fov)
+        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
 
     def get_global_state(self):
         return build_global_state(

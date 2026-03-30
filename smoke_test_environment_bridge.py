@@ -29,7 +29,7 @@ import numpy as np
 # Force the real sidecar path before importing config/environment.
 os.environ["RL_EXECUTION_MODE"] = "bhuman_sidecar"
 
-from bridge.bridge_protocol import BridgeConfig
+from bridge.bridge_protocol import BridgeConfig, expected_transport_mode
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
 
@@ -102,6 +102,7 @@ def _install_known_good_bridge_fixture(env: NaoSoccerEnv) -> None:
 
 
 def _check_common_bridge_info(info: dict) -> None:
+    expected_transport = expected_transport_mode()
     _assert(info.get("execution_mode") == "bhuman_sidecar",
             f"execution_mode = bhuman_sidecar (got {info.get('execution_mode')})")
     _assert(info.get("sidecar_active") is True, "sidecar_active = True")
@@ -121,8 +122,8 @@ def _check_common_bridge_info(info: dict) -> None:
 
     _assert(info.get("bridge_debug_frame_sync") == "ack",
             f"bridge_debug_frame_sync = ack (got {info.get('bridge_debug_frame_sync')})")
-    _assert(info.get("bridge_debug_transport_mode") == "pipe_process",
-            f"bridge_debug_transport_mode = pipe_process (got {info.get('bridge_debug_transport_mode')})")
+    _assert(info.get("bridge_debug_transport_mode") == expected_transport,
+            f"bridge_debug_transport_mode = {expected_transport} (got {info.get('bridge_debug_transport_mode')})")
     _assert(info.get("bridge_debug_seen_messages_total", 0) >= 1,
             f"bridge_debug_seen_messages_total >= 1 (got {info.get('bridge_debug_seen_messages_total')})")
 

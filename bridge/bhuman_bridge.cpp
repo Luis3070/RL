@@ -119,6 +119,21 @@ static LONG WINAPI rlBridgeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptio
 }
 #endif
 
+namespace
+{
+constexpr bool kVerboseBridgeLogs = false;
+
+template<typename... Ts>
+void verboseBridgeLog(const Ts&... parts)
+{
+    if constexpr(kVerboseBridgeLogs)
+    {
+        (std::cerr << ... << parts);
+        std::cerr << std::endl;
+    }
+}
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal JSON parser/writer (no external dependency)
@@ -545,9 +560,11 @@ bool RLBridgeConsole::handleMessage(MessageQueue::Message message)
     default:
         break;
     }
-    std::cerr << "[bridge-console] handleMessage: "
-              << messageNameForLog
-              << " (" << static_cast<int>(message.id()) << ")" << std::endl;
+    verboseBridgeLog("[bridge-console] handleMessage: ",
+                     messageNameForLog,
+                     " (",
+                     static_cast<int>(message.id()),
+                     ")");
 
     {
         std::lock_guard<std::mutex> lock(receiverMutex_);
@@ -572,42 +589,42 @@ bool RLBridgeConsole::handleMessage(MessageQueue::Message message)
         return true;
     }
     case idGameState:
-        std::cerr << "[bridge-console] deserialize GameState" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize GameState");
         message.bin() >> pendingSnapshot_.gameState;
         pendingSnapshot_.hasGameState = true;
         return true;
     case idSkillRequest:
-        std::cerr << "[bridge-console] deserialize SkillRequest" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize SkillRequest");
         message.bin() >> pendingSnapshot_.skillRequest;
         pendingSnapshot_.hasSkillRequest = true;
         return true;
     case idMotionRequest:
-        std::cerr << "[bridge-console] deserialize MotionRequest" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize MotionRequest");
         message.bin() >> pendingSnapshot_.motionRequest;
         pendingSnapshot_.hasMotionRequest = true;
         return true;
     case idMotionInfo:
-        std::cerr << "[bridge-console] deserialize MotionInfo" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize MotionInfo");
         message.bin() >> pendingSnapshot_.motionInfo;
         pendingSnapshot_.hasMotionInfo = true;
         return true;
     case idStrategyStatus:
-        std::cerr << "[bridge-console] deserialize StrategyStatus" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize StrategyStatus");
         message.bin() >> pendingSnapshot_.strategyStatus;
         pendingSnapshot_.hasStrategyStatus = true;
         return true;
     case idBehaviorStatus:
-        std::cerr << "[bridge-console] deserialize BehaviorStatus" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize BehaviorStatus");
         message.bin() >> pendingSnapshot_.behaviorStatus;
         pendingSnapshot_.hasBehaviorStatus = true;
         return true;
     case idActivationGraph:
-        std::cerr << "[bridge-console] deserialize ActivationGraph" << std::endl;
+        verboseBridgeLog("[bridge-console] deserialize ActivationGraph");
         message.bin() >> pendingSnapshot_.activationGraph;
         pendingSnapshot_.hasActivationGraph = true;
         return true;
     case idLogResponse:
-        std::cerr << "[bridge-console] received LogResponse" << std::endl;
+        verboseBridgeLog("[bridge-console] received LogResponse");
         {
             std::lock_guard<std::mutex> lock(receiverMutex_);
             latestSnapshot_ = pendingSnapshot_;
@@ -617,11 +634,11 @@ bool RLBridgeConsole::handleMessage(MessageQueue::Message message)
         return true;
     case idFrameFinished:
     {
-        std::cerr << "[bridge-console] received FrameFinished" << std::endl;
+        verboseBridgeLog("[bridge-console] received FrameFinished");
         auto stream = message.bin();
         std::string threadName;
         stream >> threadName;
-        std::cerr << "[bridge-console] FrameFinished thread=" << threadName << std::endl;
+        verboseBridgeLog("[bridge-console] FrameFinished thread=", threadName);
         if (threadName == "Cognition")
         {
             {
@@ -792,7 +809,7 @@ public:
             return makeError("Bridge not initialized");
 
         auto start = std::chrono::high_resolution_clock::now();
-        std::cerr << "[bridge] processFrame: begin" << std::endl;
+        verboseBridgeLog("[bridge] processFrame: begin");
 
         frameId_++;
         const int baseInputTimestampMs = input["timestamp_ms"].asInt(frameId_ * 33);
@@ -801,7 +818,7 @@ public:
 
         GroundTruthWorldState worldState;
         buildWorldState(input, worldState);
-        std::cerr << "[bridge] processFrame: world built" << std::endl;
+        verboseBridgeLog("[bridge] processFrame: world built");
 
         CameraInfo cameraInfo;
         fillDefaultCameraInfo(cameraInfo);
@@ -846,16 +863,22 @@ public:
             bridgeSender.bin(idGroundTruthWorldState) << worldState;
             bridgeSender.bin(idFrameFinished) << std::string("Cognition");
             bridgeSender.send(true);
-            std::cerr << "[bridge] processFrame: frame sent state=" << bootstrapStates[stepIndex]
-                      << " step=" << (stepIndex + 1) << "/" << bootstrapStates.size() << std::endl;
+            verboseBridgeLog("[bridge] processFrame: frame sent state=",
+                             bootstrapStates[stepIndex],
+                             " step=",
+                             (stepIndex + 1),
+                             "/",
+                             bootstrapStates.size());
 
             frameCompleted = bridgeConsole_->waitForCognitionFrameFinished(previousFinishedCount, 1000);
             if(frameCompleted)
-                std::cerr << "[bridge] processFrame: cognition frame finished state=" << bootstrapStates[stepIndex] << std::endl;
+                verboseBridgeLog("[bridge] processFrame: cognition frame finished state=",
+                                 bootstrapStates[stepIndex]);
             else
             {
-                std::cerr << "[bridge] processFrame: frame completion timeout for state="
-                          << bootstrapStates[stepIndex] << ", using snapshot fallback" << std::endl;
+                verboseBridgeLog("[bridge] processFrame: frame completion timeout for state=",
+                                 bootstrapStates[stepIndex],
+                                 ", using snapshot fallback");
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
         }
@@ -864,7 +887,7 @@ public:
             operationalWarmupDone_ = true;
 
         JsonValue result = readDecisions(input["frame_id"].asInt(frameId_));
-        std::cerr << "[bridge] processFrame: decisions read" << std::endl;
+        verboseBridgeLog("[bridge] processFrame: decisions read");
 
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -1014,6 +1037,15 @@ private:
     template<typename EnumType> static std::string enumNameOr(EnumType value, const std::string& fallback)
     {
         return enumNameOr(TypeRegistry::getEnumName(value), fallback);
+    }
+
+    static std::string normalizeTacticName(std::string name)
+    {
+        if(name == "t121")
+            return "t121_4v4_scaled";
+        if(name == "t13")
+            return "t13_4v4_scaled";
+        return name;
     }
 
     ModuleContainer* findCognitionThread() const
@@ -1271,7 +1303,7 @@ private:
             return JsonValue(result);
         }
 
-        std::cerr << "[bridge] readDecisions: snapshot" << std::endl;
+        verboseBridgeLog("[bridge] readDecisions: snapshot");
         const DecisionSnapshot snapshot = bridgeConsole_->latestSnapshot();
         const unsigned totalMessages = bridgeConsole_->totalReceivedMessages();
         const std::vector<std::string> recentMessages = bridgeConsole_->recentReceivedMessages();
@@ -1300,7 +1332,7 @@ private:
 
         if (snapshot.hasSkillRequest)
         {
-            std::cerr << "[bridge] readDecisions: SkillRequest" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: SkillRequest");
             const SkillRequest& sr = snapshot.skillRequest;
             result["skill_request"] = JsonValue(enumNameOr(sr.skill, "none"));
 
@@ -1325,7 +1357,7 @@ private:
 
         if (snapshot.hasMotionRequest)
         {
-            std::cerr << "[bridge] readDecisions: MotionRequest" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: MotionRequest");
             const MotionRequest& mr = snapshot.motionRequest;
             result["motion_request"] = JsonValue(enumNameOr(mr.motion, "stand"));
 
@@ -1351,7 +1383,7 @@ private:
 
         if (snapshot.hasMotionInfo)
         {
-            std::cerr << "[bridge] readDecisions: MotionInfo" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: MotionInfo");
             const MotionInfo& mi = snapshot.motionInfo;
             result["motion_executed_phase"] = JsonValue(enumNameOr(mi.executedPhase, "playDead"));
 
@@ -1368,10 +1400,10 @@ private:
 
         if (snapshot.hasStrategyStatus)
         {
-            std::cerr << "[bridge] readDecisions: StrategyStatus" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: StrategyStatus");
             const StrategyStatus& ss = snapshot.strategyStatus;
-            result["current_tactic"] = JsonValue(enumNameOr(ss.acceptedTactic, "none"));
-            result["strategy_proposed_tactic"] = JsonValue(enumNameOr(ss.proposedTactic, "none"));
+            result["current_tactic"] = JsonValue(normalizeTacticName(enumNameOr(ss.acceptedTactic, "none")));
+            result["strategy_proposed_tactic"] = JsonValue(normalizeTacticName(enumNameOr(ss.proposedTactic, "none")));
             result["strategy_role"] = JsonValue(enumNameOr(ss.role, "none"));
             result["strategy_position"] = JsonValue(enumNameOr(ss.position, "none"));
             result["strategy_proposed_set_play"] = JsonValue(enumNameOr(ss.proposedSetPlay, "none"));
@@ -1386,7 +1418,7 @@ private:
 
         if (snapshot.hasBehaviorStatus)
         {
-            std::cerr << "[bridge] readDecisions: BehaviorStatus" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: BehaviorStatus");
             const BehaviorStatus& bs = snapshot.behaviorStatus;
 
             if (bs.shootingTo.has_value())
@@ -1416,7 +1448,7 @@ private:
 
         if (snapshot.hasActivationGraph)
         {
-            std::cerr << "[bridge] readDecisions: ActivationGraph" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: ActivationGraph");
             JsonArray activationGraph;
             for (const ActivationGraph::Node& node : snapshot.activationGraph.graph)
             {
@@ -1447,7 +1479,7 @@ private:
 
         if(!snapshotHadDecisionData && cognition_)
         {
-            std::cerr << "[bridge] readDecisions: direct blackboard fallback" << std::endl;
+            verboseBridgeLog("[bridge] readDecisions: direct blackboard fallback");
             try
             {
                 cognition_->setGlobals();
@@ -1535,8 +1567,8 @@ private:
                 if(bb.exists("StrategyStatus"))
                 {
                     const StrategyStatus& ss = static_cast<const StrategyStatus&>(bb["StrategyStatus"]);
-                    result["current_tactic"] = JsonValue(enumNameOr(ss.acceptedTactic, "none"));
-                    result["strategy_proposed_tactic"] = JsonValue(enumNameOr(ss.proposedTactic, "none"));
+                    result["current_tactic"] = JsonValue(normalizeTacticName(enumNameOr(ss.acceptedTactic, "none")));
+                    result["strategy_proposed_tactic"] = JsonValue(normalizeTacticName(enumNameOr(ss.proposedTactic, "none")));
                     result["strategy_role"] = JsonValue(enumNameOr(ss.role, "none"));
                     result["strategy_position"] = JsonValue(enumNameOr(ss.position, "none"));
                     result["strategy_proposed_set_play"] = JsonValue(enumNameOr(ss.proposedSetPlay, "none"));
@@ -1615,7 +1647,7 @@ private:
         if (selfIsActive)
             result["active_agent_number"] = JsonValue(playerNumber_);
 
-        std::cerr << "[bridge] readDecisions: done" << std::endl;
+        verboseBridgeLog("[bridge] readDecisions: done");
 
         return JsonValue(result);
     }

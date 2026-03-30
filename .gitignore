@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+bridge/__pycache__/
+bridge/rlbridge_oneshot_*
+bridge/tmp*/

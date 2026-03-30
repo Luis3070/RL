@@ -1,8 +1,0 @@
-[bridge] BHuman Bridge v1.0 starting
-[bridge] init: robot created
-[bridge] init: robot started
-[Oracled] computeRobotPose
-[Oracled] computeRobotPose
-[Oracled] computeRobotPose
-[Oracled] computeRobotPose
-^C

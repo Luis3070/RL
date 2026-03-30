@@ -1,2 +1,0 @@
-{"type":"init","scenario":"2D","location":"Default","team_number":1,"player_number":1,"num_players":4}
-{"type":"frame","frame_id":305,"timestamp_ms":10065,"ball":{"x":-737.3642578125,"y":266.0989685058594,"vx":0.0,"vy":0.0},"own_team":[{"number":1,"x":-1084.767083082048,"y":-170.73951214659368,"theta":0.7545047416741663,"upright":true}],"opp_team":[],"game_state":"playing","own_score":0,"opp_score":0}

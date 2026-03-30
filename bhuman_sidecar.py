@@ -2,8 +2,8 @@
 bhuman_sidecar.py -- BHuman Decision Sidecar for RL integration.
 
 Architecture:
-  - RealSidecarBackend: placeholder for actual C++ bridge (IPC/FFI).
-    Raises NotImplementedError until a real backend exists.
+  - RealSidecarBackend: real C++ bridge orchestration across the active
+    own-team players.
   - PythonContractStub: Python re-implementation of BHuman decision logic
     using parsed CFG parameters. ONLY for smoke tests and debug.
   - BHumanDecisionSidecar: dispatcher that selects backend based on mode.
@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from bhuman_cfg_parser import AllConfigs
+from bhuman_cfg_parser import AllConfigs, get_home_poses
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,53 @@ VALID_MOTION_REQUESTS = frozenset({
     "special", "replayWalk", "calibration",
 })
 
+DUEL_ACTIVATION_STATES = frozenset({"zweikampf"})
+DUEL_ACTIVATION_OPTIONS = frozenset({"Zweikampf"})
+DRIBBLE_ACTIVATION_STATES = frozenset({"dribbleCloseRange", "dribbleFarRange"})
+DRIBBLE_ACTIVATION_OPTIONS = frozenset({"DribbleToGoal", "GoToBallAndDribble", "Dribble"})
+
+CANONICAL_AGENT_IDS = tuple(f"agent_{i}" for i in range(4))
+CANONICAL_ROLE_ORDER = ("defenderL", "defenderR", "forwardL", "forwardR")
+TACTIC_NAME_NORMALIZATION = {
+    "t121": "t121_4v4_scaled",
+    "t13": "t13_4v4_scaled",
+}
+
+
+def normalize_tactic_name(name: Optional[str]) -> str:
+    if name in (None, "", "none"):
+        return "t121_4v4_scaled"
+    return TACTIC_NAME_NORMALIZATION.get(str(name), str(name))
+
+
+def infer_real_macro_type(skill: str,
+                          motion_request: str,
+                          activation_graph: List["ActivationNode"]) -> str:
+    """
+    Derive the *current* play-ball macro from real BHuman evidence.
+
+    In the real bridge, `SkillRequest` can stay at a high-level intent
+    (`shoot` / `pass`) while the active subskill in `ActivationGraph`
+    and/or `MotionRequest` is still dribbling or in Zweikampf. For
+    semantic fidelity, we prioritize the executed sub-state first.
+    """
+    states = {node.state for node in activation_graph if getattr(node, "state", "")}
+    options = {node.option for node in activation_graph if getattr(node, "option", "")}
+
+    if states & DUEL_ACTIVATION_STATES or options & DUEL_ACTIVATION_OPTIONS:
+        return "playBall_duel"
+    if (states & DRIBBLE_ACTIVATION_STATES or
+            options & DRIBBLE_ACTIVATION_OPTIONS or
+            motion_request == "dribble"):
+        return "playBall_dribble"
+    if skill == "shoot":
+        return "playBall_shoot"
+    if skill == "pass":
+        return "playBall_pass"
+    if skill == "dribble":
+        return "playBall_dribble"
+    return "none"
+
 
 # ---------------------------------------------------------------------------
 # OUTPUT STRUCTURE
@@ -106,13 +155,23 @@ class SidecarOutput:
     # Skill layer (real BHuman enum — never "duel")
     skill_request: str = "none"
     skill_target: Optional[Tuple[float, float]] = None
+    skill_target_direction: Optional[float] = None
 
     # Behavior layer
     behavior_status: str = "idle"
+    behavior_speed: float = 0.0
+    behavior_walking_to: Optional[Tuple[float, float]] = None
+    behavior_shooting_to: Optional[Tuple[float, float]] = None
+    pass_target_player_number: Optional[int] = None
+    pass_origin_player_number: Optional[int] = None
 
     # Motion layer (real BHuman enum)
     motion_request: str = "stand"
     motion_speed: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    motion_walk_target: Optional[Tuple[float, float, float]] = None
+    motion_target_direction: Optional[float] = None
+    motion_executed_phase: str = "unavailable"
+    motion_executed_speed: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Kick metadata
     kick_type: str = "none"
@@ -165,7 +224,7 @@ class GroundTruthFrame:
 
 
 # ---------------------------------------------------------------------------
-# REAL SIDECAR BACKEND (placeholder for C++ bridge)
+# REAL SIDECAR BACKEND
 # ---------------------------------------------------------------------------
 
 class RealSidecarBackend:
@@ -186,36 +245,31 @@ class RealSidecarBackend:
     """
 
     def __init__(self, contract: AllConfigs):
-        from bridge.bridge_protocol import BHumanBridge, BridgeConfig, BridgeNotFoundError
+        from bridge.bridge_protocol import BHumanBridge, BridgeConfig
         self._contract = contract
-
-        try:
-            config = BridgeConfig()
-            self._bridge = BHumanBridge(config)
-            self._bridge.start()
-        except BridgeNotFoundError as e:
-            raise NotImplementedError(
-                f"C++ bridge executable not found. Build it first. {e}"
-            ) from e
-        except Exception as e:
-            raise NotImplementedError(
-                f"C++ bridge failed to start: {e}"
-            ) from e
-
+        self._bridge_cls = BHumanBridge
+        self._bridge_config_cls = BridgeConfig
+        self._bridges: Dict[int, Any] = {}
+        self._player_count = 0
         self._frame_counter = 0
+        self._prewarmed_player_count = 4
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._prewarmed_player_count,
+            thread_name_prefix="bhuman_sidecar",
+        )
+        self._ensure_bridges(self._prewarmed_player_count)
+        self.reset()
 
     def decide(self, frame: GroundTruthFrame) -> SidecarOutput:
-        """Run one BHuman cognition cycle via the C++ bridge."""
+        """Run one BHuman cognition cycle across the active own-team players."""
         self._frame_counter += 1
+        agent_order = self._sorted_agent_ids(frame.own_poses.keys())
+        player_count = max(1, len(agent_order))
+        self._ensure_bridges(player_count)
 
-        # Build own_team and opp_team dicts for bridge protocol
         own_team = []
-        for aid, pos in frame.own_poses.items():
-            # BHuman player numbers are 1-based, env agent ids are 0-based.
-            try:
-                number = int(aid.split("_")[-1]) + 1
-            except (ValueError, IndexError):
-                number = len(own_team) + 1
+        for number, aid in enumerate(agent_order, start=1):
+            pos = frame.own_poses[aid]
             own_team.append({
                 "number": number,
                 "x": float(pos[0]),
@@ -235,30 +289,178 @@ class RealSidecarBackend:
             })
 
         game_state = "playing" if frame.is_playing else "initial"
+        timestamp_ms = self._frame_counter * 33
+        team_t0 = time.perf_counter()
+        results: Dict[int, dict] = {}
 
-        result = self._bridge.step(
-            ball_pos=frame.ball_pos,
-            ball_vel=frame.ball_vel,
-            own_team=own_team,
-            opp_team=opp_team,
-            game_state=game_state,
-            own_score=frame.own_score,
-            opp_score=frame.opp_score,
-            timestamp_ms=self._frame_counter * 33,
+        try:
+            future_map = {}
+            for player_number, bridge in self._bridges.items():
+                future = self._executor.submit(
+                    bridge.step,
+                    ball_pos=frame.ball_pos,
+                    ball_vel=frame.ball_vel,
+                    own_team=own_team,
+                    opp_team=opp_team,
+                    game_state=game_state,
+                    own_score=frame.own_score,
+                    opp_score=frame.opp_score,
+                    timestamp_ms=timestamp_ms,
+                )
+                future_map[future] = player_number
+
+            for future, player_number in future_map.items():
+                results[player_number] = future.result()
+        except Exception as exc:
+            self.shutdown()
+            raise NotImplementedError(
+                f"C++ bridge failed during team step: {exc}"
+            ) from exc
+
+        active_player = self._select_active_player(results)
+        canonical_player = active_player if active_player is not None else 1
+        canonical = dict(results.get(canonical_player, {}))
+        total_time_us = int((time.perf_counter() - team_t0) * 1_000_000.0)
+        canonical["decision_time_us"] = total_time_us
+        canonical["player_number"] = canonical_player
+        canonical["active_agent_number"] = active_player
+        canonical["debug_team_bridge_count"] = player_count
+        canonical["debug_team_active_candidates"] = [
+            int(v["active_agent_number"])
+            for v in results.values()
+            if v.get("active_agent_number") is not None
+        ]
+        canonical["debug_team_bridge_players"] = list(sorted(results.keys()))
+        canonical["debug_active_agent_source"] = (
+            "real_team_consensus" if active_player is not None else "unavailable"
         )
+        if canonical_player in results:
+            active_result = results[canonical_player]
+            canonical["debug_active_agent_decision_time_us"] = active_result.get(
+                "decision_time_us", 0
+            )
 
-        return self._parse_bridge_result(result)
+        return self._parse_bridge_result(canonical, agent_order)
 
     def reset(self):
-        """Reset BHuman state for new episode."""
-        self._bridge.reset()
+        """Reset BHuman state for a new episode."""
+        for bridge in self._bridges.values():
+            bridge.reset()
         self._frame_counter = 0
 
-    def shutdown(self):
-        """Gracefully shut down the bridge subprocess."""
-        self._bridge.shutdown()
+    def shutdown(self, close_executor: bool = True):
+        """Gracefully shut down all bridge subprocesses."""
+        for bridge in self._bridges.values():
+            bridge.shutdown()
+        self._bridges.clear()
+        self._player_count = 0
+        if close_executor:
+            self._executor.shutdown(wait=True, cancel_futures=False)
 
-    def _parse_bridge_result(self, result: dict) -> SidecarOutput:
+    def _ensure_bridges(self, player_count: int) -> None:
+        from bridge.bridge_protocol import BridgeNotFoundError
+
+        if self._player_count == player_count and len(self._bridges) == player_count:
+            return
+
+        self.shutdown(close_executor=False)
+        started: Dict[int, Any] = {}
+        try:
+            for player_number in range(1, player_count + 1):
+                config = self._bridge_config_cls(
+                    player_number=player_number,
+                    num_players=player_count,
+                )
+                bridge = self._bridge_cls(config)
+                bridge.start()
+                started[player_number] = bridge
+        except BridgeNotFoundError as exc:
+            for bridge in started.values():
+                bridge.shutdown()
+            raise NotImplementedError(
+                f"C++ bridge executable not found. Build it first. {exc}"
+            ) from exc
+        except Exception as exc:
+            for bridge in started.values():
+                bridge.shutdown()
+            raise NotImplementedError(
+                f"C++ bridge failed to start for {player_count} players: {exc}"
+            ) from exc
+
+        self._bridges = started
+        self._player_count = player_count
+
+    def _sorted_agent_ids(self, agent_ids) -> List[str]:
+        def key(agent_id: str) -> tuple[int, str]:
+            try:
+                return int(agent_id.rsplit("_", 1)[-1]), agent_id
+            except ValueError:
+                return 10_000, agent_id
+
+        return sorted(agent_ids, key=key)
+
+    def _select_active_player(self, results: Dict[int, dict]) -> Optional[int]:
+        candidates: List[int] = []
+        for player_number, result in results.items():
+            active_number = result.get("active_agent_number")
+            if active_number is not None:
+                try:
+                    active_number = int(active_number)
+                except (TypeError, ValueError):
+                    active_number = None
+                if active_number is not None and active_number >= 1:
+                    candidates.append(active_number)
+                    continue
+
+            skill = result.get("skill_request", "none")
+            if skill in {"shoot", "pass", "dribble", "block"}:
+                candidates.append(player_number)
+                continue
+
+            role = str(result.get("strategy_role", ""))
+            if "active" in role.lower():
+                candidates.append(player_number)
+
+        if not candidates:
+            return None
+
+        most_common = Counter(candidates).most_common()
+        best_count = most_common[0][1]
+        best_candidates = [player for player, count in most_common if count == best_count]
+        return min(best_candidates)
+
+    def _active_agent_from_number(self, active_number: Any,
+                                  agent_order: List[str]) -> Optional[str]:
+        try:
+            index = int(active_number) - 1
+        except (TypeError, ValueError):
+            return None
+        if 0 <= index < len(agent_order):
+            return agent_order[index]
+        return None
+
+    def _parse_xy(self, value: Any) -> Optional[Tuple[float, float]]:
+        if not isinstance(value, dict):
+            return None
+        if "x_mm" not in value or "y_mm" not in value:
+            return None
+        return (float(value["x_mm"]), float(value["y_mm"]))
+
+    def _parse_pose(self, value: Any) -> Optional[Tuple[float, float, float]]:
+        if not isinstance(value, dict):
+            return None
+        if "x_mm" not in value or "y_mm" not in value:
+            return None
+        theta = float(value.get("theta_rad", 0.0))
+        return (float(value["x_mm"]), float(value["y_mm"]), theta)
+
+    def _parse_speed(self, value: Any) -> Tuple[float, float, float]:
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            return (float(value[0]), float(value[1]), float(value[2]))
+        return (0.0, 0.0, 0.0)
+
+    def _parse_bridge_result(self, result: dict,
+                             agent_order: Optional[List[str]] = None) -> SidecarOutput:
         """Convert bridge JSON response to SidecarOutput."""
         # Parse activation graph
         activation_graph = []
@@ -272,33 +474,21 @@ class RealSidecarBackend:
                 parameters=node_dict.get("parameters", []),
             ))
 
-        # Determine macro_type from skill_request and activation_graph
         skill = result.get("skill_request", "none")
-        macro_type = "none"
-        if skill == "shoot":
-            macro_type = "playBall_shoot"
-        elif skill == "pass":
-            macro_type = "playBall_pass"
-        elif skill == "dribble":
-            # Check activation_graph for zweikampf state
-            has_zweikampf = any(
-                n.state == "zweikampf" for n in activation_graph
-            )
-            macro_type = "playBall_duel" if has_zweikampf else "playBall_dribble"
+        motion_request = result.get("motion_request", "stand")
+        macro_type = infer_real_macro_type(
+            skill=skill,
+            motion_request=motion_request,
+            activation_graph=activation_graph,
+        )
 
         # Determine active_agent from player number
         active_number = result.get("active_agent_number")
-        active_agent = None
-        if active_number is not None:
-            try:
-                active_number = int(active_number)
-                if active_number >= 1:
-                    active_agent = f"agent_{active_number - 1}"
-            except (TypeError, ValueError):
-                active_agent = None
-
-        motion_speed_list = result.get("motion_speed", [0.0, 0.0, 0.0])
-        motion_speed = tuple(motion_speed_list) if len(motion_speed_list) == 3 else (0.0, 0.0, 0.0)
+        active_agent = self._active_agent_from_number(active_number, agent_order or [])
+        motion_speed = self._parse_speed(result.get("motion_speed", [0.0, 0.0, 0.0]))
+        motion_executed_speed = self._parse_speed(
+            result.get("motion_executed_speed", [0.0, 0.0, 0.0])
+        )
 
         # Preserve bridge debug/provenance data for end-to-end env smoke tests.
         bridge_metadata = {
@@ -311,11 +501,24 @@ class RealSidecarBackend:
             active_agent=active_agent,
             macro_type=macro_type,
             strategy_status=result.get("strategy_status", "s4v4_scaled"),
-            current_tactic=result.get("current_tactic", "t121_4v4_scaled"),
+            current_tactic=normalize_tactic_name(
+                result.get("current_tactic", "t121_4v4_scaled")
+            ),
             skill_request=skill,
+            skill_target=self._parse_xy(result.get("skill_target_pose")),
+            skill_target_direction=result.get("skill_target_direction_rad"),
             behavior_status=result.get("behavior_status", "playing"),
-            motion_request=result.get("motion_request", "stand"),
+            behavior_speed=float(result.get("behavior_speed_mm_s", 0.0)),
+            behavior_walking_to=self._parse_xy(result.get("behavior_walking_to")),
+            behavior_shooting_to=self._parse_xy(result.get("behavior_shooting_to")),
+            pass_target_player_number=result.get("pass_target_player_number"),
+            pass_origin_player_number=result.get("pass_origin_player_number"),
+            motion_request=motion_request,
             motion_speed=motion_speed,
+            motion_walk_target=self._parse_pose(result.get("motion_walk_target")),
+            motion_target_direction=result.get("motion_target_direction_rad"),
+            motion_executed_phase=result.get("motion_executed_phase", "unavailable"),
+            motion_executed_speed=motion_executed_speed,
             kick_type=result.get("kick_type", "none"),
             kick_length=result.get("kick_length_mm", 0.0),
             last_kick_type=result.get("last_kick_type", "unavailable"),
@@ -810,6 +1013,8 @@ class BHumanDecisionSidecar:
         self._execution_mode = execution_mode
         self._real_backend = None
         self._stub = PythonContractStub(contract)
+        self._last_real_backend_error: Optional[str] = None
+        self._last_known_tactic: str = "t121_4v4_scaled"
 
         # Try to load real backend
         if execution_mode == "bhuman_sidecar":
@@ -848,11 +1053,18 @@ class BHumanDecisionSidecar:
         if self._real_backend is not None:
             self._real_backend.reset()
         self._stub.reset()
+        self._last_known_tactic = "t121_4v4_scaled"
 
     def shutdown(self):
         """Shutdown real backend subprocess if running."""
         if self._real_backend is not None:
             self._real_backend.shutdown()
+
+    def __del__(self):
+        try:
+            self.shutdown()
+        except Exception:
+            pass
 
     def decide(self,
                agents: Dict[str, Any],
@@ -864,8 +1076,19 @@ class BHumanDecisionSidecar:
 
     def decide_from_frame(self, frame: GroundTruthFrame) -> SidecarOutput:
         if self._real_backend is not None:
-            return self._real_backend.decide(frame)
-        return self._stub.decide(frame, backend_label=self._backend_label)
+            try:
+                output = self._real_backend.decide(frame)
+                if output.current_tactic not in (None, "", "none"):
+                    self._last_known_tactic = str(output.current_tactic)
+                return output
+            except NotImplementedError as exc:
+                self._last_real_backend_error = str(exc)
+                self._real_backend = None
+                self._backend_label = "contract_validation"
+        output = self._stub.decide(frame, backend_label=self._backend_label)
+        if output.current_tactic not in (None, "", "none"):
+            self._last_known_tactic = str(output.current_tactic)
+        return output
 
     def _build_frame(self, agents, ball, opponents, game) -> GroundTruthFrame:
         own_poses = {}
@@ -878,6 +1101,8 @@ class BHumanDecisionSidecar:
             own_thetas[aid] = agent.theta
             own_upright[aid] = agent.is_upright
             own_roles[aid] = agent.role
+
+        self._augment_missing_teammates(own_poses, own_thetas, own_upright, own_roles)
 
         opp_poses = []
         opp_upright = []
@@ -899,3 +1124,36 @@ class BHumanDecisionSidecar:
             own_score=game.own_score,
             opp_score=game.opp_score,
         )
+
+    def _augment_missing_teammates(self,
+                                   own_poses: Dict[str, np.ndarray],
+                                   own_thetas: Dict[str, float],
+                                   own_upright: Dict[str, bool],
+                                   own_roles: Dict[str, str]) -> None:
+        """
+        Keep sidecar context in canonical 4-player form even in early curriculum.
+
+        Curriculum can still train 1/2/3 RL-controlled agents, but the BHuman
+        sidecar should see a stable 4v4-style team snapshot. Missing teammates
+        are represented with tactic home poses so tactical reasoning does not
+        collapse to a reduced-team artifact.
+        """
+        tactic_name = self._resolve_padding_tactic()
+        tactic_home_poses = get_home_poses(tactic_name, self._contract)
+        fallback_home_poses = get_home_poses("t121_4v4_scaled", self._contract)
+
+        for idx, aid in enumerate(CANONICAL_AGENT_IDS):
+            if aid in own_poses:
+                continue
+            role = CANONICAL_ROLE_ORDER[idx]
+            home = tactic_home_poses.get(role, fallback_home_poses.get(role, (0.0, 0.0)))
+            own_poses[aid] = np.array(home, dtype=np.float32)
+            own_thetas[aid] = 0.0
+            own_upright[aid] = True
+            own_roles[aid] = role
+
+    def _resolve_padding_tactic(self) -> str:
+        current = normalize_tactic_name(self._last_known_tactic or "t121_4v4_scaled")
+        if current in self._contract.tactics:
+            return current
+        return "t121_4v4_scaled"

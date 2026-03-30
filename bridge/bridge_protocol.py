@@ -71,13 +71,34 @@ import tempfile
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from runtime_paths import (
+    preferred_bridge_transport,
+    resolve_bhuman_root,
+    resolve_bridge_executable,
+    stable_bridge_transports,
+)
 
 logger = logging.getLogger(__name__)
+
+ONESHOT_ARTIFACT_PREFIX = "rlbridge_oneshot_"
+
+
+def _oneshot_runtime_dir() -> Path:
+    """
+    Keep one-shot transport artifacts out of the git workspace.
+
+    These files are purely operational scratch space for the Windows fallback
+    transport. Writing them inside `RL/bridge` polluted `git status` whenever
+    cleanup failed on Windows due to transient file-handle races.
+    """
+    runtime_dir = Path(tempfile.gettempdir()) / "rlbridge_oneshot_runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
 
 
 def _extract_json_objects_from_mixed_output(text: str) -> List[Dict[str, Any]]:
@@ -139,29 +160,18 @@ def _extract_json_objects_from_mixed_output(text: str) -> List[Dict[str, Any]]:
     return objects
 
 def _resolve_default_bridge_path() -> Path:
-    """
-    Resolve the preferred RLBridge executable.
+    """Resolve the preferred RLBridge executable for the current workspace."""
+    return resolve_bridge_executable()
 
-    Priority:
-      1. Explicit env override `BHUMAN_BRIDGE_EXE`
-      2. Stable external BHuman build output (preferred for integration)
-      3. Local repo copy `bridge/bhuman_bridge.exe`
-    """
-    env_override = os.environ.get("BHUMAN_BRIDGE_EXE", "").strip()
-    if env_override:
-        override_path = Path(env_override)
-        if override_path.exists():
-            return override_path
 
-    candidates = [
-        Path("C:/Users/Alegu/Sabana2026/Build/Windows/RLBridge/Release/RLBridge.exe"),
-        Path(__file__).parent / "bhuman_bridge.exe",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+def expected_transport_mode() -> str:
+    """Preferred transport mode for the current platform/configuration."""
+    return preferred_bridge_transport()
 
-    return candidates[-1]
+
+def is_stable_transport_mode(mode: str) -> bool:
+    """Return True when the mode is considered valid for the current platform."""
+    return mode in stable_bridge_transports()
 
 
 # Default path to the compiled bridge executable
@@ -205,8 +215,8 @@ class BridgeProtocolError(Exception):
 @dataclass
 class BridgeConfig:
     """Configuration for the BHuman C++ bridge subprocess."""
-    bridge_executable: Path = _DEFAULT_BRIDGE_PATH
-    bhuman_root: Path = Path("C:/Users/Alegu/Sabana2026")
+    bridge_executable: Path = field(default_factory=resolve_bridge_executable)
+    bhuman_root: Path = field(default_factory=resolve_bhuman_root)
     scenario: str = "2D"
     location: str = "Default"
     team_number: int = 1
@@ -214,7 +224,7 @@ class BridgeConfig:
     num_players: int = 4
     startup_timeout: float = _STARTUP_TIMEOUT
     frame_timeout: float = _FRAME_TIMEOUT
-    preferred_transport: str = "pipe_process"
+    preferred_transport: str = field(default_factory=preferred_bridge_transport)
     allow_oneshot_fallback: bool = True
 
 
@@ -774,15 +784,15 @@ class BHumanBridge:
             "num_players": self._config.num_players,
         }, separators=(",", ":"))
 
-        bridge_dir = Path(__file__).parent
+        bridge_dir = _oneshot_runtime_dir()
         input_fd, input_path_str = tempfile.mkstemp(
-            prefix="rlbridge_oneshot_in_", suffix=".jsonl", dir=bridge_dir
+            prefix=f"{ONESHOT_ARTIFACT_PREFIX}in_", suffix=".jsonl", dir=bridge_dir
         )
         output_fd, output_path_str = tempfile.mkstemp(
-            prefix="rlbridge_oneshot_out_", suffix=".txt", dir=bridge_dir
+            prefix=f"{ONESHOT_ARTIFACT_PREFIX}out_", suffix=".txt", dir=bridge_dir
         )
         script_fd, script_path_str = tempfile.mkstemp(
-            prefix="rlbridge_oneshot_", suffix=".cmd", dir=bridge_dir
+            prefix=ONESHOT_ARTIFACT_PREFIX, suffix=".cmd", dir=bridge_dir
         )
         os.close(input_fd)
         os.close(output_fd)

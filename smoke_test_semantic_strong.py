@@ -32,7 +32,7 @@ import numpy as np
 
 os.environ["RL_EXECUTION_MODE"] = "bhuman_sidecar"
 
-from bridge.bridge_protocol import BridgeConfig
+from bridge.bridge_protocol import BridgeConfig, expected_transport_mode
 from bhuman_sidecar import VALID_SKILL_REQUESTS
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
@@ -150,8 +150,9 @@ def test_real_environment_semantics() -> None:
                 "sidecar_contract_validation_mode = False")
         _assert(info.get("takeover_simulator_active") is False,
                 "takeover_simulator_active = False")
-        _assert(info.get("bridge_debug_transport_mode") == "pipe_process",
-                f"bridge_debug_transport_mode = pipe_process (got {info.get('bridge_debug_transport_mode')})")
+        expected_transport = expected_transport_mode()
+        _assert(info.get("bridge_debug_transport_mode") == expected_transport,
+                f"bridge_debug_transport_mode = {expected_transport} (got {info.get('bridge_debug_transport_mode')})")
         _assert(info.get("bridge_debug_game_state") == "playing",
                 f"bridge_debug_game_state = playing (got {info.get('bridge_debug_game_state')})")
         _assert(info.get("bridge_debug_requested_state") == "playing",

@@ -41,6 +41,7 @@ from skrl.memories.torch import RandomMemory
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 from skrl.trainers.torch import SequentialTrainer
 
+from bridge.bridge_protocol import expected_transport_mode, is_stable_transport_mode
 from config import (
     FIELD, OBS, ACTION, GLOBAL_STATE,
     NETWORK, PPO_CFG, TRAINING, LOG, CURRICULUM,
@@ -140,7 +141,7 @@ class PolicyNetwork(GaussianMixin, Model):
     """
     Red del actor (policy). Salida: distribución Gaussiana sobre las acciones.
 
-    Input:  observación local del agente (61 floats)
+    Input:  observación local del agente (OBS.total floats)
     Output: media de la distribución (ACTION.size floats),
             log_std aprendido como parámetro.
     """
@@ -1188,7 +1189,8 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                 ep_goal_ceded  += int(sample.get("goal_conceded", False))
                 ep_bridge_us_sum += float(sample.get("bridge_decision_time_us", 0.0))
                 ep_contract_validation_steps += int(bool(sample.get("sidecar_contract_validation_mode", False)))
-                ep_non_pipe_steps += int(sample.get("bridge_debug_transport_mode") != "pipe_process")
+                transport_mode = sample.get("bridge_debug_transport_mode", "")
+                ep_non_pipe_steps += int(transport_mode != expected_transport_mode())
                 ep_not_playing_steps += int(sample.get("bridge_debug_game_state") != "playing")
                 ep_bridge_reconnect_max = max(
                     ep_bridge_reconnect_max,
@@ -1198,7 +1200,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                     sample.get("sidecar_backend") == "real"
                     and not bool(sample.get("sidecar_contract_validation_mode", False))
                     and not bool(sample.get("takeover_simulator_active", False))
-                    and sample.get("bridge_debug_transport_mode") == "pipe_process"
+                    and is_stable_transport_mode(transport_mode)
                     and sample.get("bridge_debug_game_state") == "playing"
                     and sample.get("bridge_debug_requested_state") == "playing"
                 )

@@ -28,6 +28,7 @@ Leyenda:
 from __future__ import annotations
 
 import math
+import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -760,8 +761,8 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    USE_POLICY = True
-    MODEL_PATH = r"C:\Users\Alegu\OneDrive\Desktop\ROBOTICA\ROBOCOP\RL\runs\quickdebug_stage0_fovTrue_1774495910\checkpoints\mappo_ep000075.pt"
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "").strip()
+    USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None
 

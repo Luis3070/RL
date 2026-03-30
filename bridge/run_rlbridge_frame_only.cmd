@@ -1,3 +1,16 @@
 @echo off
-"C:\Users\Alegu\Sabana2026\Build\Windows\RLBridge\Release\RLBridge.exe" < bridge\rlbridge_smoke_input_frame_only.jsonl > bridge\rlbridge_smoke_output_frame_only.txt 2>&1
+setlocal
+
+set "ROOT=%~dp0.."
+set "BRIDGE_EXE=%BHUMAN_BRIDGE_EXE%"
+
+if not defined BRIDGE_EXE if exist "%ROOT%\..\SabanaHerons2026\Build\Windows\RLBridge\Release\RLBridge.exe" set "BRIDGE_EXE=%ROOT%\..\SabanaHerons2026\Build\Windows\RLBridge\Release\RLBridge.exe"
+if not defined BRIDGE_EXE if exist "%ROOT%\bridge\bhuman_bridge.exe" set "BRIDGE_EXE=%ROOT%\bridge\bhuman_bridge.exe"
+
+if not defined BRIDGE_EXE (
+  echo RLBridge executable not found. Set BHUMAN_BRIDGE_EXE or build RLBridge. > "%ROOT%\bridge\rlbridge_smoke_output_frame_only.txt"
+  exit /b 1
+)
+
+"%BRIDGE_EXE%" < "%ROOT%\bridge\rlbridge_smoke_input_frame_only.jsonl" > "%ROOT%\bridge\rlbridge_smoke_output_frame_only.txt" 2>&1
 exit /b %ERRORLEVEL%

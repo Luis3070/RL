@@ -30,6 +30,7 @@ from bhuman_cfg_parser import (
     load_contract,
     get_home_poses,
 )
+from runtime_paths import resolve_cfg_root
 
 
 def _assert(condition: bool, msg: str) -> None:
@@ -433,14 +434,9 @@ def test_skill_behavior_control():
 def test_real_cfg_loading():
     """Test loading from real CFG files (H1/H3)."""
     print("\n[TEST] Real CFG loading")
-    import os
-    cfg_root = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..", "SabanaHerons2026-ScaledDimensions",
-        "SabanaHerons2026-ScaledDimensions", "Config"
-    )
-    if not os.path.isdir(cfg_root):
-        print("  SKIP: Real CFG root not found (run from project root)")
+    cfg_root = resolve_cfg_root()
+    if cfg_root is None:
+        print("  SKIP: Real CFG root not found")
         return
 
     configs = load_contract(cfg_root=cfg_root)
