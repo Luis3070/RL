@@ -83,6 +83,9 @@
 #include "Representations/Communication/GameControllerData.h"
 #include "Representations/MotionControl/MotionInfo.h"
 #include "Representations/MotionControl/OdometryData.h"
+#include "Representations/Infrastructure/SensorData/FsrSensorData.h"
+#include "Representations/Infrastructure/SensorData/InertialSensorData.h"
+#include "Representations/Infrastructure/SensorData/JointSensorData.h"
 #include "Representations/Sensing/FallDownState.h"
 #include "Representations/Sensing/GroundContactState.h"
 #include "Representations/Perception/ImagePreprocessing/CameraMatrix.h"
@@ -444,7 +447,9 @@ public:
     DebugSender<MessageQueue>& sender();
     void clearSnapshots();
     unsigned cognitionFrameFinishedCount() const;
+    unsigned motionFrameFinishedCount() const;
     bool waitForCognitionFrameFinished(unsigned previousCount, int timeoutMs);
+    bool waitForMotionFrameFinished(unsigned previousCount, int timeoutMs);
     DecisionSnapshot latestSnapshot() const;
     unsigned totalReceivedMessages() const;
     std::vector<std::string> recentReceivedMessages() const;
@@ -463,10 +468,12 @@ private:
     mutable std::mutex receiverMutex_;
     std::condition_variable receiverCv_;
     unsigned cognitionFrameFinishedCount_ = 0;
+    unsigned motionFrameFinishedCount_ = 0;
     DecisionSnapshot pendingSnapshot_;
     DecisionSnapshot latestSnapshot_;
     unsigned totalReceivedMessages_ = 0;
     std::deque<std::string> recentReceivedMessages_;
+    bool captureDecisionSnapshot_ = false;
 };
 
 RLBridgeConsole::RLBridgeConsole(const Settings& settings, const std::string& robotName, Debug* debug) :
@@ -483,16 +490,24 @@ void RLBridgeConsole::clearSnapshots()
 {
     std::lock_guard<std::mutex> lock(receiverMutex_);
     cognitionFrameFinishedCount_ = 0;
+    motionFrameFinishedCount_ = 0;
     pendingSnapshot_ = DecisionSnapshot();
     latestSnapshot_ = DecisionSnapshot();
     totalReceivedMessages_ = 0;
     recentReceivedMessages_.clear();
+    captureDecisionSnapshot_ = false;
 }
 
 unsigned RLBridgeConsole::cognitionFrameFinishedCount() const
 {
     std::lock_guard<std::mutex> lock(receiverMutex_);
     return cognitionFrameFinishedCount_;
+}
+
+unsigned RLBridgeConsole::motionFrameFinishedCount() const
+{
+    std::lock_guard<std::mutex> lock(receiverMutex_);
+    return motionFrameFinishedCount_;
 }
 
 bool RLBridgeConsole::waitForCognitionFrameFinished(unsigned previousCount, int timeoutMs)
@@ -502,6 +517,15 @@ bool RLBridgeConsole::waitForCognitionFrameFinished(unsigned previousCount, int 
         lock,
         std::chrono::milliseconds(timeoutMs),
         [&] { return cognitionFrameFinishedCount_ > previousCount; });
+}
+
+bool RLBridgeConsole::waitForMotionFrameFinished(unsigned previousCount, int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(receiverMutex_);
+    return receiverCv_.wait_for(
+        lock,
+        std::chrono::milliseconds(timeoutMs),
+        [&] { return motionFrameFinishedCount_ > previousCount; });
 }
 
 DecisionSnapshot RLBridgeConsole::latestSnapshot() const
@@ -581,56 +605,76 @@ bool RLBridgeConsole::handleMessage(MessageQueue::Message message)
         auto stream = message.bin();
         std::string threadName;
         stream >> threadName;
-        if(threadName == "Cognition")
         {
             std::lock_guard<std::mutex> lock(receiverMutex_);
-            pendingSnapshot_ = DecisionSnapshot();
+            if(threadName == "Cognition")
+            {
+                pendingSnapshot_ = DecisionSnapshot();
+                captureDecisionSnapshot_ = true;
+            }
+            else
+                captureDecisionSnapshot_ = false;
         }
         return true;
     }
     case idGameState:
         verboseBridgeLog("[bridge-console] deserialize GameState");
-        message.bin() >> pendingSnapshot_.gameState;
-        pendingSnapshot_.hasGameState = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.gameState;
+            pendingSnapshot_.hasGameState = true;
+        }
         return true;
     case idSkillRequest:
         verboseBridgeLog("[bridge-console] deserialize SkillRequest");
-        message.bin() >> pendingSnapshot_.skillRequest;
-        pendingSnapshot_.hasSkillRequest = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.skillRequest;
+            pendingSnapshot_.hasSkillRequest = true;
+        }
         return true;
     case idMotionRequest:
         verboseBridgeLog("[bridge-console] deserialize MotionRequest");
-        message.bin() >> pendingSnapshot_.motionRequest;
-        pendingSnapshot_.hasMotionRequest = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.motionRequest;
+            pendingSnapshot_.hasMotionRequest = true;
+        }
         return true;
     case idMotionInfo:
         verboseBridgeLog("[bridge-console] deserialize MotionInfo");
-        message.bin() >> pendingSnapshot_.motionInfo;
-        pendingSnapshot_.hasMotionInfo = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.motionInfo;
+            pendingSnapshot_.hasMotionInfo = true;
+        }
         return true;
     case idStrategyStatus:
         verboseBridgeLog("[bridge-console] deserialize StrategyStatus");
-        message.bin() >> pendingSnapshot_.strategyStatus;
-        pendingSnapshot_.hasStrategyStatus = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.strategyStatus;
+            pendingSnapshot_.hasStrategyStatus = true;
+        }
         return true;
     case idBehaviorStatus:
         verboseBridgeLog("[bridge-console] deserialize BehaviorStatus");
-        message.bin() >> pendingSnapshot_.behaviorStatus;
-        pendingSnapshot_.hasBehaviorStatus = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.behaviorStatus;
+            pendingSnapshot_.hasBehaviorStatus = true;
+        }
         return true;
     case idActivationGraph:
         verboseBridgeLog("[bridge-console] deserialize ActivationGraph");
-        message.bin() >> pendingSnapshot_.activationGraph;
-        pendingSnapshot_.hasActivationGraph = true;
+        if(captureDecisionSnapshot_)
+        {
+            message.bin() >> pendingSnapshot_.activationGraph;
+            pendingSnapshot_.hasActivationGraph = true;
+        }
         return true;
     case idLogResponse:
         verboseBridgeLog("[bridge-console] received LogResponse");
-        {
-            std::lock_guard<std::mutex> lock(receiverMutex_);
-            latestSnapshot_ = pendingSnapshot_;
-            latestSnapshot_.completedCognitionFrames = ++cognitionFrameFinishedCount_;
-        }
-        receiverCv_.notify_all();
         return true;
     case idFrameFinished:
     {
@@ -645,6 +689,15 @@ bool RLBridgeConsole::handleMessage(MessageQueue::Message message)
                 std::lock_guard<std::mutex> lock(receiverMutex_);
                 latestSnapshot_ = pendingSnapshot_;
                 latestSnapshot_.completedCognitionFrames = ++cognitionFrameFinishedCount_;
+                captureDecisionSnapshot_ = false;
+            }
+            receiverCv_.notify_all();
+        }
+        else if(threadName == "Motion")
+        {
+            {
+                std::lock_guard<std::mutex> lock(receiverMutex_);
+                ++motionFrameFinishedCount_;
             }
             receiverCv_.notify_all();
         }
@@ -774,6 +827,12 @@ public:
                 throw std::runtime_error("Cognition thread not found");
             std::cerr << "[bridge] init: cognition found" << std::endl;
 
+            motion_ = findMotionThread();
+            if(motion_)
+                std::cerr << "[bridge] init: motion found" << std::endl;
+            else
+                std::cerr << "[bridge] init: motion not found, motion evidence disabled" << std::endl;
+
             bridgeConsole_->clearSnapshots();
             sendDebugRequest("module:GameStateProvider:active");
             std::cerr << "[bridge] init: requested GameStateProvider active" << std::endl;
@@ -834,10 +893,9 @@ public:
         CameraMatrix cameraMatrix;
         cameraMatrix.isValid = false;
 
-        MotionInfo motionInfo;
-
         unsigned finalBridgeTimestamp = 0;
         bool frameCompleted = true;
+        bool motionCompleted = false;
         for(size_t stepIndex = 0; stepIndex < bootstrapStates.size(); ++stepIndex)
         {
             const unsigned bridgeTimestamp = advanceBridgeTime(baseInputTimestampMs + static_cast<int>(stepIndex * 33));
@@ -848,6 +906,22 @@ public:
 
             GameControllerData gameControllerData;
             buildGameControllerData(input, bridgeTimestamp, gameControllerData, bootstrapStates[stepIndex]);
+
+            // Feed Cognition with an operational motion state instead of the
+            // MotionInfo default (playDead). Leaving the default here keeps the
+            // behavior chain in a non-executable posture and prevents
+            // MotionRequest / kick evidence from surfacing downstream.
+            MotionInfo motionInfo;
+            motionInfo.executedPhase = MotionPhase::stand;
+            motionInfo.isMotionStable = true;
+            motionInfo.speed = Pose2f();
+            motionInfo.lastStandTimeStamp = bridgeTimestamp;
+            motionInfo.lastMotionPhaseStarted = bridgeTimestamp;
+
+            JointSensorData jointSensorData;
+            jointSensorData.timestamp = bridgeTimestamp;
+            FsrSensorData fsrSensorData;
+            InertialSensorData inertialSensorData;
 
             const unsigned previousFinishedCount = bridgeConsole_->cognitionFrameFinishedCount();
             auto& bridgeSender = bridgeConsole_->sender();
@@ -881,6 +955,29 @@ public:
                                  ", using snapshot fallback");
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
+
+            if(motion_)
+            {
+                const unsigned previousMotionFinishedCount = bridgeConsole_->motionFrameFinishedCount();
+                auto& motionSender = bridgeConsole_->sender();
+                motionSender.bin(idFrameBegin) << std::string("Motion");
+                motionSender.bin(idJointSensorData) << jointSensorData;
+                motionSender.bin(idFsrSensorData) << fsrSensorData;
+                motionSender.bin(idInertialSensorData) << inertialSensorData;
+                motionSender.bin(idGroundTruthOdometryData) << odometryData;
+                motionSender.bin(idFrameFinished) << std::string("Motion");
+                motionSender.send(true);
+                verboseBridgeLog("[bridge] processFrame: motion frame sent state=",
+                                 bootstrapStates[stepIndex]);
+
+                motionCompleted = bridgeConsole_->waitForMotionFrameFinished(previousMotionFinishedCount, 1000);
+                if(motionCompleted)
+                    verboseBridgeLog("[bridge] processFrame: motion frame finished state=",
+                                     bootstrapStates[stepIndex]);
+                else
+                    verboseBridgeLog("[bridge] processFrame: motion frame timeout state=",
+                                     bootstrapStates[stepIndex]);
+            }
         }
 
         if(requestedState == "ready" || requestedState == "set" || requestedState == "playing")
@@ -897,6 +994,7 @@ public:
             auto& obj = const_cast<JsonObject&>(result.asObject());
             obj["decision_time_us"] = JsonValue(static_cast<int>(duration.count()));
             obj["debug_frame_sync"] = JsonValue(frameCompleted ? "ack" : "timeout_fallback");
+            obj["debug_motion_sync"] = JsonValue(!motion_ ? "motion_unavailable" : (motionCompleted ? "ack" : "timeout_fallback"));
             obj["debug_bootstrap_steps"] = JsonValue(static_cast<int>(bootstrapStates.size()));
             obj["debug_requested_state"] = JsonValue(requestedState);
             obj["debug_final_bridge_time"] = JsonValue(static_cast<int>(finalBridgeTimestamp));
@@ -949,6 +1047,7 @@ public:
         }
         bridgeConsole_ = nullptr;
         cognition_ = nullptr;
+        motion_ = nullptr;
         initialized_ = false;
         if (timeInitialized_)
         {
@@ -974,6 +1073,7 @@ private:
     std::unique_ptr<RLBridgeRobot> robot_;
     RLBridgeConsole* bridgeConsole_ = nullptr;
     ModuleContainer* cognition_ = nullptr;
+    ModuleContainer* motion_ = nullptr;
     int teamNumber_ = 1;
     int playerNumber_ = 1;
     int numPlayers_ = 4;
@@ -1057,6 +1157,20 @@ private:
         {
             ModuleContainer* container = dynamic_cast<ModuleContainer*>(thread);
             if (container && thread->getName() == "Cognition")
+                return container;
+        }
+        return nullptr;
+    }
+
+    ModuleContainer* findMotionThread() const
+    {
+        if(!robot_)
+            return nullptr;
+
+        for(ThreadFrame* thread : *robot_)
+        {
+            ModuleContainer* container = dynamic_cast<ModuleContainer*>(thread);
+            if(container && thread->getName() == "Motion")
                 return container;
         }
         return nullptr;
@@ -1312,10 +1426,12 @@ private:
         result["debug_provider_game_state"] = JsonValue("debug_channel");
         result["debug_provider_skill_request"] = JsonValue("debug_channel");
         result["debug_provider_motion_request"] = JsonValue("debug_channel");
+        result["debug_provider_motion_info"] = JsonValue("debug_channel");
         result["debug_provider_activation_graph"] = JsonValue("debug_channel");
         result["debug_provider_behavior_status"] = JsonValue("debug_channel");
         result["debug_provider_strategy_status"] = JsonValue("debug_channel");
         result["debug_completed_cognition_frames"] = JsonValue(static_cast<int>(snapshot.completedCognitionFrames));
+        result["debug_completed_motion_frames"] = JsonValue(bridgeConsole_ ? static_cast<int>(bridgeConsole_->motionFrameFinishedCount()) : 0);
         result["debug_seen_messages_total"] = JsonValue(static_cast<int>(totalMessages));
         JsonArray recentMessageArray;
         for(const std::string& messageName : recentMessages)
@@ -1488,6 +1604,7 @@ private:
                 result["debug_provider_game_state"] = JsonValue("cognition_blackboard");
                 result["debug_provider_skill_request"] = JsonValue("cognition_blackboard");
                 result["debug_provider_motion_request"] = JsonValue("cognition_blackboard");
+                result["debug_provider_motion_info"] = JsonValue("cognition_blackboard");
                 result["debug_provider_activation_graph"] = JsonValue("cognition_blackboard");
                 result["debug_provider_behavior_status"] = JsonValue("cognition_blackboard");
                 result["debug_provider_strategy_status"] = JsonValue("cognition_blackboard");
@@ -1641,6 +1758,44 @@ private:
             }
 
             if(bridgeConsole_)
+                bridgeConsole_->setGlobals();
+        }
+
+        if(motion_)
+        {
+            try
+            {
+                motion_->setGlobals();
+                Blackboard& motionBb = Blackboard::getInstance();
+                if(motionBb.exists("MotionInfo"))
+                {
+                    const MotionInfo& mi = static_cast<const MotionInfo&>(motionBb["MotionInfo"]);
+                    result["debug_provider_motion_info"] = JsonValue("motion_blackboard");
+                    result["motion_executed_phase"] = JsonValue(enumNameOr(mi.executedPhase, "playDead"));
+
+                    JsonArray executedSpeed;
+                    executedSpeed.push_back(JsonValue(mi.speed.translation.x()));
+                    executedSpeed.push_back(JsonValue(mi.speed.translation.y()));
+                    executedSpeed.push_back(JsonValue(mi.speed.rotation));
+                    result["motion_executed_speed"] = JsonValue(executedSpeed);
+
+                    if(mi.lastKickType != KickInfo::numOfKickTypes)
+                        result["last_kick_type"] = JsonValue(enumNameOr(mi.lastKickType, "unavailable"));
+                    result["last_kick_timestamp_ms"] = JsonValue(static_cast<int>(mi.lastKickTimestamp));
+                }
+            }
+            catch(const std::exception& e)
+            {
+                result["debug_motion_blackboard_error"] = JsonValue(e.what());
+            }
+            catch(...)
+            {
+                result["debug_motion_blackboard_error"] = JsonValue("unknown");
+            }
+
+            if(cognition_)
+                cognition_->setGlobals();
+            else if(bridgeConsole_)
                 bridgeConsole_->setGlobals();
         }
 

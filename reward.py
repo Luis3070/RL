@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from config import FIELD, AGENT
+from config import FIELD, AGENT, CONTRACT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +77,7 @@ class RewardComponents:
     """Breakdown of reward for logging and diagnostics."""
     sparse:              float = 0.0   # ±10 per goal
     approach_ball:       float = 0.0   # delta approach to ball
+    handoff_alignment:   float = 0.0   # continuous shaping toward handoff envelope
     handoff_ready_bonus: float = 0.0   # bonus for being in handoff envelope
     takeover_success:    float = 0.0   # bonus for successful BHuman execution
     takeover_failure:    float = 0.0   # penalty for failed takeover
@@ -138,6 +139,62 @@ def _handoff_ready_reward(handoff_ready: bool) -> float:
     if handoff_ready:
         return 2.0
     return 0.0
+
+
+def _handoff_alignment_reward(agents: List[AgentRewardInfo],
+                              ball_pos: np.ndarray) -> float:
+    """
+    Continuous shaping toward the real handoff envelope.
+
+    Stage 0 is not just "get closer to the ball". The active agent must place
+    the ball in the forward/lateral window and face it correctly so the real
+    BHuman takeover can trigger. This reward uses the same geometry as the
+    handoff contract, but stays dense outside the exact envelope.
+    """
+    active = next((a for a in agents if a.is_active and a.is_upright), None)
+    if active is None:
+        upright = [a for a in agents if a.is_upright]
+        if not upright:
+            return 0.0
+        active = min(upright, key=lambda a: float(np.linalg.norm(a.pos - ball_pos)))
+
+    dx = float(ball_pos[0] - active.pos[0])
+    dy = float(ball_pos[1] - active.pos[1])
+
+    cos_t = math.cos(-active.theta)
+    sin_t = math.sin(-active.theta)
+    rel_x = dx * cos_t - dy * sin_t
+    rel_y = dx * sin_t + dy * cos_t
+
+    angle_to_ball = math.degrees(math.atan2(dy, dx) - active.theta)
+    while angle_to_ball > 180.0:
+        angle_to_ball -= 360.0
+    while angle_to_ball < -180.0:
+        angle_to_ball += 360.0
+    angle_abs = abs(angle_to_ball)
+
+    handoff = CONTRACT.handoff
+    x_low = float(handoff.ball_rel_x_min)
+    x_high = float(handoff.ball_rel_x_max)
+    x_span = max(1.0, x_high - x_low)
+
+    if rel_x < x_low:
+        x_score = max(0.0, 1.0 - (x_low - rel_x) / x_span)
+    elif rel_x > x_high:
+        x_score = max(0.0, 1.0 - (rel_x - x_high) / x_span)
+    else:
+        x_center = 0.5 * (x_low + x_high)
+        x_half = max(1.0, 0.5 * x_span)
+        x_score = max(0.0, 1.0 - abs(rel_x - x_center) / x_half)
+
+    y_limit = max(1.0, float(handoff.ball_rel_y_abs_max))
+    y_score = max(0.0, 1.0 - abs(rel_y) / y_limit)
+
+    angle_limit = max(1.0, float(handoff.angle_to_ball_abs_max))
+    angle_score = max(0.0, 1.0 - angle_abs / angle_limit)
+
+    combined = 0.40 * x_score + 0.35 * y_score + 0.25 * angle_score
+    return 0.6 * combined
 
 
 def _takeover_result_reward(takeover_success: Optional[bool],
@@ -301,6 +358,11 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             * approach_weight
         )
 
+        components.handoff_alignment = (
+            _handoff_alignment_reward(info.agents, info.ball_pos)
+            * max(approach_weight, takeover_weight)
+        )
+
         # Handoff ready bonus
         components.handoff_ready_bonus = (
             _handoff_ready_reward(info.handoff_ready)
@@ -339,6 +401,7 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
 
     shaped = (
         components.approach_ball
+        + components.handoff_alignment
         + components.handoff_ready_bonus
         + components.takeover_success
         + components.takeover_failure

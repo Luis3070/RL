@@ -367,11 +367,11 @@ CURRICULUM: List[CurriculumStageConfig] = [
         ball_max_dist=800.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=60.0,
-        ema_alpha=0.40,
+        ema_alpha=0.55,
         rollout_steps=1024,
         local_horizon=400.0,
-        shaping_approach_w=1.0,
-        shaping_takeover_w=0.5,
+        shaping_approach_w=0.8,
+        shaping_takeover_w=1.0,
     ),
 
     # ═══════════════════════════════════════════════════════════════════
@@ -645,7 +645,7 @@ CURRICULUM: List[CurriculumStageConfig] = [
 class NetworkConfig:
     hidden_sizes:       tuple = (256, 128)
     activation:         str   = "elu"
-    log_std_init:       float = 0.0
+    log_std_init:       float = -0.8
     log_std_min:        float = -4.0
     log_std_max:        float = 0.0
 
@@ -659,19 +659,19 @@ NETWORK = NetworkConfig()
 
 @dataclass
 class PPOConfig:
-    rollout_steps:    int   = 2048
+    rollout_steps:    int   = 1024
     update_epochs:    int   = 4
     mini_batches:     int   = 4
-    learning_rate:    float = 1e-4
+    learning_rate:    float = 2e-4
     gamma:            float = 0.99
     lambda_gae:       float = 0.95
     clip_ratio:       float = 0.20
     value_coeff:      float = 0.50
-    entropy_coeff:    float = 0.01
+    entropy_coeff:    float = 0.003
     max_grad_norm:    float = 0.50
     normalize_adv:    bool  = True
     kl_threshold:     float = 0.01
-    reward_scale:     float = 0.10
+    reward_scale:     float = 0.05
 
     @property
     def batch_size(self) -> int:

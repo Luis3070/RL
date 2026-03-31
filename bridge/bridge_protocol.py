@@ -49,7 +49,7 @@ Frame output format (C++ → Python):
 }
 
 Control messages:
-  {"type": "init", "scenario": "2D", "location": "Default",
+  {"type": "init", "scenario": "2D", "location": "4v4_Scaled",
    "team_number": 1, "player_number": 1, "num_players": 4}
   {"type": "reset"}
   {"type": "shutdown"}
@@ -218,7 +218,7 @@ class BridgeConfig:
     bridge_executable: Path = field(default_factory=resolve_bridge_executable)
     bhuman_root: Path = field(default_factory=resolve_bhuman_root)
     scenario: str = "2D"
-    location: str = "Default"
+    location: str = "4v4_Scaled"
     team_number: int = 1
     player_number: int = 1
     num_players: int = 4
