@@ -1,11 +1,20 @@
 # BHuman Persistent Bridge Plan
 
+Documento relacionado:
+
+- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
+  Entrada corta para el baseline actual, smokes canonicos y mapa minimo de lectura.
+
+- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
+  Este plan corresponde al baseline de la opcion 1. La guia relacionada explica como mantener esta ruta estable y como abrir mas adelante una opcion 2 sin romper el bridge persistente actual.
+
 ## Estado actual
 
 Implementación ya aplicada parcialmente en el proyecto:
 
 - `bridge_protocol.py` ya intenta `pipe_process` persistente por defecto también en Windows
 - `oneshot_file_fallback` quedó como fallback explícito, no como camino principal
+- el baseline actual ya viaja explícitamente como `bridge_mode = persistent_2d_cognition`
 - `smoke_test_rlbridge_persistent_basic.py` ya valida:
   - startup persistente
   - 3 frames consecutivos
@@ -327,7 +336,7 @@ train.py
 ### `init`
 
 ```json
-{"type":"init","scenario":"2D","location":"Default","team_number":1,"player_number":1,"num_players":4}
+{"type":"init","scenario":"2D","location":"4v4_Scaled","team_number":1,"player_number":1,"num_players":4,"bridge_mode":"persistent_2d_cognition"}
 ```
 
 ### `frame`
@@ -363,7 +372,7 @@ train.py
 ### `ready`
 
 ```json
-{"type":"ready","version":"1.0"}
+{"type":"ready","version":"1.0","bridge_mode":"persistent_2d_cognition","scenario":"2D","location":"4v4_Scaled"}
 ```
 
 ### `decision`
@@ -680,6 +689,7 @@ Validar:
 Durante la migración, deben existir logs/metadata suficientes para ver:
 
 - `debug_transport_mode`
+- `debug_bridge_mode`
 - `debug_reconnect_count`
 - `bridge_frame_id`
 - `decision_time_us`

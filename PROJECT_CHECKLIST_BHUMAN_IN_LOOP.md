@@ -1,5 +1,13 @@
 # Project Checklist: BHuman In Loop
 
+Documento relacionado:
+
+- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
+  Punto de entrada corto para smokes canonicos y documentacion minima.
+
+- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
+  Guia operativa para implementar primero la opcion 1 estable y abrir despues la opcion 2 como modo alterno.
+
 ## 1. Bridge and integration
 
 - [x] Real `RLBridge` executable resolved from `SabanaHerons2026`.
@@ -7,6 +15,7 @@
 - [x] Real backend selected inside `NaoSoccerEnv`.
 - [x] Transport stable in `pipe_process`.
 - [x] Bridge `location` aligned to `4v4_Scaled` instead of legacy `Default`.
+- [x] Bridge baseline made explicit as `bridge_mode = persistent_2d_cognition`.
 - [x] `contract_validation_rate = 0` in practical runs.
 - [x] `non_pipe_rate = 0` in practical runs.
 - [x] Bridge frame counter resets cleanly on `env.reset()`.

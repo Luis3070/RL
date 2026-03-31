@@ -762,7 +762,8 @@ public:
      * and starts all threads.
      */
     bool init(const std::string& scenario, const std::string& location,
-              int teamNumber, int playerNumber, int numPlayers)
+              int teamNumber, int playerNumber, int numPlayers,
+              const std::string& bridgeMode)
     {
         try
         {
@@ -790,6 +791,7 @@ public:
             teamNumber_ = teamNumber;
             playerNumber_ = playerNumber;
             numPlayers_ = numPlayers;
+            bridgeMode_ = bridgeMode.empty() ? "persistent_2d_cognition" : bridgeMode;
 
             // Create Settings for the specified scenario
             // The search path will include Config/Scenarios/{scenario}/ which
@@ -843,6 +845,8 @@ public:
             initialized_ = true;
 
             std::cerr << "[bridge] Robot initialized with scenario=" << scenario
+                      << " location=" << location
+                      << " bridge_mode=" << bridgeMode_
                       << " player=" << playerNumber << std::endl;
             return true;
         }
@@ -1077,6 +1081,7 @@ private:
     int teamNumber_ = 1;
     int playerNumber_ = 1;
     int numPlayers_ = 4;
+    std::string bridgeMode_ = "persistent_2d_cognition";
     int frameId_ = 0;
     int lastInputTimestampMs_ = -1;
     bool operationalWarmupDone_ = false;
@@ -1366,6 +1371,7 @@ private:
         result["type"] = JsonValue("decision");
         result["frame_id"] = JsonValue(frameId);
         result["player_number"] = JsonValue(playerNumber_);
+        result["debug_bridge_mode"] = JsonValue(bridgeMode_);
 
         // TODO: Implement proper cross-thread Blackboard reading.
         // For now, return placeholder values that indicate the bridge is active
@@ -1944,20 +1950,25 @@ int main(int argc, char* argv[])
         {
             std::string scenario = msg["scenario"].asString();
             std::string location = msg["location"].asString();
+            std::string bridgeMode = msg["bridge_mode"].asString();
             int teamNumber = msg["team_number"].asInt(1);
             int playerNumber = msg["player_number"].asInt(1);
             int numPlayers = msg["num_players"].asInt(4);
 
             if (scenario.empty()) scenario = "2D";
-            if (location.empty()) location = "Default";
+            if (location.empty()) location = "4v4_Scaled";
+            if (bridgeMode.empty()) bridgeMode = "persistent_2d_cognition";
 
-            bool ok = bridge.init(scenario, location, teamNumber, playerNumber, numPlayers);
+            bool ok = bridge.init(scenario, location, teamNumber, playerNumber, numPlayers, bridgeMode);
 
             JsonObject response;
             if (ok)
             {
                 response["type"] = JsonValue("ready");
                 response["version"] = JsonValue("1.0");
+                response["bridge_mode"] = JsonValue(bridgeMode);
+                response["scenario"] = JsonValue(scenario);
+                response["location"] = JsonValue(location);
             }
             else
             {

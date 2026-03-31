@@ -50,7 +50,8 @@ Frame output format (C++ → Python):
 
 Control messages:
   {"type": "init", "scenario": "2D", "location": "4v4_Scaled",
-   "team_number": 1, "player_number": 1, "num_players": 4}
+   "team_number": 1, "player_number": 1, "num_players": 4,
+   "bridge_mode": "persistent_2d_cognition"}
   {"type": "reset"}
   {"type": "shutdown"}
 
@@ -77,6 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from runtime_paths import (
+    preferred_bridge_mode,
     preferred_bridge_transport,
     resolve_bhuman_root,
     resolve_bridge_executable,
@@ -222,6 +224,7 @@ class BridgeConfig:
     team_number: int = 1
     player_number: int = 1
     num_players: int = 4
+    bridge_mode: str = field(default_factory=preferred_bridge_mode)
     startup_timeout: float = _STARTUP_TIMEOUT
     frame_timeout: float = _FRAME_TIMEOUT
     preferred_transport: str = field(default_factory=preferred_bridge_transport)
@@ -352,6 +355,7 @@ class BHumanBridge:
             "team_number": self._config.team_number,
             "player_number": self._config.player_number,
             "num_players": self._config.num_players,
+            "bridge_mode": self._config.bridge_mode,
         }
         self._send(init_msg)
 
@@ -394,7 +398,11 @@ class BHumanBridge:
         self._frame_counter = 0
         self._started = True
         self._transport_mode = "pipe_process"
-        logger.info("BHuman bridge ready (version=%s)", response.get("version"))
+        logger.info(
+            "BHuman bridge ready (version=%s, bridge_mode=%s)",
+            response.get("version"),
+            response.get("bridge_mode", self._config.bridge_mode),
+        )
 
     def step(
         self,
@@ -505,6 +513,7 @@ class BHumanBridge:
         response.setdefault("debug_transport_mode", "pipe_process")
         response.setdefault("debug_transport_reconnect_count", self._reconnect_count)
         response.setdefault("debug_last_reset_ms", self._last_reset_ms)
+        response.setdefault("debug_bridge_mode", self._config.bridge_mode)
         return response
 
     def reset(self) -> None:
@@ -782,6 +791,7 @@ class BHumanBridge:
             "team_number": self._config.team_number,
             "player_number": self._config.player_number,
             "num_players": self._config.num_players,
+            "bridge_mode": self._config.bridge_mode,
         }, separators=(",", ":"))
 
         bridge_dir = _oneshot_runtime_dir()
@@ -883,6 +893,7 @@ class BHumanBridge:
             decision_response.setdefault("debug_transport_process_returncode", completed.returncode)
             decision_response.setdefault("debug_transport_reconnect_count", self._reconnect_count)
             decision_response.setdefault("debug_last_reset_ms", self._last_reset_ms)
+            decision_response.setdefault("debug_bridge_mode", self._config.bridge_mode)
             return decision_response
         finally:
             for path in (input_path, output_path, script_path):

@@ -3,6 +3,11 @@
 > Fecha: 25 de marzo de 2026  
 > Scope: `bridge/bhuman_bridge.cpp`, build/integration con `C:/Users/Alegu/Sabana2026`, smoke tests manuales de `RLBridge.exe`
 
+Documento relacionado:
+
+- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
+  Usa esta guia para distinguir que cambios pertenecen al baseline estable de la opcion 1 y cuales deben reservarse para una futura opcion 2.
+
 ---
 
 ## 1. Problema recurrente observado

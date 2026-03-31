@@ -1691,6 +1691,7 @@ class NaoSoccerEnv(ParallelEnv):
             base_info["sidecar_pass_target_player_number"] = sidecar_output.pass_target_player_number
             base_info["sidecar_pass_origin_player_number"] = sidecar_output.pass_origin_player_number
             base_info["sidecar_backend"] = sidecar_output.backend
+            base_info["sidecar_bridge_mode"] = sidecar_output.bridge_mode
             base_info["sidecar_contract_validation_mode"] = sidecar_output.contract_validation_mode
             base_info["takeover_simulator_active"] = (self._takeover_sim is not None)
             base_info["bridge_frame_id"] = sidecar_output.bridge_frame_id

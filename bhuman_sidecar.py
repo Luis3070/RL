@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from bhuman_cfg_parser import AllConfigs, get_home_poses
+from runtime_paths import preferred_bridge_mode
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +190,7 @@ class SidecarOutput:
     contract_validation_mode: bool = False
 
     # Bridge provenance/debug metadata (only populated by real backend)
+    bridge_mode: str = "persistent_2d_cognition"
     bridge_frame_id: int = -1
     bridge_player_number: int = -1
     bridge_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -249,6 +251,7 @@ class RealSidecarBackend:
         self._contract = contract
         self._bridge_cls = BHumanBridge
         self._bridge_config_cls = BridgeConfig
+        self._bridge_mode = preferred_bridge_mode()
         self._bridges: Dict[int, Any] = {}
         self._player_count = 0
         self._frame_counter = 0
@@ -370,6 +373,7 @@ class RealSidecarBackend:
                 config = self._bridge_config_cls(
                     player_number=player_number,
                     num_players=player_count,
+                    bridge_mode=self._bridge_mode,
                 )
                 bridge = self._bridge_cls(config)
                 bridge.start()
@@ -526,6 +530,7 @@ class RealSidecarBackend:
             activation_graph=activation_graph,
             backend="real",
             contract_validation_mode=False,
+            bridge_mode=result.get("debug_bridge_mode", self._bridge_mode),
             bridge_frame_id=result.get("frame_id", -1),
             bridge_player_number=result.get("player_number", -1),
             bridge_metadata=bridge_metadata,
@@ -931,6 +936,7 @@ class PythonContractStub:
                 ],
                 backend=backend_label,
                 contract_validation_mode=(backend_label == "contract_validation"),
+                bridge_mode="persistent_2d_cognition",
                 decision_time_ms=(time.perf_counter() - t0) * 1000,
             )
 
@@ -985,6 +991,7 @@ class PythonContractStub:
             activation_graph=activation_graph,
             backend=backend_label,
             contract_validation_mode=(backend_label == "contract_validation"),
+            bridge_mode="persistent_2d_cognition",
             decision_time_ms=dt_ms,
         )
 

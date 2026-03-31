@@ -72,6 +72,12 @@ def main() -> None:
         _assert(info.get("sidecar_backend") == "real",
                 f"sidecar_backend = real on trial {trial_idx + 1} "
                 f"(got {info.get('sidecar_backend')})")
+        _assert(info.get("sidecar_bridge_mode") == "persistent_2d_cognition",
+                f"sidecar_bridge_mode = persistent_2d_cognition on trial {trial_idx + 1} "
+                f"(got {info.get('sidecar_bridge_mode')})")
+        _assert(info.get("bridge_debug_bridge_mode") == "persistent_2d_cognition",
+                f"bridge_debug_bridge_mode = persistent_2d_cognition on trial {trial_idx + 1} "
+                f"(got {info.get('bridge_debug_bridge_mode')})")
         _assert(info.get("sidecar_current_tactic") == normalize_tactic_name(
                     info.get("sidecar_current_tactic")
                 ),

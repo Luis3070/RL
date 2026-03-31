@@ -8,6 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 
 _VALID_TRANSPORTS = {"pipe_process", "oneshot_file_fallback"}
+_VALID_BRIDGE_MODES = {"persistent_2d_cognition", "embedded_2d_motion"}
 
 
 @lru_cache(maxsize=1)
@@ -34,6 +35,13 @@ def _setting(name: str) -> str:
     if env_value:
         return env_value
     return _repo_dotenv().get(name, "").strip()
+
+
+def preferred_bridge_mode() -> str:
+    requested = _setting("BHUMAN_BRIDGE_MODE")
+    if requested in _VALID_BRIDGE_MODES:
+        return requested
+    return "persistent_2d_cognition"
 
 
 def _resolve_path(value: str) -> Path:

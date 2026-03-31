@@ -4,6 +4,11 @@
 > Objetivo: definir una ruta concreta para integrar BHuman in loop mediante un sidecar de decision, respetando el contrato documental del proyecto RL y evitando una reimplementacion local de las decisiones `shoot/pass/dribble/duel`.
 > Scope: integracion offline/experimental para entrenamiento, shadow mode y smoke tests de integracion. No es una guia para despliegue final de competicion.
 
+Documento relacionado:
+
+- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
+  Define la secuencia recomendada: consolidar primero la opcion 1 entrenable y abrir la opcion 2 despues como modo alterno cuando exista mejor CPU.
+
 ---
 
 ## 1. Veredicto Ejecutivo

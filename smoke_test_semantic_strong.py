@@ -146,6 +146,9 @@ def test_real_environment_semantics() -> None:
         _assert(info.get("sidecar_active") is True, "sidecar_active = True")
         _assert(info.get("sidecar_backend") == "real",
                 f"sidecar_backend = real (got {info.get('sidecar_backend')})")
+        _assert(info.get("sidecar_bridge_mode") == "persistent_2d_cognition",
+                f"sidecar_bridge_mode = persistent_2d_cognition "
+                f"(got {info.get('sidecar_bridge_mode')})")
         _assert(info.get("sidecar_contract_validation_mode") is False,
                 "sidecar_contract_validation_mode = False")
         _assert(info.get("takeover_simulator_active") is False,
@@ -153,6 +156,9 @@ def test_real_environment_semantics() -> None:
         expected_transport = expected_transport_mode()
         _assert(info.get("bridge_debug_transport_mode") == expected_transport,
                 f"bridge_debug_transport_mode = {expected_transport} (got {info.get('bridge_debug_transport_mode')})")
+        _assert(info.get("bridge_debug_bridge_mode") == "persistent_2d_cognition",
+                f"bridge_debug_bridge_mode = persistent_2d_cognition "
+                f"(got {info.get('bridge_debug_bridge_mode')})")
         _assert(info.get("bridge_debug_game_state") == "playing",
                 f"bridge_debug_game_state = playing (got {info.get('bridge_debug_game_state')})")
         _assert(info.get("bridge_debug_requested_state") == "playing",

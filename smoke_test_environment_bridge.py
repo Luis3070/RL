@@ -103,11 +103,14 @@ def _install_known_good_bridge_fixture(env: NaoSoccerEnv) -> None:
 
 def _check_common_bridge_info(info: dict) -> None:
     expected_transport = expected_transport_mode()
+    expected_bridge_mode = "persistent_2d_cognition"
     _assert(info.get("execution_mode") == "bhuman_sidecar",
             f"execution_mode = bhuman_sidecar (got {info.get('execution_mode')})")
     _assert(info.get("sidecar_active") is True, "sidecar_active = True")
     _assert(info.get("sidecar_backend") == "real",
             f"sidecar_backend = real (got {info.get('sidecar_backend')})")
+    _assert(info.get("sidecar_bridge_mode") == expected_bridge_mode,
+            f"sidecar_bridge_mode = {expected_bridge_mode} (got {info.get('sidecar_bridge_mode')})")
     _assert(info.get("sidecar_contract_validation_mode") is False,
             "sidecar_contract_validation_mode = False")
     _assert(info.get("takeover_simulator_active") is False,
@@ -124,6 +127,8 @@ def _check_common_bridge_info(info: dict) -> None:
             f"bridge_debug_frame_sync = ack (got {info.get('bridge_debug_frame_sync')})")
     _assert(info.get("bridge_debug_transport_mode") == expected_transport,
             f"bridge_debug_transport_mode = {expected_transport} (got {info.get('bridge_debug_transport_mode')})")
+    _assert(info.get("bridge_debug_bridge_mode") == expected_bridge_mode,
+            f"bridge_debug_bridge_mode = {expected_bridge_mode} (got {info.get('bridge_debug_bridge_mode')})")
     _assert(info.get("bridge_debug_seen_messages_total", 0) >= 1,
             f"bridge_debug_seen_messages_total >= 1 (got {info.get('bridge_debug_seen_messages_total')})")
 

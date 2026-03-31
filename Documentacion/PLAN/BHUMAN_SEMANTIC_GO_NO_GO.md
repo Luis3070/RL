@@ -1,5 +1,10 @@
 # BHuman Semantic Validation and GO / NO-GO
 
+Documento relacionado:
+
+- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
+  Entrada corta para correr la suite canonica antes de leer esta guia detallada.
+
 ## Objetivo
 Definir una compuerta clara antes de lanzar entrenamiento largo con `BHuman in loop`.
 
@@ -16,9 +21,10 @@ Esta guía no valida percepción física real ni robot NAO real. Valida:
 Ejecutar primero:
 
 ```powershell
-python smoke_test_environment_bridge.py
-python smoke_test_semantic_strong.py
+J:/CONDA/envs/RLRobocup/python.exe j:/ROBOTICA/RL/smoke_suite_option1.py --suite gating
 ```
+
+Si hace falta depurar una capa puntual, entonces si correr los archivos individuales.
 
 ## Qué valida `smoke_test_semantic_strong.py`
 ### Capa 1: fixtures deterministas

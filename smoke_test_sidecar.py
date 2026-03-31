@@ -468,12 +468,16 @@ def test_env_step_with_sidecar():
 
     # New fields: backend provenance and takeover simulator status
     _assert("sidecar_backend" in sample_info, "sidecar_backend in info")
+    _assert("sidecar_bridge_mode" in sample_info, "sidecar_bridge_mode in info")
     _assert("sidecar_contract_validation_mode" in sample_info,
             "sidecar_contract_validation_mode in info")
     _assert("takeover_simulator_active" in sample_info,
             "takeover_simulator_active in info")
     _assert(sample_info["takeover_simulator_active"] is False,
             "takeover_simulator_active is False in sidecar mode")
+    _assert(sample_info["sidecar_bridge_mode"] == "persistent_2d_cognition",
+            f"sidecar_bridge_mode = persistent_2d_cognition "
+            f"(got {sample_info['sidecar_bridge_mode']})")
 
     # skill_request must never be "duel"
     _assert(sample_info["sidecar_skill_request"] != "duel",
@@ -492,6 +496,7 @@ def test_env_step_with_sidecar():
     print(f"  INFO: macro_type={sample_info['macro_type']}")
     print(f"  INFO: sidecar_skill_request={sample_info['sidecar_skill_request']}")
     print(f"  INFO: sidecar_backend={sample_info['sidecar_backend']}")
+    print(f"  INFO: sidecar_bridge_mode={sample_info['sidecar_bridge_mode']}")
     print(f"  INFO: active_agent_id={sample_info['active_agent_id']}")
 
 
