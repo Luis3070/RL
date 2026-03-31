@@ -24,13 +24,26 @@ class DemoSnapshot:
 
     # Fix #5: Campos para reproducibilidad exacta
     reset_seed: Optional[int] = None
+    world_snapshot: Optional[Dict[str, Any]] = None
     initial_agent_pos: Optional[np.ndarray] = None
     initial_ball_pos: Optional[np.ndarray] = None
 
-    # BC metadata: intención del episodio y estado de la fase de kick
-    intent: str = "dribble"                      # "dribble" | "shoot" | "pass"
+    # BC metadata: intención honesta del episodio.
+    # Stage 0-1 no deben venderse como "pass/shoot" si solo enseñan postura.
+    intent: str = "control"                      # "control" | "dribble" | "pass_setup" | "shoot_setup"
     kick_phase_active: bool = False              # True cuando la fase kick está activa
     kick_target: Optional[np.ndarray] = None    # posición absoluta del target de kick/pase
+    approach_target: Optional[np.ndarray] = None  # target geométrico para perfilar postura sin vender kick
+
+    # Proveniencia y señales reales del baseline Option 1
+    handoff_ready: bool = False
+    takeover_active: bool = False
+    episode_handoff_achieved: bool = False
+    episode_takeover_count: int = 0
+    episode_takeover_success: int = 0
+    sidecar_backend: str = "unknown"
+    sidecar_bridge_mode: str = ""
+    sidecar_contract_validation_mode: bool = False
 
     @classmethod
     def from_transition(cls, **kwargs) -> "DemoSnapshot":

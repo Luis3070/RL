@@ -155,13 +155,13 @@ def apply_primitive(primitive: Primitive,
 
     to_ball = ball_pos - agent_pos
     d_ball = float(np.linalg.norm(to_ball))
-    touched_ball = d_ball <= AGENT.ball_dribble_range
+    touched_ball = d_ball <= getattr(AGENT, "ball_dribble_range", 340.0)
     recontact_inc = 1 if touched_ball else 0
     goal_scored = False
     own_goal = False
 
     if primitive.name == "align_then_kick":
-        if d_ball > AGENT.ball_kick_range:
+        if d_ball > getattr(AGENT, "ball_kick_range", 400.0):
             # FIX-C: behind_ball_point hardcodea el arco. Hacemos uno manual para target_pos
             tb_dir = ball_pos - target_pos
             tbn = float(np.linalg.norm(tb_dir)) + 1e-6

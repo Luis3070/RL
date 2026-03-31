@@ -62,6 +62,7 @@ class TeamRewardInfo:
     ball_out_of_bounds: bool = False
     # BHuman contract fields
     handoff_ready:     bool = False
+    prev_handoff_ready: bool = False
     takeover_active:   bool = False
     takeover_success:  Optional[bool] = None   # None = no event, True/False = result
     takeover_kick:     bool = False
@@ -78,7 +79,8 @@ class RewardComponents:
     sparse:              float = 0.0   # ±10 per goal
     approach_ball:       float = 0.0   # delta approach to ball
     handoff_alignment:   float = 0.0   # continuous shaping toward handoff envelope
-    handoff_ready_bonus: float = 0.0   # bonus for being in handoff envelope
+    handoff_ready_bonus: float = 0.0   # entry / short sustain bonus for handoff envelope
+    handoff_break_penalty: float = 0.0 # penalty for dropping a clean handoff pose
     takeover_success:    float = 0.0   # bonus for successful BHuman execution
     takeover_failure:    float = 0.0   # penalty for failed takeover
     support_spacing:     float = 0.0   # cooperative spacing quality
@@ -129,15 +131,39 @@ def _approach_ball_reward(agents: List[AgentRewardInfo],
     return raw
 
 
-def _handoff_ready_reward(handoff_ready: bool) -> float:
+def _handoff_ready_reward(handoff_ready: bool,
+                          prev_handoff_ready: bool,
+                          takeover_active: bool) -> float:
     """
-    Bonus for being in the handoff envelope.
+    Reward for entering and briefly holding the handoff envelope.
 
-    This is the central shaped reward: RL should learn to position
-    itself so that BHuman can take over cleanly.
+    A persistent per-frame bonus made stage 0 learn an unhealthy strategy:
+    sit in the envelope, slip out, and re-enter for shaped reward. We keep
+    a clear entry incentive, but make sustain much smaller so the agent is
+    pushed toward stable conversion rather than camping.
     """
+    if takeover_active:
+        return 0.0
+    if handoff_ready and not prev_handoff_ready:
+        return 0.9
     if handoff_ready:
-        return 2.0
+        return 0.08
+    return 0.0
+
+
+def _handoff_break_penalty(prev_handoff_ready: bool,
+                           handoff_ready: bool,
+                           takeover_active: bool) -> float:
+    """
+    Penalize dropping the envelope before BHuman conversion starts.
+
+    This directly discourages the phase-0 exploit where the agent learns to
+    touch handoff, back off, and re-enter repeatedly.
+    """
+    if takeover_active:
+        return 0.0
+    if prev_handoff_ready and not handoff_ready:
+        return -0.35
     return 0.0
 
 
@@ -365,7 +391,19 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
 
         # Handoff ready bonus
         components.handoff_ready_bonus = (
-            _handoff_ready_reward(info.handoff_ready)
+            _handoff_ready_reward(
+                info.handoff_ready,
+                info.prev_handoff_ready,
+                info.takeover_active,
+            )
+            * takeover_weight
+        )
+        components.handoff_break_penalty = (
+            _handoff_break_penalty(
+                info.prev_handoff_ready,
+                info.handoff_ready,
+                info.takeover_active,
+            )
             * takeover_weight
         )
 
@@ -403,6 +441,7 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
         components.approach_ball
         + components.handoff_alignment
         + components.handoff_ready_bonus
+        + components.handoff_break_penalty
         + components.takeover_success
         + components.takeover_failure
         + components.support_spacing

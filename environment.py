@@ -1012,6 +1012,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_count = 0
         self._episode_takeover_success = 0
         self._episode_handoff_achieved = False  # True if handoff_ready was ever True
+        self._prev_handoff_ready = False
 
         self.agents: List[str] = []
 
@@ -1069,6 +1070,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_count = 0
         self._episode_takeover_success = 0
         self._episode_handoff_achieved = False
+        self._prev_handoff_ready = False
 
         observations = self._build_observations()
         infos = {aid: {} for aid in self.agents}
@@ -1309,6 +1311,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._prev_omegas = {aid: self._agents_state[aid].omega for aid in self.agents}
         self._curr_targets = current_targets.copy()
         self._prev_targets = current_targets.copy()
+        self._prev_handoff_ready = self._handoff_mgr.macro.handoff_ready
 
         # ═══════════════════════════════════════════════════════════════
         # 10. EPISODE TERMINATION
@@ -1448,21 +1451,30 @@ class NaoSoccerEnv(ParallelEnv):
         if self._stage.theta_free:
             target_theta = float(action[2]) * ACTION.theta_range
         else:
-            # Face-ball with EMA
+            # Face-ball with hysteresis. Once the robot is in a valid handoff
+            # pose, keep the heading stable instead of chasing tiny ball-angle
+            # fluctuations frame to frame.
             bdx = self._ball.pos[0] - agent.pos[0]
             bdy = self._ball.pos[1] - agent.pos[1]
             dist_to_ball = math.hypot(bdx, bdy)
+            raw_theta = math.atan2(bdy, bdx)
+            prev_face = self._prev_face_thetas.get(agent_id, agent.theta)
+            diff = math.atan2(math.sin(raw_theta - prev_face), math.cos(raw_theta - prev_face))
+            in_handoff_pose = self._handoff_mgr.compute_handoff_ready(agent, self._ball, self._game)
+            angle_deadband = math.radians(6.0)
 
-            if dist_to_ball < AGENT.ball_interaction_range * 0.7:
-                target_theta = self._prev_face_thetas.get(agent_id, agent.theta)
+            if (
+                dist_to_ball < AGENT.ball_interaction_range * 0.7
+                or in_handoff_pose
+                or abs(diff) < angle_deadband
+            ):
+                target_theta = prev_face
             else:
-                raw_theta = math.atan2(bdy, bdx)
-                face_alpha = 0.30
-                prev_face = self._prev_face_thetas.get(agent_id, raw_theta)
-                diff = math.atan2(math.sin(raw_theta - prev_face), math.cos(raw_theta - prev_face))
+                face_alpha = 0.18
                 target_theta = _normalize_angle(prev_face + face_alpha * diff)
-                if agent_id:
-                    self._prev_face_thetas[agent_id] = target_theta
+
+            if agent_id:
+                self._prev_face_thetas[agent_id] = target_theta
 
         return target_pos, target_theta
 
@@ -1591,6 +1603,7 @@ class NaoSoccerEnv(ParallelEnv):
             ball_out_of_bounds=self._ball_out_this_step,
             # BHuman contract fields
             handoff_ready=macro.handoff_ready,
+            prev_handoff_ready=self._prev_handoff_ready,
             takeover_active=macro.takeover_active,
             takeover_success=macro.macro_success if macro.macro_end_reason != "none" else None,
             takeover_kick=takeover_kick,

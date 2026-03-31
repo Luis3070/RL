@@ -1,18 +1,28 @@
 """
-generate_dataset.py — Genera datasets de demostraciones BC-ready por stage.
+generate_dataset.py - Stage-aware BC dataset generation for trajectory_guidance.
 
-Cambios respecto a la versión anterior:
-  FIX-A: Usa replay_closed_loop en lugar de replay_plan.
-  FIX-B: Reestructurado con `ProcessPoolExecutor` para procesar N episodios en paralelo
-         y reducir drásticamente el tiempo de recolección frente al alto coste
-         computacional del planificador A* per-step.
+This generator keeps the trajectory dataset aligned with the project-wide
+BHuman-in-loop Option 1 baseline:
+  - real backend
+  - persistent_2d_cognition bridge mode
+  - 2D / 4v4_Scaled environment
+  - honest labels for stages 0-3
+
+Stage intent policy:
+  - Stage 0: control only
+  - Stage 1: dribble only
+  - Stage 2-3: dribble + pass_setup + shoot_setup
 """
 from __future__ import annotations
-from pathlib import Path
-import sys
-import numpy as np
+
 import concurrent.futures
 import math
+import multiprocessing
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
 
 if __package__ in (None, ""):
     script_dir = Path(__file__).resolve().parent
@@ -22,31 +32,223 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(workspace_root))
     sys.path.insert(1, str(project_dir))
 
-from trajectory_guidance.settings import (
-    ASTAR_CFG, GUMBEL_CFG, DATASET_CFG,
-)
+from config import FIELD as _FIELD
 from trajectory_guidance.dataset import export_snapshots_pkl
+from trajectory_guidance.settings import ASTAR_CFG, DATASET_CFG, GUMBEL_CFG
 
-# ── WORKER GLOBALS (Must be picklable for ProcessPool) ──────────────────
-def generate_single_trajectory(args):
-    """Generatriz aislada instanciando entorno por Worker para ThreadSafety."""
-    ep, ep_type, stage, lookahead, current_seed, target, kick_angle, kick_dist, dribble_bias = args
-    
+
+Task = Tuple[
+    int,
+    str,
+    int,
+    int,
+    int,
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[float],
+    Optional[float],
+    float,
+]
+
+
+def _field_bounds() -> Tuple[float, float, float, float]:
+    return (
+        float(_FIELD.x_own_ground),
+        float(_FIELD.x_opponent_ground),
+        float(_FIELD.y_right_sideline),
+        float(_FIELD.y_left_sideline),
+    )
+
+
+def _clamp_point(x: float, y: float,
+                 margin_x: float = 180.0,
+                 margin_y: float = 160.0) -> np.ndarray:
+    x_min, x_max, y_min, y_max = _field_bounds()
+    return np.array([
+        float(np.clip(x, x_min + margin_x, x_max - margin_x)),
+        float(np.clip(y, y_min + margin_y, y_max - margin_y)),
+    ], dtype=np.float32)
+
+
+PASS_TARGETS = [
+    np.array([1500.0,  1800.0], dtype=np.float32),
+    np.array([1500.0, -1800.0], dtype=np.float32),
+    np.array([2500.0,  1200.0], dtype=np.float32),
+    np.array([2500.0, -1200.0], dtype=np.float32),
+    np.array([3000.0,  1800.0], dtype=np.float32),
+    np.array([3000.0, -1800.0], dtype=np.float32),
+    np.array([1000.0,  2000.0], dtype=np.float32),
+    np.array([1000.0, -2000.0], dtype=np.float32),
+]
+
+
+def _goal_targets() -> List[np.ndarray]:
+    return [
+        _clamp_point(_FIELD.x_opponent_ground, 0.0, margin_x=0.0, margin_y=0.0),
+        _clamp_point(_FIELD.x_opponent_ground, _FIELD.y_left_goal * 0.70,
+                     margin_x=0.0, margin_y=0.0),
+        _clamp_point(_FIELD.x_opponent_ground, _FIELD.y_right_goal * 0.70,
+                     margin_x=0.0, margin_y=0.0),
+        _clamp_point(_FIELD.x_opponent_ground, _FIELD.y_left_goal * 0.40,
+                     margin_x=0.0, margin_y=0.0),
+        _clamp_point(_FIELD.x_opponent_ground, _FIELD.y_right_goal * 0.40,
+                     margin_x=0.0, margin_y=0.0),
+    ]
+
+
+def _pass_targets() -> List[np.ndarray]:
+    return PASS_TARGETS
+
+
+def _approach_targets(stage: int) -> List[np.ndarray]:
+    x_span = float(_FIELD.x_opponent_ground - _FIELD.x_own_ground)
+    if stage == 0:
+        return [
+            _clamp_point(_FIELD.x_own_ground + 0.40 * x_span, 0.0),
+            _clamp_point(_FIELD.x_own_ground + 0.42 * x_span, 0.16 * _FIELD.y_left_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.42 * x_span, 0.16 * _FIELD.y_right_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.48 * x_span, 0.28 * _FIELD.y_left_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.48 * x_span, 0.28 * _FIELD.y_right_sideline),
+        ]
+    if stage == 1:
+        return [
+            _clamp_point(_FIELD.x_own_ground + 0.52 * x_span, 0.0),
+            _clamp_point(_FIELD.x_own_ground + 0.55 * x_span, 0.22 * _FIELD.y_left_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.55 * x_span, 0.22 * _FIELD.y_right_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.60 * x_span, 0.36 * _FIELD.y_left_sideline),
+            _clamp_point(_FIELD.x_own_ground + 0.60 * x_span, 0.36 * _FIELD.y_right_sideline),
+        ]
+    return [
+        _clamp_point(_FIELD.x_own_ground + 0.68 * x_span, 0.0),
+        _clamp_point(_FIELD.x_own_ground + 0.70 * x_span, 0.20 * _FIELD.y_left_sideline),
+        _clamp_point(_FIELD.x_own_ground + 0.70 * x_span, 0.20 * _FIELD.y_right_sideline),
+        _clamp_point(_FIELD.x_own_ground + 0.74 * x_span, 0.34 * _FIELD.y_left_sideline),
+        _clamp_point(_FIELD.x_own_ground + 0.74 * x_span, 0.34 * _FIELD.y_right_sideline),
+    ]
+
+
+def _biases_for_stage(stage: int) -> List[float]:
+    if stage >= 2:
+        return [
+            0.0,
+            math.pi / 8,
+            -math.pi / 8,
+            math.pi / 6,
+            -math.pi / 6,
+            math.pi / 4,
+            -math.pi / 4,
+        ]
+    return [
+        0.0,
+        math.pi / 10,
+        -math.pi / 10,
+        math.pi / 6,
+        -math.pi / 6,
+        math.pi / 5,
+        -math.pi / 5,
+    ]
+
+
+def _resolve_family_counts(stage: int,
+                           primary_episodes: int,
+                           shoot_episodes: int,
+                           pass_episodes: int) -> Dict[str, int]:
+    if stage == 0:
+        return {"control": max(primary_episodes, 0)}
+    if stage == 1:
+        return {"dribble": max(primary_episodes, 0)}
+    return {
+        "dribble": max(primary_episodes, 0),
+        "shoot_setup": max(shoot_episodes, 0),
+        "pass_setup": max(pass_episodes, 0),
+    }
+
+
+def _build_tasks(stage: int,
+                 primary_episodes: int,
+                 shoot_episodes: int,
+                 pass_episodes: int,
+                 base_seed: int,
+                 lookahead: int) -> List[Task]:
+    family_counts = _resolve_family_counts(
+        stage=stage,
+        primary_episodes=primary_episodes,
+        shoot_episodes=shoot_episodes,
+        pass_episodes=pass_episodes,
+    )
+    approach_targets = _approach_targets(stage)
+    goal_targets = _goal_targets()
+    pass_targets = _pass_targets()
+    biases = _biases_for_stage(stage)
+    shoot_kick_angles  = [20.0, 25.0, 30.0, 35.0, 40.0]
+    shoot_kick_dists   = [800.0, 1000.0, 1200.0, 1500.0, 2000.0]
+    shoot_dribble_bias = [0.0, math.pi/6, -math.pi/6,
+                          math.pi/8, -math.pi/8]
+
+    pass_kick_angles   = [20.0, 25.0, 30.0, 35.0]
+    pass_kick_dists    = [800.0, 1200.0, 1500.0, 2000.0]
+    pass_dribble_bias  = [0.0, math.pi/6, -math.pi/6,
+                          math.pi/8, -math.pi/8]
+
+    tasks: List[Task] = []
+    global_ep = 0
+    for intent_label, total in family_counts.items():
+        for family_ep in range(total):
+            current_seed = base_seed + global_ep
+            approach_target = approach_targets[family_ep % len(approach_targets)]
+            dribble_bias = biases[family_ep % len(biases)]
+            kick_target: Optional[np.ndarray] = None
+            kick_angle: Optional[float] = None
+            kick_dist: Optional[float] = None
+
+            if intent_label == "shoot_setup":
+                kick_target = goal_targets[family_ep % len(goal_targets)]
+                kick_angle = shoot_kick_angles[family_ep % len(shoot_kick_angles)]
+                kick_dist = shoot_kick_dists[family_ep % len(shoot_kick_dists)]
+                dribble_bias = shoot_dribble_bias[family_ep % len(shoot_dribble_bias)]
+            elif intent_label == "pass_setup":
+                kick_target = pass_targets[family_ep % len(pass_targets)]
+                kick_angle = pass_kick_angles[family_ep % len(pass_kick_angles)]
+                kick_dist = pass_kick_dists[family_ep % len(pass_kick_dists)]
+                dribble_bias = pass_dribble_bias[family_ep % len(pass_dribble_bias)]
+
+            tasks.append((
+                family_ep,
+                intent_label,
+                stage,
+                lookahead,
+                current_seed,
+                approach_target,
+                kick_target,
+                kick_angle,
+                kick_dist,
+                dribble_bias,
+            ))
+            global_ep += 1
+    return tasks
+
+
+def generate_single_trajectory(args: Task) -> Dict[str, object]:
+    """Isolated worker entrypoint to keep env state process-local."""
+    (ep, intent_label, stage, lookahead, current_seed, approach_target,
+     kick_target, kick_angle, kick_dist, dribble_bias) = args
+
     from trajectory_guidance.bridge import EnvBridge, GumbelPlanSampler
     from trajectory_guidance.evaluate_solver import SolverEvaluator
     from trajectory_guidance.solver import AStarSolver
-    from trajectory_guidance.settings import ASTAR_CFG, GUMBEL_CFG, DATASET_CFG
-    
-    # Cada proceso tiene su propio entorno (Pygame oculto) y su Solver A*
+
     bridge = EnvBridge(seed=current_seed)
     solver = AStarSolver(ASTAR_CFG)
     evaluator = SolverEvaluator(bridge=bridge, solver=solver)
     sampler = GumbelPlanSampler(GUMBEL_CFG)
 
-    world_snapshot, plans = evaluator.plan_from_current_reset(stage_id=stage, seed=current_seed)
+    world_snapshot, plans = evaluator.plan_from_current_reset(
+        stage_id=stage,
+        seed=current_seed,
+    )
     if not plans:
-        return {"status": "no_plans", "ep": ep, "type": ep_type}
-    
+        return {"status": "no_plans", "ep": ep, "intent": intent_label}
+
     sampled = sampler.sample(plans)
     ref_plan = sampled.selected
 
@@ -57,180 +259,178 @@ def generate_single_trajectory(args):
         collect_snapshots=True,
         reference_plan=ref_plan,
         dribble_bias_angle=dribble_bias,
-        kick_target=target,
+        kick_target=kick_target,
         kick_angle_deg=kick_angle if kick_angle is not None else 20.0,
         kick_phase_dist=kick_dist if kick_dist is not None else 1800.0,
+        intent_label=intent_label,
+        approach_target=approach_target,
     )
 
     if not metrics.valid_plan:
         return {
-            "status": "invalid", "ep": ep, "type": ep_type, "metrics": metrics, 
-            "target": target, "angle": kick_angle, "dist": kick_dist, "bias": dribble_bias
+            "status": "invalid",
+            "ep": ep,
+            "intent": intent_label,
+            "metrics": metrics,
+            "approach_target": approach_target,
+            "kick_target": kick_target,
+            "angle": kick_angle,
+            "dist": kick_dist,
+            "bias": dribble_bias,
         }
     if metrics.quality_score < DATASET_CFG.min_quality_score:
         return {
-            "status": "low_quality", "ep": ep, "type": ep_type, 
-            "quality": metrics.quality_score, "bias": dribble_bias
+            "status": "low_quality",
+            "ep": ep,
+            "intent": intent_label,
+            "quality": metrics.quality_score,
+            "bias": dribble_bias,
         }
 
     return {
-        "status": "ok", "ep": ep, "type": ep_type, "metrics": metrics, 
-        "snapshots": snapshots, "target": target, "angle": kick_angle, 
-        "dist": kick_dist, "bias": dribble_bias
+        "status": "ok",
+        "ep": ep,
+        "intent": intent_label,
+        "metrics": metrics,
+        "snapshots": snapshots,
+        "approach_target": approach_target,
+        "kick_target": kick_target,
+        "angle": kick_angle,
+        "dist": kick_dist,
+        "bias": dribble_bias,
     }
+
+
+def _run_tasks(tasks: Iterable[Task], n_jobs: int) -> Iterable[Dict[str, object]]:
+    task_list = list(tasks)
+    if n_jobs <= 1:
+        for task in task_list:
+            yield generate_single_trajectory(task)
+        return
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        futures = [executor.submit(generate_single_trajectory, task)
+                   for task in task_list]
+        for future in concurrent.futures.as_completed(futures):
+            yield future.result()
+
+
+def _format_target(target: Optional[np.ndarray]) -> str:
+    if target is None:
+        return "-"
+    return f"({float(target[0]):.0f},{float(target[1]):.0f})"
+
+
+def _print_result(result: Dict[str, object]) -> None:
+    intent_label = str(result["intent"])
+    ep = int(result["ep"])
+    bias_rad = float(result.get("bias", 0.0))
+    bias_deg = math.degrees(bias_rad)
+
+    if result["status"] == "no_plans":
+        print(f"[SKIP] intent={intent_label} ep={ep} no plans")
+        return
+
+    if result["status"] == "low_quality":
+        quality = float(result.get("quality", 0.0))
+        print(f"[SKIP] intent={intent_label} ep={ep} low quality={quality:.2f}")
+        return
+
+    metrics = result["metrics"]
+    kick_target = _format_target(result.get("kick_target"))
+    approach_target = _format_target(result.get("approach_target"))
+    tk_ready = int(getattr(metrics, "episode_handoff_achieved", 0) > 0)
+    tk_succ = int(getattr(metrics, "episode_takeover_success", 0) > 0)
+
+    if result["status"] == "invalid":
+        print(
+            f"[SKIP] intent={intent_label} ep={ep} invalid "
+            f"approach={approach_target} kick={kick_target} bias={bias_deg:.0f}deg "
+            f"touch={int(metrics.touched_ball)} dribble={metrics.dribble_steps} "
+            f"TkReady={tk_ready} TkSucc={tk_succ}"
+        )
+        return
+
+    print(
+        f"[OK] intent={intent_label} ep={ep} "
+        f"approach={approach_target} kick={kick_target} bias={bias_deg:.0f}deg "
+        f"steps={metrics.steps} dribble={metrics.dribble_steps} "
+        f"TkReady={tk_ready} TkSucc={tk_succ} goal={int(metrics.goal_scored)}"
+    )
 
 
 def main() -> None:
-    # ── Configuración ────────────────────────────────────────────────────
-    stage = 3
-    episodes = 5        # episodios de dribble
-    shoot_episodes = 5 # episodios de disparo al arco (kick_target = goal)
-    pass_episodes = 5 # episodios de pase a zona de campo (kick_target = zona)
+    # Configuracion editable localmente en vez de CLI.
+    stage = 0
+    episodes = 5
+    shoot_episodes = 5
+    pass_episodes = 5
     out = "trajectory_demos/demos_fixed0.pkl"
-    base_seed = 42
+    seed = 42
     lookahead = ASTAR_CFG.greedy_lookahead
-    
-    # PARAMETRIZACION DE PARALELISMO
-    n_jobs = 8  # Subimos a 8 cores concurrentes de un solo envión!
+    n_jobs = DATASET_CFG.default_n_jobs
 
-    from config import FIELD as _FIELD
-    GOAL_TARGETS = [
-        np.array([_FIELD.x_opponent_ground, 0.0],                      dtype=np.float32),
-        np.array([_FIELD.x_opponent_ground, _FIELD.y_left_goal * 0.7], dtype=np.float32),
-        np.array([_FIELD.x_opponent_ground, _FIELD.y_right_goal * 0.7],dtype=np.float32),
-        np.array([_FIELD.x_opponent_ground, _FIELD.y_left_goal * 0.4], dtype=np.float32),
-        np.array([_FIELD.x_opponent_ground, _FIELD.y_right_goal * 0.4],dtype=np.float32),
-    ]
-    PASS_TARGETS = [
-        np.array([2000.0,  1500.0], dtype=np.float32),
-        np.array([2000.0, -1500.0], dtype=np.float32),
-        np.array([3000.0,   600.0], dtype=np.float32),
-        np.array([3000.0,  -600.0], dtype=np.float32),
-        np.array([1000.0,  2000.0], dtype=np.float32),
-        np.array([1000.0, -2000.0], dtype=np.float32),
-    ]
+    tasks = _build_tasks(
+        stage=stage,
+        primary_episodes=episodes,
+        shoot_episodes=shoot_episodes,
+        pass_episodes=pass_episodes,
+        base_seed=seed,
+        lookahead=lookahead,
+    )
 
-    shoot_kick_angles  = [25.0, 30.0, 35.0, 40.0, 45.0]
-    shoot_kick_dists   = [800.0, 1000.0, 1200.0, 1500.0, 2000.0]
-    shoot_dribble_bias = [0.0, math.pi/6, -math.pi/6,
-                          math.pi/4, -math.pi/4,
-                          math.pi/8, -math.pi/8]
-
-    pass_kick_angles   = [25.0, 30.0, 35.0, 40.0]
-    pass_kick_dists    = [800.0, 1200.0, 1500.0, 2000.0, 2500.0]
-    pass_dribble_bias  = [0.0, math.pi/6, -math.pi/6,
-                          math.pi/4, -math.pi/4,
-                          math.pi/8, -math.pi/8]
-
-    if stage >= 3:
-        dribble_angles = [
-            0.0, math.pi / 6, -math.pi / 6, math.pi / 4, -math.pi / 4, 
-            math.pi / 3, -math.pi / 3,
-        ]
-    else:
-        dribble_angles = [
-            0.0, math.pi / 6, -math.pi / 6, math.pi / 4, -math.pi / 4, 
-            math.pi / 3, -math.pi / 3, math.pi / 2, -math.pi / 2, 
-            2 * math.pi / 3, -2 * math.pi / 3,
-        ]
-
-    tasks = []
-    
-    # Generar args para DRIBBLE
-    for ep in range(episodes):
-        current_seed = base_seed + ep
-        dribble_angle = dribble_angles[ep % len(dribble_angles)]
-        tasks.append((ep, "dribble", stage, lookahead, current_seed, None, None, None, dribble_angle))
-
-    # Generar args para SHOOT
-    for ep in range(shoot_episodes):
-        current_seed = base_seed + episodes + ep
-        goal_target      = GOAL_TARGETS[ep % len(GOAL_TARGETS)]
-        s_kick_angle     = shoot_kick_angles[ep % len(shoot_kick_angles)]
-        s_kick_dist      = shoot_kick_dists[ep % len(shoot_kick_dists)]
-        s_dribble_bias   = shoot_dribble_bias[ep % len(shoot_dribble_bias)]
-        tasks.append((ep, "shoot", stage, lookahead, current_seed, goal_target, s_kick_angle, s_kick_dist, s_dribble_bias))
-
-    # Generar args para PASS
-    for ep in range(pass_episodes):
-        current_seed = base_seed + episodes + shoot_episodes + ep
-        pass_target    = PASS_TARGETS[ep % len(PASS_TARGETS)]
-        p_kick_angle   = pass_kick_angles[ep % len(pass_kick_angles)]
-        p_kick_dist    = pass_kick_dists[ep % len(pass_kick_dists)]
-        p_dribble_bias = pass_dribble_bias[ep % len(pass_dribble_bias)]
-        tasks.append((ep, "pass", stage, lookahead, current_seed, pass_target, p_kick_angle, p_kick_dist, p_dribble_bias))
-
-    # Counters
+    family_counts = _resolve_family_counts(
+        stage=stage,
+        primary_episodes=episodes,
+        shoot_episodes=shoot_episodes,
+        pass_episodes=pass_episodes,
+    )
     stats = {
-        "dribble": {"total": episodes, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0},
-        "shoot": {"total": shoot_episodes, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0},
-        "pass": {"total": pass_episodes, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0},
+        intent_label: {"total": total, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0}
+        for intent_label, total in family_counts.items()
     }
     all_snapshots = []
 
-    print(f"\n[PARALELISMO] Iniciando pool con n_jobs={n_jobs}. Procesando {len(tasks)} trayectorias...\n")
-    
-    completed_count = 0
-    with concurrent.futures.ProcessPoolExecutor(max_workers=n_jobs) as executor:
-        futures = [executor.submit(generate_single_trajectory, t) for t in tasks]
-        
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            ep_type = res["type"]
-            ep = res["ep"]
-            completed_count += 1
-            st_dict = stats[ep_type]
-            
-            # Format prints
-            if res["status"] == "no_plans":
-                st_dict["no_plans"] += 1
-                if ep_type == "dribble":
-                    print(f"[SKIP] ep={ep} no plans")
-                
-            elif res["status"] == "invalid":
-                st_dict["inv"] += 1
-                metrics = res["metrics"]
-                if ep_type == "dribble":
-                    angle_deg = math.degrees(res["bias"])
-                    print(f"[SKIP] ep={ep} ({angle_deg:.0f}°) invalid (t={metrics.touched_ball} d={metrics.dribble_steps} g={metrics.goal_scored})")
-                else:
-                    gx, gy = float(res["target"][0]), float(res["target"][1])
-                    print(f"[SKIP-{ep_type[0].upper()}] ep={ep} invalid target=({gx:.0f},{gy:.0f}) angle={res['angle']}° dist={res['dist']:.0f} (d={metrics.dribble_steps} g={metrics.goal_scored})")
-            
-            elif res["status"] == "low_quality":
-                st_dict["low_q"] += 1
-                
-            elif res["status"] == "ok":
-                st_dict["acc"] += 1
-                all_snapshots.extend(res["snapshots"])
-                metrics = res["metrics"]
-                
-                if ep_type == "dribble":
-                    angle_deg = math.degrees(res["bias"])
-                    print(f"[OK] ep={ep} ({angle_deg:.0f}°) steps={metrics.steps} dribble={metrics.dribble_steps} goal={metrics.goal_scored}")
-                else:
-                    gx, gy = float(res["target"][0]), float(res["target"][1])
-                    print(f"[OK-{ep_type[0].upper()}] ep={ep} target=({gx:.0f},{gy:.0f}) angle={res['angle']}° dist={res['dist']:.0f} steps={metrics.steps} dribble={metrics.dribble_steps} goal={metrics.goal_scored}")
+    print(
+        f"\n[DATASET] stage={stage} tasks={len(tasks)} n_jobs={n_jobs} "
+        f"families={family_counts}\n"
+    )
 
-    # ── Exportar ─────────────────────────────────────────────────────────
+    for result in _run_tasks(tasks, n_jobs):
+        intent_label = str(result["intent"])
+        stats_row = stats[intent_label]
+        status = str(result["status"])
+        if status == "ok":
+            stats_row["acc"] += 1
+            all_snapshots.extend(result["snapshots"])
+        elif status == "no_plans":
+            stats_row["no_plans"] += 1
+        elif status == "invalid":
+            stats_row["inv"] += 1
+        elif status == "low_quality":
+            stats_row["low_q"] += 1
+        _print_result(result)
+
     out_path = Path(out)
     export_snapshots_pkl(all_snapshots, str(out_path))
-    
-    total_ep = sum(s["total"] for s in stats.values())
-    total_acc = sum(s["acc"] for s in stats.values())
-    
-    print(f"\n{'='*60}")
-    print(f"DATASET GENERATION COMPLETE")
-    print(f"  Stage: {stage}")
-    print(f"  Dribble:  {stats['dribble']['acc']}/{stats['dribble']['total']} aceptados")
-    print(f"  Shoot:    {stats['shoot']['acc']}/{stats['shoot']['total']} aceptados")
-    print(f"  Pass:     {stats['pass']['acc']}/{stats['pass']['total']} aceptados")
-    print(f"  Total:    {total_acc}/{total_ep} episodios, {len(all_snapshots)} snapshots")
-    print(f"  Output: {out_path}")
-    print(f"{'='*60}")
+
+    total_ep = sum(row["total"] for row in stats.values())
+    total_acc = sum(row["acc"] for row in stats.values())
+
+    print(f"\n{'=' * 72}")
+    print("DATASET GENERATION COMPLETE")
+    print(f"  Stage:   {stage}")
+    for intent_label, row in stats.items():
+        print(
+            f"  {intent_label:11s} "
+            f"{row['acc']}/{row['total']} accepted "
+            f"(no_plans={row['no_plans']} invalid={row['inv']} low_q={row['low_q']})"
+        )
+    print(f"  Total:   {total_acc}/{total_ep} episodes, {len(all_snapshots)} snapshots")
+    print(f"  Output:  {out_path}")
+    print(f"{'=' * 72}")
 
 
 if __name__ == "__main__":
-    # Required for spawn multiprocess logic safety in Windows
-    multiprocessing.freeze_support() if hasattr(sys, 'frozen') else None
+    multiprocessing.freeze_support()
     main()

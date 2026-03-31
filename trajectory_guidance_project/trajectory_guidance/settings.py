@@ -15,6 +15,7 @@ Cambios respecto a la versión anterior:
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import numpy as np
@@ -60,6 +61,58 @@ class DatasetConfig:
     # Closed-loop: máximo de pasos por episodio replay.
     # 0 = usar episode_steps del curriculum stage.
     max_replay_steps: int = 0
+    # Option 1 honesto: por defecto no abrir varios workers reales en paralelo.
+    default_n_jobs: int = 1
+    require_real_backend: bool = True
+    required_bridge_mode: str = "persistent_2d_cognition"
+
+
+@dataclass
+class EvaluationConfig:
+    evaluate_rollout: bool = True
+    plot_examples: bool = False
+    collect_snapshots: bool = True
+    verbose: bool = True
+
+
+@dataclass
+class PrimitiveConfig:
+    stage_modes: Dict[int, List[str]] = field(default_factory=lambda: {
+        0: ["straight", "left_arc", "right_arc", "recover_contact",
+            "dribble_safe"],
+        1: ["straight", "left_arc", "right_arc", "dribble_safe",
+            "dribble_aggressive"],
+        2: ["straight", "left_arc", "right_arc", "dribble_safe",
+            "align_then_kick"],
+        3: ["straight", "left_arc", "right_arc", "dribble_aggressive",
+            "align_then_kick"],
+    })
+
+
+@dataclass
+class EnvBridgeConfig:
+    controlled_agent_id: str = "agent_0"
+    default_seed: int = 42
+    deterministic_eval: bool = False
+    stage_sync_on_reset: bool = True
+
+
+@dataclass
+class StageObjective:
+    stage_id: int
+    name: str
+    objective: str
+    success_mode: str
+    target_recontacts: int = 1
+    prefer_dribble: bool = False
+    prefer_goal_alignment: bool = False
+    prefer_goal_completion: bool = False
+    planning_horizon_steps: int = 8
+    primitive_modes: List[str] = field(default_factory=list)
+    weights: Dict[str, float] = field(default_factory=dict)
+    kick_target: Optional[np.ndarray] = None
+
+
 
 
 @dataclass
@@ -114,7 +167,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_find_ball",
         objective="Llegar al balon y mantener control corto.",
         success_mode="touch_and_control",
-        target_recontacts=2,
+        target_recontacts=4,
         prefer_dribble=True,
         planning_horizon_steps=100,
         primitive_modes=["straight", "left_arc", "right_arc",
@@ -124,7 +177,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
             "ball_goal_dist": 0.1,
             "turn_penalty": 0.3,
             "control_bonus": 1.2,
-            "goal_alignment": 0.05,
+            "goal_alignment": 0.15,
             "ball_oob_penalty": 0.5,
             "own_goal_penalty": 1.0,
             "dribble_bonus": 80.0,
@@ -135,8 +188,9 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r800",
         objective="Llegar y dribblar de forma estable con variedad.",
         success_mode="stable_dribble",
-        target_recontacts=3,
+        target_recontacts=4,
         prefer_dribble=True,
+        prefer_goal_alignment=True,
         planning_horizon_steps=8,
         # Incluye dribbles direccionales para variabilidad post-contacto
         primitive_modes=["straight", "left_arc", "right_arc",
@@ -148,10 +202,10 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
             "ball_goal_dist": 0.2,
             "turn_penalty": 0.3,
             "control_bonus": 1.5,
-            "goal_alignment": 0.15,
+            "goal_alignment": 0.25,
             "ball_oob_penalty": 1.0,
             "own_goal_penalty": 1.0,
-            "dribble_bonus": 100.0,
+            "dribble_bonus": 120.0,
         },
     ),
     2: StageObjective(
@@ -159,7 +213,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r1200",
         objective="Media distancia + dribble variado + alineacion + kick.",
         success_mode="dribble_align_kick",
-        target_recontacts=2,
+        target_recontacts=3,
         prefer_dribble=True,
         prefer_goal_alignment=True,
         planning_horizon_steps=12,
@@ -180,7 +234,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
             "own_goal_penalty": 1.5,
             # Mayor peso de dribble: más recontactos = menor costo A*,
             # desincentivando el kick inmediato sin dribble previo.
-            "dribble_bonus": 120.0,
+            "dribble_bonus": 150.0,
         },
     ),
     3: StageObjective(
@@ -188,7 +242,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r3500",
         objective="Campo abierto + navegacion + dribble variado + gol.",
         success_mode="goal_completion",
-        target_recontacts=1,
+        target_recontacts=3,
         # prefer_dribble=True: activa el multiplicador 1.5× en
         # sustained_dribble_bonus, aumentando la recompensa por dribble
         # y reduciendo la brecha con el kick inmediato.
@@ -213,7 +267,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
             # Mayor dribble_bonus: junto con prefer_dribble=True y el
             # gate en heuristic_cost, A* debe planear 2+ dribbles antes
             # de intentar kick.
-            "dribble_bonus": 100.0,
+            "dribble_bonus": 120.0,
         },
     ),
 }
@@ -227,7 +281,9 @@ def get_stage_objective(stage_id: int) -> StageObjective:
     if stage_id not in STAGE_OBJECTIVES:
         raise KeyError(
             f"No stage objective configured for stage {stage_id}")
-    return STAGE_OBJECTIVES[stage_id]
+    # El evaluador muta kick_target en tiempo de ejecucion; devolver una copia
+    # evita contaminar el objetivo base entre episodios o procesos.
+    return copy.deepcopy(STAGE_OBJECTIVES[stage_id])
 
 
 ASTAR_CFG = AStarConfig()

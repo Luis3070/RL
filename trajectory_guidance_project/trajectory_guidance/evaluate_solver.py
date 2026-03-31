@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import math
 import matplotlib
@@ -37,7 +37,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from config import CURRICULUM, FIELD, AGENT
-from trajectory_guidance.settings import get_stage_objective, StageObjective
+from trajectory_guidance.settings import (
+    DATASET_CFG,
+    StageObjective,
+    get_stage_objective,
+)
 from trajectory_guidance.dataset import DemoSnapshot
 from trajectory_guidance.bridge import EnvBridge, WorldSnapshot
 from trajectory_guidance.heuristic import SimplifiedWorldState, nearest_goal_post
@@ -263,20 +267,10 @@ def compute_launch_position(agent_pos: np.ndarray,
     t = float(np.clip((dist - AGENT.ball_dribble_range) / (approach_dist - AGENT.ball_dribble_range), 0.0, 1.0))
 
     if target_dir is not None:
-        # FIX-1: Usar dirección del kick_target como push_dir base.
-        # Sin esto, compute_safe_push_direction siempre apunta al centro del arco,
-        # y el approach pre-kick ignora completamente hacia dónde se va a patear.
-        # Se aplica el bias_angle como rotación adicional sobre la dirección del target.
-        base = target_dir / (float(np.linalg.norm(target_dir)) + 1e-6)
-        biased = _rotate_vec2(base, effective_bias)
-        n = float(np.linalg.norm(biased))
-        push_dir = biased / n if n > 1e-6 else base
-        # Preservar la lógica de keepout de sideline/own_goal sobre la dirección resultante
-        push_dir = compute_safe_push_direction(ball_pos, 0.0)
-        # Blend: 70% target_dir + 30% safe_goal_dir para mantener safety constraints
-        blended = 0.70 * (biased / (n + 1e-6)) + 0.30 * push_dir
-        bn = float(np.linalg.norm(blended))
-        push_dir = blended / bn if bn > 1e-6 else push_dir
+        # Respetar la intencion del target (pase/tiro o postura lateral),
+        # pero siempre pasando por el filtro de seguridad del campo.
+        push_dir = compute_safe_push_direction(
+            ball_pos, effective_bias, target_dir=target_dir)
     else:
         push_dir = compute_safe_push_direction(ball_pos, effective_bias)
 
@@ -319,6 +313,7 @@ def compute_launch_position(agent_pos: np.ndarray,
 @dataclass
 class RolloutMetrics:
     stage_id: int
+    intent: str = "control"
     steps: int = 0
     touched_ball: bool = False
     goal_scored: bool = False
@@ -332,6 +327,14 @@ class RolloutMetrics:
     quality_score: float = 0.0
     events: List[Dict] = field(default_factory=list)
     primitives_used: List[str] = field(default_factory=list)
+    handoff_ready_steps: int = 0
+    kick_phase_activated: bool = False
+    episode_handoff_achieved: bool = False
+    episode_takeover_count: int = 0
+    episode_takeover_success: int = 0
+    all_real_backend: bool = True
+    wrong_bridge_mode_seen: bool = False
+    contract_validation_seen: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +363,8 @@ class SolverEvaluator:
                            collect_snapshots: bool = True,
                            reference_plan: PlannedTrajectory | None = None,
                            forced_primitive: str | None = None,
+                           intent_label: str | None = None,
+                           approach_target: np.ndarray | None = None,
                            dribble_bias_angle: float = 0.0,
                            kick_target: np.ndarray | None = None,
                            kick_angle_deg: float = 20.0,
@@ -377,7 +382,11 @@ class SolverEvaluator:
                                             → angle_diff→0 → kick dispara hacia kick_target.
         """
         if max_steps <= 0:
-            max_steps = CURRICULUM[stage_id].episode_steps
+            max_steps = (
+                DATASET_CFG.max_replay_steps
+                if DATASET_CFG.max_replay_steps > 0
+                else CURRICULUM[stage_id].episode_steps
+            )
 
         objective = get_stage_objective(stage_id)
         local_horizon = CURRICULUM[stage_id].local_horizon
@@ -392,7 +401,11 @@ class SolverEvaluator:
         traj_id = f"mpc_{approach_label}_{angle_label}"
         ref_quality = reference_plan.quality if reference_plan else 0.0
 
-        metrics = RolloutMetrics(stage_id=stage_id, trajectory_id=traj_id)
+        metrics = RolloutMetrics(
+            stage_id=stage_id,
+            trajectory_id=traj_id,
+            intent=intent_label or "control",
+        )
         snapshots: List[DemoSnapshot] = []
         total_rewards = []
         touched_prev = False
@@ -410,15 +423,18 @@ class SolverEvaluator:
         # Siempre empezamos a 0 (fase dribble, sin kicks).
         # Si hay kick_target, se sube a kick_angle_deg al entrar en kick_phase.
         _stage_cfg = CURRICULUM[stage_id]
-        _orig_kick_angle = _stage_cfg.frontal_kick_angle_deg
+        _orig_kick_angle = getattr(_stage_cfg, "frontal_kick_angle_deg", 0.0)
         _stage_cfg.frontal_kick_angle_deg = 0.0
         kick_phase_active = False
-        # Etiqueta del modo para traj_id
-        kick_mode_label = "dribble"
-        if kick_target is not None:
-            is_goal_shot = (kick_target[0] > FIELD.x_opponent_ground - 600.0)
-            kick_mode_label = "shoot" if is_goal_shot else "pass"
-            traj_id = traj_id.replace("mpc_", f"mpc_{kick_mode_label}_", 1)
+        kick_mode_label = intent_label or "control"
+        if intent_label is None:
+            if kick_target is not None:
+                is_goal_shot = (kick_target[0] > FIELD.x_opponent_ground - 600.0)
+                kick_mode_label = "shoot_setup" if is_goal_shot else "pass_setup"
+            else:
+                kick_mode_label = "dribble"
+        traj_id = traj_id.replace("mpc_", f"mpc_{kick_mode_label}_", 1)
+        metrics.intent = kick_mode_label
 
         for step in range(max_steps):
             if controlled_agent not in self.bridge.env.agents:
@@ -436,8 +452,14 @@ class SolverEvaluator:
 
             # ── 2 y 3. Híbrido: Geométrico para approach, A* para el resto ──
             state = self.bridge.get_live_world_state()
-            
-            base_target = kick_target if kick_target is not None else nearest_goal_post(ball_pos)
+            state.recontacts = recontacts
+            state.touched_ball = metrics.touched_ball or state.touched_ball
+
+            base_target = (
+                kick_target if kick_target is not None
+                else approach_target if approach_target is not None
+                else nearest_goal_post(ball_pos)
+            )
             target_dir = base_target - ball_pos
 
             # Calcular el launch_pos manual para evitar que A* quede en mínimos locales desde lejos
@@ -456,12 +478,18 @@ class SolverEvaluator:
                 # PHASE DE CONTACTO/MANEJO: Dirección segura para guiar el A* (Solución 2)
                 # Nunca establecer objective.kick_target usando rotación ignorante de bandas.
                 # Obligar a que la dirección pase por compute_safe_push_direction.
-                safe_dir = compute_safe_push_direction(ball_pos, dribble_bias_angle)
-                objective.kick_target = ball_pos + safe_dir * 2000.0
+                safe_dir = compute_safe_push_direction(
+                    ball_pos, dribble_bias_angle, target_dir=target_dir)
+                target_dist = max(900.0, float(np.linalg.norm(base_target - ball_pos)))
+                objective.kick_target = ball_pos + safe_dir * target_dist
 
                 # Solución: Suprimir kicks de acuerdo al currículum.
                 # Evita que patee siempre que tiene balón bloqueándolo hasta cumplir su tarea de dribble.
                 forbidden = []
+
+                # Intentos de control/dribble nunca deben venderse como kicks.
+                if kick_target is None:
+                    forbidden.append("align_then_kick")
 
                 # Para stages que requieren control primero
                 if state.recontacts < objective.target_recontacts:
@@ -489,6 +517,7 @@ class SolverEvaluator:
             
             if "kick" in phase:
                 kick_phase_active = True
+                metrics.kick_phase_activated = True
                 _stage_cfg.frontal_kick_angle_deg = max(kick_angle_deg, 25.0)
 
             prim_name = f"{phase}_{angle_label}"
@@ -509,16 +538,41 @@ class SolverEvaluator:
             episode_done = bool(terminateds.get("__all__", False)
                                 or truncateds.get("__all__", False))
 
-            touched = bool(self.bridge.raw_env._ball_contact_this_step)
+            touched = (dist_ball <= getattr(AGENT, "ball_dribble_range", 340.0))
             if touched and touched_prev:
                 recontacts += 1
             touched_prev = touched
 
             agent_info = next_infos.get(controlled_agent, None) or {}
+            backend_label = str(agent_info.get("sidecar_backend", "unknown"))
+            bridge_mode = str(agent_info.get("sidecar_bridge_mode", ""))
+            contract_validation_mode = bool(
+                agent_info.get("sidecar_contract_validation_mode", False))
+
+            if backend_label != "real":
+                metrics.all_real_backend = False
+            if bridge_mode and bridge_mode != DATASET_CFG.required_bridge_mode:
+                metrics.wrong_bridge_mode_seen = True
+            if contract_validation_mode:
+                metrics.contract_validation_seen = True
+
+            if bool(agent_info.get("handoff_ready", False)):
+                metrics.handoff_ready_steps += 1
+            metrics.episode_handoff_achieved = (
+                metrics.episode_handoff_achieved
+                or bool(agent_info.get("episode_handoff_achieved", False))
+            )
+            metrics.episode_takeover_count = max(
+                metrics.episode_takeover_count,
+                int(agent_info.get("episode_takeover_count", 0)),
+            )
+            metrics.episode_takeover_success = max(
+                metrics.episode_takeover_success,
+                int(agent_info.get("episode_takeover_success", 0)),
+            )
             event = {
                 "ball_touched": touched,
-                "dribbling": bool(getattr(
-                    self.bridge.raw_env, "_is_dribbling", False)),
+                "dribbling": touched,
                 "goal_scored": bool(agent_info.get("goal_scored", False)),
                 "own_score": int(agent_info.get("own_score", 0)),
                 "opp_score": int(agent_info.get("opp_score", 0)),
@@ -526,6 +580,10 @@ class SolverEvaluator:
                 "phase": phase,
                 # FIX-3: Metadata de intención en el event (para análisis offline)
                 "kick_phase_active": kick_phase_active,
+                "handoff_ready": bool(agent_info.get("handoff_ready", False)),
+                "takeover_active": bool(agent_info.get("takeover_active", False)),
+                "sidecar_backend": backend_label,
+                "sidecar_bridge_mode": bridge_mode,
             }
             metrics.events.append(event)
             if event["dribbling"]:
@@ -553,6 +611,15 @@ class SolverEvaluator:
                     trajectory_id=traj_id,
                     quality_score=ref_quality,
                     reset_seed=initial_snapshot.reset_seed,
+                    world_snapshot={
+                        "stage_id": int(initial_snapshot.stage_id),
+                        "agent_id": initial_snapshot.agent_id,
+                        "agent_pos": np.asarray(initial_snapshot.agent_pos,
+                                                 dtype=np.float32),
+                        "ball_pos": np.asarray(initial_snapshot.ball_pos,
+                                                dtype=np.float32),
+                        "agent_theta": float(initial_snapshot.agent_theta),
+                    },
                     initial_agent_pos=initial_snapshot.agent_pos,
                     initial_ball_pos=initial_snapshot.ball_pos,
                     # FIX-3: Campos de intención BC-ready
@@ -560,6 +627,19 @@ class SolverEvaluator:
                     kick_phase_active=kick_phase_active,
                     kick_target=(np.asarray(kick_target, dtype=np.float32)
                                  if kick_target is not None else None),
+                    approach_target=(np.asarray(approach_target, dtype=np.float32)
+                                     if approach_target is not None else None),
+                    handoff_ready=bool(agent_info.get("handoff_ready", False)),
+                    takeover_active=bool(agent_info.get("takeover_active", False)),
+                    episode_handoff_achieved=bool(
+                        agent_info.get("episode_handoff_achieved", False)),
+                    episode_takeover_count=int(
+                        agent_info.get("episode_takeover_count", 0)),
+                    episode_takeover_success=int(
+                        agent_info.get("episode_takeover_success", 0)),
+                    sidecar_backend=backend_label,
+                    sidecar_bridge_mode=bridge_mode,
+                    sidecar_contract_validation_mode=contract_validation_mode,
                 ))
 
             metrics.steps += 1
@@ -570,7 +650,8 @@ class SolverEvaluator:
                 break
 
         # Restaurar frontal_kick_angle_deg original
-        _stage_cfg.frontal_kick_angle_deg = _orig_kick_angle
+        if hasattr(_stage_cfg, "frontal_kick_angle_deg"):
+            _stage_cfg.frontal_kick_angle_deg = _orig_kick_angle
 
         metrics.recontacts = recontacts
         metrics.mean_reward = (float(np.mean(total_rewards))
@@ -578,16 +659,64 @@ class SolverEvaluator:
         metrics.own_score = int(self.bridge.raw_env._game.own_score)
         metrics.opp_score = int(self.bridge.raw_env._game.opp_score)
         metrics.valid_plan = self._check_validity(metrics, objective,
-                                                   kick_target=kick_target)
+                                                  kick_target=kick_target)
         metrics.quality_score = ref_quality
         return metrics, snapshots
 
     def _check_validity(self, metrics: RolloutMetrics,
                         objective: StageObjective,
                         kick_target: np.ndarray | None = None) -> bool:
+        if DATASET_CFG.require_real_backend:
+            if not metrics.all_real_backend:
+                return False
+            if metrics.contract_validation_seen:
+                return False
+            if metrics.wrong_bridge_mode_seen:
+                return False
+
         # Autogol → rechazar siempre independientemente del stage
         if metrics.own_score > 0:
             return False
+
+        if not metrics.episode_handoff_achieved:
+            return False
+
+        if objective.stage_id == 0 and metrics.intent != "control":
+            return False
+        if objective.stage_id == 1 and metrics.intent != "dribble":
+            return False
+
+        if metrics.intent == "control":
+            return (
+                metrics.touched_ball
+                and metrics.handoff_ready_steps >= 1
+                and metrics.episode_takeover_success >= 1
+                and metrics.dribble_steps >= 2
+            )
+
+        if metrics.intent == "dribble":
+            return (
+                metrics.touched_ball
+                and metrics.handoff_ready_steps >= 1
+                and metrics.episode_takeover_success >= 1
+                and metrics.dribble_steps >= max(objective.target_recontacts, 3)
+            )
+
+        if metrics.intent == "pass_setup":
+            return (
+                metrics.touched_ball
+                and metrics.kick_phase_activated
+                and metrics.dribble_steps >= objective.target_recontacts
+            )
+
+        if metrics.intent == "shoot_setup":
+            min_dribble = max(objective.target_recontacts, 3)
+            return (
+                metrics.touched_ball
+                and metrics.kick_phase_activated
+                and metrics.dribble_steps >= min_dribble
+            )
+
         if objective.success_mode == "touch_and_control":
             return metrics.touched_ball and metrics.dribble_steps >= 3
         elif objective.success_mode == "stable_dribble":
@@ -598,12 +727,6 @@ class SolverEvaluator:
         elif objective.success_mode == "goal_completion":
             if metrics.goal_scored:
                 return True
-            # FIX-4: Para episodios de disparo al arco (is_goal_shot), el umbral
-            # mínimo es dribble_steps >= 3 (no 1). Con dribble_steps >= 1 el dataset
-            # se llenaba de demos "llegué al balón, toqué una vez, no disparé" que
-            # entrenaban al BC a hacer approach sin kick. El BC nunca veía la
-            # secuencia completa approach → dribble_control → kick.
-            # Para pases y dribble puro se mantiene el umbral más permisivo (>= 1).
             if kick_target is not None:
                 is_goal_shot = float(kick_target[0]) > FIELD.x_opponent_ground - 600.0
                 min_dribble = 3 if is_goal_shot else 2

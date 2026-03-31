@@ -761,7 +761,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "J:\ROBOTICA\runs\practical_stage0_fovTrue_1774934106\checkpoints\mappo_stage0_1v0_approach_800_ep000124.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None
