@@ -146,6 +146,22 @@ BALL = BallConfig()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STATIC OBSTACLES — curriculum-only training fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ObstacleConfig:
+    """Parámetros de obstáculos estáticos usados en curriculum temprano."""
+    radius: float = 230.0
+    path_offset_min: float = 260.0
+    path_offset_max: float = 420.0
+    spawn_margin: float = 260.0
+
+
+OBSTACLE = ObstacleConfig()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CAMPO DE VISIÓN (FOV)
 # Fuente: CameraIntrinsics.h#L24 — openingAngleWidth = 54.7°
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +350,9 @@ class CurriculumStageConfig:
 
     # Smoothing
     ema_alpha:             float = 0.6
+    face_theta_alpha:      float = 0.18
+    face_theta_deadband_deg: float = 6.0
+    face_hold_dist_ratio:  float = 0.70
     rollout_steps:         int   = 2048
     local_horizon:         float = 0.0
 
@@ -368,6 +387,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         spawn_ball_in_front=True,
         spawn_front_angle_deg=60.0,
         ema_alpha=0.55,
+        face_theta_alpha=0.10,
+        face_theta_deadband_deg=10.0,
+        face_hold_dist_ratio=0.90,
         rollout_steps=1024,
         local_horizon=400.0,
         shaping_approach_w=0.8,
@@ -394,6 +416,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         spawn_ball_in_front=True,
         spawn_front_angle_deg=90.0,
         ema_alpha=0.35,
+        face_theta_alpha=0.10,
+        face_theta_deadband_deg=10.0,
+        face_hold_dist_ratio=0.88,
         rollout_steps=1024,
         local_horizon=500.0,
         shaping_approach_w=0.8,
@@ -420,6 +445,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         ball_max_dist=3200.0,
         spawn_ball_in_front=False,
         ema_alpha=0.35,
+        face_theta_alpha=0.12,
+        face_theta_deadband_deg=9.0,
+        face_hold_dist_ratio=0.85,
         rollout_steps=1024,
         local_horizon=600.0,
         shaping_approach_w=0.7,

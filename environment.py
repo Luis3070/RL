@@ -28,7 +28,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from config import (
-    FIELD, AGENT, BALL, FOV, SIM,
+    FIELD, AGENT, BALL, OBSTACLE, FOV, SIM,
     OBS, ACTION, GLOBAL_STATE, NORM,
     CURRICULUM, CurriculumStageConfig, ROLES, TACTIC_NAMES,
     ACTION_SMOOTHING, CONTRACT, EXECUTION_MODE,
@@ -76,6 +76,13 @@ class OpponentState:
     vel:      np.ndarray
     is_upright: bool = True
     home_pos: np.ndarray = field(default_factory=lambda: np.zeros(2))
+
+
+@dataclass
+class StaticObstacle:
+    obstacle_id: str
+    pos: np.ndarray
+    radius: float
 
 
 @dataclass
@@ -444,7 +451,7 @@ class ObservationBuilder:
         return idx + OBS.tactic_size  # +2
 
 
-def build_global_state(agents, ball, opponents, game):
+def build_global_state(agents, ball, opponents, game, static_obstacles=None):
     state = np.zeros(GLOBAL_STATE.total, dtype=np.float32)
     idx = 0
     for i in range(4):
@@ -463,10 +470,14 @@ def build_global_state(agents, ball, opponents, game):
     state[idx + 2] = ball.vel[0] / NORM.vel_xy
     state[idx + 3] = ball.vel[1] / NORM.vel_xy
     idx += 4
+    obstacle_list = static_obstacles or []
+    opponent_like = list(opponents[:4])
+    remaining = max(0, 4 - len(opponent_like))
+    opponent_like.extend(obstacle_list[:remaining])
     for i in range(4):
-        if i < len(opponents):
-            state[idx]     = opponents[i].pos[0] / NORM.pos_x
-            state[idx + 1] = opponents[i].pos[1] / NORM.pos_y
+        if i < len(opponent_like):
+            state[idx]     = opponent_like[i].pos[0] / NORM.pos_x
+            state[idx + 1] = opponent_like[i].pos[1] / NORM.pos_y
         idx += 2
     state[idx]     = game.own_score / NORM.score
     state[idx + 1] = game.opp_score / NORM.score
@@ -989,6 +1000,7 @@ class NaoSoccerEnv(ParallelEnv):
         # State (initialized in reset)
         self._agents_state: Dict[str, AgentState] = {}
         self._opponents_state: List[OpponentState] = []
+        self._static_obstacles: List[StaticObstacle] = []
         self._ball: BallState = BallState(np.zeros(2), np.zeros(2))
         self._game: GameState = GameState()
         self._prev_ball_pos: np.ndarray = np.zeros(2)
@@ -1012,6 +1024,12 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_count = 0
         self._episode_takeover_success = 0
         self._episode_handoff_achieved = False  # True if handoff_ready was ever True
+        self._episode_handoff_ready_frames = 0
+        self._episode_playball_entry_count = 0
+        self._episode_playball_achieved = False
+        self._episode_ready_but_walk_frames = 0
+        self._episode_ready_touch_but_walk_frames = 0
+        self._prev_playball_frame = False
         self._prev_handoff_ready = False
 
         self.agents: List[str] = []
@@ -1039,6 +1057,7 @@ class NaoSoccerEnv(ParallelEnv):
 
         # Select active agent (closest to ball)
         self._select_active_agent()
+        self._static_obstacles = self._spawn_static_obstacles()
 
         # Init distances
         self._prev_ball_dists = {
@@ -1070,6 +1089,12 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_count = 0
         self._episode_takeover_success = 0
         self._episode_handoff_achieved = False
+        self._episode_handoff_ready_frames = 0
+        self._episode_playball_entry_count = 0
+        self._episode_playball_achieved = False
+        self._episode_ready_but_walk_frames = 0
+        self._episode_ready_touch_but_walk_frames = 0
+        self._prev_playball_frame = False
         self._prev_handoff_ready = False
 
         observations = self._build_observations()
@@ -1129,6 +1154,8 @@ class NaoSoccerEnv(ParallelEnv):
                 agent_state, target_pos, target_theta, SIM.dt
             )
 
+        self._resolve_agent_obstacle_collisions()
+
         # ═══════════════════════════════════════════════════════════════
         # 2. SELECT ACTIVE AGENT + SIDECAR DECISION
         # ═══════════════════════════════════════════════════════════════
@@ -1178,6 +1205,31 @@ class NaoSoccerEnv(ParallelEnv):
             # Track episode-level handoff_ready
             if macro.handoff_ready:
                 self._episode_handoff_achieved = True
+                self._episode_handoff_ready_frames += 1
+
+            sidecar_playball = sidecar_macro_type in TAKEOVER_MACRO_TYPES
+            if sidecar_playball:
+                self._episode_playball_achieved = True
+            if sidecar_playball and not self._prev_playball_frame:
+                self._episode_playball_entry_count += 1
+            self._prev_playball_frame = sidecar_playball
+
+            ready_but_walk = (
+                macro.handoff_ready
+                and not sidecar_playball
+                and sidecar_output is not None
+                and sidecar_output.skill_request == "walk"
+            )
+            if ready_but_walk:
+                self._episode_ready_but_walk_frames += 1
+                if self._active_agent_id in self._agents_state:
+                    active_agent = self._agents_state[self._active_agent_id]
+                    touching_ball = (
+                        float(np.linalg.norm(active_agent.pos - self._ball.pos))
+                        <= AGENT.ball_interaction_range
+                    )
+                    if touching_ball:
+                        self._episode_ready_touch_but_walk_frames += 1
 
             # Takeover execution depends on mode:
             if macro.takeover_active and self._active_agent_id:
@@ -1210,6 +1262,8 @@ class NaoSoccerEnv(ParallelEnv):
                 else:
                     # contract_validation_mode keeps semantic evidence only.
                     pass
+
+        self._resolve_agent_obstacle_collisions()
 
         # ═══════════════════════════════════════════════════════════════
         # 4. OPPONENT MOVEMENT
@@ -1432,6 +1486,103 @@ class NaoSoccerEnv(ParallelEnv):
 
         return BallState(pos=np.zeros(2, dtype=np.float32), vel=np.zeros(2, dtype=np.float32))
 
+    def _spawn_static_obstacles(self) -> List[StaticObstacle]:
+        if self._stage.num_static_obstacles <= 0 or not self._agents_state:
+            return []
+
+        if self._active_agent_id and self._active_agent_id in self._agents_state:
+            ref_agent = self._agents_state[self._active_agent_id]
+        else:
+            ref_agent = next(iter(self._agents_state.values()))
+
+        diff = self._ball.pos - ref_agent.pos
+        dist = float(np.linalg.norm(diff))
+        if dist < 600.0:
+            return []
+
+        direction = diff / max(dist, 1e-6)
+        lateral = np.array([-direction[1], direction[0]], dtype=np.float32)
+        obstacles: List[StaticObstacle] = []
+        fractions = np.linspace(0.42, 0.68, self._stage.num_static_obstacles)
+
+        for idx, fraction in enumerate(fractions):
+            base = ref_agent.pos + direction * dist * float(fraction)
+            lateral_mag = float(self._rng.uniform(
+                OBSTACLE.path_offset_min,
+                OBSTACLE.path_offset_max,
+            ))
+            lateral_sign = 1.0 if idx % 2 == 0 else -1.0
+            pos = base + lateral * lateral_sign * lateral_mag
+            pos[0] = float(np.clip(
+                pos[0],
+                FIELD.x_own_ground + OBSTACLE.spawn_margin,
+                FIELD.x_opponent_ground - OBSTACLE.spawn_margin,
+            ))
+            pos[1] = float(np.clip(
+                pos[1],
+                FIELD.y_right_sideline + OBSTACLE.spawn_margin,
+                FIELD.y_left_sideline - OBSTACLE.spawn_margin,
+            ))
+
+            if (
+                np.linalg.norm(pos - ref_agent.pos) < 550.0
+                or np.linalg.norm(pos - self._ball.pos) < 450.0
+            ):
+                continue
+
+            obstacles.append(StaticObstacle(
+                obstacle_id=f"static_obs_{idx}",
+                pos=pos.astype(np.float32),
+                radius=OBSTACLE.radius,
+            ))
+
+        return obstacles
+
+    def _resolve_agent_obstacle_collisions(self):
+        if not self._static_obstacles:
+            return
+
+        for aid, agent in self._agents_state.items():
+            corrected = agent
+            for obstacle in self._static_obstacles:
+                diff = corrected.pos - obstacle.pos
+                dist = float(np.linalg.norm(diff))
+                min_sep = AGENT.radius + obstacle.radius
+                if dist < min_sep:
+                    if dist <= 1e-6:
+                        push_dir = np.array(
+                            [math.cos(corrected.theta), math.sin(corrected.theta)],
+                            dtype=np.float32,
+                        )
+                    else:
+                        push_dir = diff / dist
+                    new_pos = obstacle.pos + push_dir * (min_sep + 5.0)
+                    new_pos[0] = float(np.clip(
+                        new_pos[0],
+                        FIELD.x_own_ground - 500.0,
+                        FIELD.x_opponent_ground + 500.0,
+                    ))
+                    new_pos[1] = float(np.clip(
+                        new_pos[1],
+                        FIELD.y_right_sideline - 500.0,
+                        FIELD.y_left_sideline + 500.0,
+                    ))
+                    corrected = AgentState(
+                        agent_id=corrected.agent_id,
+                        pos=new_pos.astype(np.float32),
+                        theta=corrected.theta,
+                        vel=np.zeros(2, dtype=np.float32),
+                        omega=corrected.omega,
+                        role=corrected.role,
+                        is_upright=corrected.is_upright,
+                        recovery_steps=corrected.recovery_steps,
+                        battery=corrected.battery,
+                        walk_target=corrected.walk_target.copy(),
+                        speed_scalar=0.0,
+                        is_active=corrected.is_active,
+                    )
+            self._agents_state[aid] = corrected
+
     # ── Action decoding ───────────────────────────────────────────────
 
     def _decode_action(self, action, agent, agent_id=""):
@@ -1461,16 +1612,21 @@ class NaoSoccerEnv(ParallelEnv):
             prev_face = self._prev_face_thetas.get(agent_id, agent.theta)
             diff = math.atan2(math.sin(raw_theta - prev_face), math.cos(raw_theta - prev_face))
             in_handoff_pose = self._handoff_mgr.compute_handoff_ready(agent, self._ball, self._game)
-            angle_deadband = math.radians(6.0)
+            face_hold_dist = AGENT.ball_interaction_range * float(
+                getattr(self._stage, "face_hold_dist_ratio", 0.70)
+            )
+            angle_deadband = math.radians(float(
+                getattr(self._stage, "face_theta_deadband_deg", 6.0)
+            ))
+            face_alpha = float(getattr(self._stage, "face_theta_alpha", 0.18))
 
             if (
-                dist_to_ball < AGENT.ball_interaction_range * 0.7
+                dist_to_ball < face_hold_dist
                 or in_handoff_pose
                 or abs(diff) < angle_deadband
             ):
                 target_theta = prev_face
             else:
-                face_alpha = 0.18
                 target_theta = _normalize_angle(prev_face + face_alpha * diff)
 
             if agent_id:
@@ -1533,6 +1689,23 @@ class NaoSoccerEnv(ParallelEnv):
                     last_touched_by=ball.last_touched_by,
                 )
 
+        for obstacle in self._static_obstacles:
+            diff = ball.pos - obstacle.pos
+            dist = float(np.linalg.norm(diff))
+            min_sep = obstacle.radius + BALL.radius
+            if dist < min_sep:
+                if dist <= 1e-6:
+                    push_dir = np.array([1.0, 0.0], dtype=np.float32)
+                else:
+                    push_dir = diff / dist
+                reflected = ball.vel - 2.0 * np.dot(ball.vel, push_dir) * push_dir
+                ball = BallState(
+                    pos=obstacle.pos + push_dir * (min_sep + 5.0),
+                    vel=0.35 * reflected,
+                    last_touched_by=ball.last_touched_by,
+                    seen_age_ms=ball.seen_age_ms,
+                )
+
         return ball
 
     def _nearest_to_ball_opponent(self):
@@ -1551,9 +1724,7 @@ class NaoSoccerEnv(ParallelEnv):
 
         for aid in agent_ids:
             agent = self._agents_state[aid]
-            visible_opps = self._fov_filter.get_visible_opponents(
-                aid, agent.pos, agent.theta, self._opponents_state
-            )
+            visible_opps = self._get_visible_obstacle_aware_entities(aid, agent)
             obs = self._obs_builder.build(
                 agent, all_agents, self._ball,
                 visible_opps, self._game, self._current_tactic
@@ -1562,6 +1733,21 @@ class NaoSoccerEnv(ParallelEnv):
                 obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
             observations[aid] = obs
         return observations
+
+    def _get_visible_obstacle_aware_entities(self, agent_id: str, agent: AgentState):
+        visible_entities = self._fov_filter.get_visible_opponents(
+            agent_id, agent.pos, agent.theta, self._opponents_state
+        )
+
+        for obstacle in self._static_obstacles:
+            if not self._use_fov or self._fov_filter._is_in_fov(agent.pos, agent.theta, obstacle.pos):
+                visible_entities.append(obstacle)
+
+        def _entity_dist(entity):
+            return float(np.linalg.norm(entity.pos - agent.pos))
+
+        visible_entities.sort(key=_entity_dist)
+        return visible_entities[:OBS.opp_slots]
 
     # ── Rewards ────────────────────────────────────────────────────────
 
@@ -1649,6 +1835,7 @@ class NaoSoccerEnv(ParallelEnv):
         effective_macro_type = macro.macro_type
         if sidecar_output is not None and not macro.macro_active:
             effective_macro_type = sidecar_output.macro_type
+        ready_frames = max(1, self._episode_handoff_ready_frames)
         base_info = {
             "own_score": self._game.own_score,
             "opp_score": self._game.opp_score,
@@ -1670,9 +1857,32 @@ class NaoSoccerEnv(ParallelEnv):
             "episode_takeover_count": self._episode_takeover_count,
             "episode_takeover_success": self._episode_takeover_success,
             "episode_handoff_achieved": self._episode_handoff_achieved,
+            "episode_handoff_ready_frames": self._episode_handoff_ready_frames,
+            "episode_playball_entry_count": self._episode_playball_entry_count,
+            "episode_playball_achieved": self._episode_playball_achieved,
+            "episode_ready_but_walk_frames": self._episode_ready_but_walk_frames,
+            "episode_ready_touch_but_walk_frames": self._episode_ready_touch_but_walk_frames,
+            "episode_ready_but_walk_rate": (
+                self._episode_ready_but_walk_frames / ready_frames
+                if self._episode_handoff_ready_frames > 0 else 0.0
+            ),
+            "episode_ready_touch_but_walk_rate": (
+                self._episode_ready_touch_but_walk_frames / ready_frames
+                if self._episode_handoff_ready_frames > 0 else 0.0
+            ),
+            "static_obstacle_count": len(self._static_obstacles),
+            "static_obstacles": [
+                {
+                    "id": obstacle.obstacle_id,
+                    "pos": obstacle.pos.tolist(),
+                    "radius": obstacle.radius,
+                }
+                for obstacle in self._static_obstacles
+            ],
             "global_state": build_global_state(
                 list(self._agents_state.values()),
-                self._ball, self._opponents_state, self._game
+                self._ball, self._opponents_state, self._game,
+                static_obstacles=self._static_obstacles,
             ),
             "execution_mode": self._execution_mode,
             "sidecar_active": self._sidecar is not None,
@@ -1724,7 +1934,8 @@ class NaoSoccerEnv(ParallelEnv):
     def get_global_state(self):
         return build_global_state(
             list(self._agents_state.values()),
-            self._ball, self._opponents_state, self._game
+            self._ball, self._opponents_state, self._game,
+            static_obstacles=self._static_obstacles,
         )
 
     def close(self):

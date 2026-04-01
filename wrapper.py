@@ -143,6 +143,9 @@ class BHumanMetricsAggregator:
         self._window_size = window_size
         self._takeover_ready: deque = deque(maxlen=window_size)
         self._takeover_success: deque = deque(maxlen=window_size)
+        self._playball_entry: deque = deque(maxlen=window_size)
+        self._ready_but_walk: deque = deque(maxlen=window_size)
+        self._ready_touch_but_walk: deque = deque(maxlen=window_size)
         self._support_quality: deque = deque(maxlen=window_size)
         self._anti_blocking: deque = deque(maxlen=window_size)
         self._goals: deque = deque(maxlen=window_size)
@@ -152,6 +155,9 @@ class BHumanMetricsAggregator:
                handoff_achieved: bool,
                takeover_count: int,
                takeover_success_count: int,
+               playball_achieved: bool,
+               ready_but_walk_rate: float,
+               ready_touch_but_walk_rate: float,
                own_score: int,
                opp_score: int,
                support_quality: float = 0.5,
@@ -161,6 +167,9 @@ class BHumanMetricsAggregator:
             self._takeover_success.append(float(takeover_success_count / takeover_count))
         else:
             self._takeover_success.append(0.0)
+        self._playball_entry.append(float(playball_achieved))
+        self._ready_but_walk.append(float(ready_but_walk_rate))
+        self._ready_touch_but_walk.append(float(ready_touch_but_walk_rate))
         self._support_quality.append(support_quality)
         self._anti_blocking.append(1.0 if blocking_events == 0 else 0.0)
         self._goals.append(float(own_score > 0))
@@ -171,6 +180,9 @@ class BHumanMetricsAggregator:
             "takeover_ready_rate": self._safe_mean(self._takeover_ready),
             "takeover_success_rate": self._safe_mean(self._takeover_success),
             "bhuman_exec_success_rate": self._safe_mean(self._takeover_success),
+            "playball_entry_rate": self._safe_mean(self._playball_entry),
+            "ready_but_walk_rate": self._safe_mean(self._ready_but_walk),
+            "ready_touch_but_walk_rate": self._safe_mean(self._ready_touch_but_walk),
             "support_quality_rate": self._safe_mean(self._support_quality),
             "anti_blocking_rate": self._safe_mean(self._anti_blocking),
             "goal_rate": self._safe_mean(self._goals),
@@ -264,12 +276,20 @@ class NaoSoccerEnvWrapper:
         takeover_success = sample_info.get("episode_takeover_success", 0)
         # handoff_achieved = True if handoff_ready envelope was reached at any point
         handoff_achieved = sample_info.get("episode_handoff_achieved", False)
+        playball_achieved = sample_info.get("episode_playball_achieved", False)
+        ready_but_walk_rate = float(sample_info.get("episode_ready_but_walk_rate", 0.0))
+        ready_touch_but_walk_rate = float(
+            sample_info.get("episode_ready_touch_but_walk_rate", 0.0)
+        )
 
         # Record in metrics aggregator
         self.metrics.record(
             handoff_achieved=handoff_achieved,
             takeover_count=takeover_count,
             takeover_success_count=takeover_success,
+            playball_achieved=playball_achieved,
+            ready_but_walk_rate=ready_but_walk_rate,
+            ready_touch_but_walk_rate=ready_touch_but_walk_rate,
             own_score=own_score,
             opp_score=opp_score,
         )

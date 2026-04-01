@@ -227,6 +227,7 @@ class MetricsLogger:
         "own_score", "opp_score",
         "mean_reward", "steps",
         "takeover_ready_rate", "takeover_success_rate",
+        "playball_entry_rate", "ready_but_walk_rate", "ready_touch_but_walk_rate",
         "goal_rate_w50", "win_rate_w50",
         "policy_loss", "value_loss", "entropy",
         "elapsed_s",
@@ -263,6 +264,9 @@ class MetricsLogger:
                      stage_name: str,
                      takeover_ready_rate: float = 0.0,
                      takeover_success_rate: float = 0.0,
+                     playball_entry_rate: float = 0.0,
+                     ready_but_walk_rate: float = 0.0,
+                     ready_touch_but_walk_rate: float = 0.0,
                      policy_loss: float  = 0.0,
                      value_loss: float   = 0.0,
                      entropy: float      = 0.0,
@@ -296,6 +300,9 @@ class MetricsLogger:
             "steps":                steps,
             "takeover_ready_rate":  round(takeover_ready_rate, 4),
             "takeover_success_rate": round(takeover_success_rate, 4),
+            "playball_entry_rate":  round(playball_entry_rate, 4),
+            "ready_but_walk_rate":  round(ready_but_walk_rate, 4),
+            "ready_touch_but_walk_rate": round(ready_touch_but_walk_rate, 4),
             "goal_rate_w50":        round(float(np.mean(self._goal_window)),  3),
             "win_rate_w50":         round(float(np.mean(self._win_window)),   3),
             "policy_loss":          round(policy_loss, 5),
@@ -328,7 +335,9 @@ class MetricsLogger:
               f"Score={r['own_score']}-{r['opp_score']} | "
               f"Reward={r['mean_reward']:+.3f} | "
               f"TkReady={r['takeover_ready_rate']:.2f} | "
-              f"TkSucc={r['takeover_success_rate']:.2f} | "
+              f"TkSucc={r['takeover_success_rate']:.4f} | "
+              f"PB={r['playball_entry_rate']:.2f} | "
+              f"RBW={r['ready_but_walk_rate']:.2f} | "
               f"Stable={r['stability_score']:.2f} | "
               f"Win={r['win_rate_w50']:.2f} | "
               f"Elapsed={r['elapsed_s']:.0f}s")
@@ -1313,6 +1322,9 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             stage_name            =stage.name,
             takeover_ready_rate   =bhuman_m["takeover_ready_rate"],
             takeover_success_rate =bhuman_m["takeover_success_rate"],
+            playball_entry_rate   =bhuman_m["playball_entry_rate"],
+            ready_but_walk_rate   =bhuman_m["ready_but_walk_rate"],
+            ready_touch_but_walk_rate=bhuman_m["ready_touch_but_walk_rate"],
             policy_loss           =policy_loss,
             value_loss            =value_loss,
             entropy               =entropy,
@@ -1336,6 +1348,8 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             print(f"         Watchdog: episode_wall={episode_wall_s:.1f}s "
                   f"mean_env_step={mean_env_step_ms:.1f}ms "
                   f"mean_bridge={mean_bridge_ms:.1f}ms "
+                  f"playball={bhuman_m['playball_entry_rate']:.2f} "
+                  f"ready_walk={bhuman_m['ready_but_walk_rate']:.2f} "
                   f"mem={process_memory_mb:.1f}MB "
                   f"stable={stability_score:.2f} "
                   f"cv_rate={contract_validation_rate:.2f} "

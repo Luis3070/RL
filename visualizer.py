@@ -42,7 +42,9 @@ except ImportError:
     sys.exit(1)
 
 from config import FIELD, AGENT, FOV, CURRICULUM, CurriculumStageConfig, ROLES
-from environment import NaoSoccerEnv, AgentState, OpponentState, BallState, GameState
+from environment import (
+    NaoSoccerEnv, AgentState, OpponentState, StaticObstacle, BallState, GameState,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +67,8 @@ class Color:
     # Oponentes
     OPPONENT         = (200,  40,  40)
     OPP_FALLEN       = (140,  80,  80)
+    OBSTACLE         = (170, 170, 170)
+    OBSTACLE_EDGE    = (220, 220, 220)
 
     # Balón
     BALL             = (240, 240, 240)
@@ -271,6 +275,15 @@ class Renderer:
 
         self._label("OPP", cx, cy - r - 13, Color.TXT_RED)
 
+    def draw_static_obstacle(self, obstacle: StaticObstacle) -> None:
+        t = self._t
+        cx, cy = t.to_px(obstacle.pos[0], obstacle.pos[1])
+        r = max(6, t.mm_to_px(obstacle.radius))
+        pygame.draw.circle(self._surf, Color.SHADOW, (cx + 2, cy + 2), r)
+        pygame.draw.circle(self._surf, Color.OBSTACLE, (cx, cy), r)
+        pygame.draw.circle(self._surf, Color.OBSTACLE_EDGE, (cx, cy), r, 2)
+        self._label("OBS", cx, cy - r - 13, Color.TXT_GRAY, size=11)
+
     # ── Balón ─────────────────────────────────────────────────────────────────
 
     def draw_ball(self, ball: BallState, nearest_agent_dist: float) -> None:
@@ -338,6 +351,7 @@ class Renderer:
              Color.TXT_GREEN if show_fov else Color.TXT_GRAY),
             (f"Shaping:   {stage.shaping_weight:.2f}",      Color.TXT_WHITE),
             (f"Theta free:{stage.theta_free}",               Color.TXT_WHITE),
+            (f"Obstacles: {stage.num_static_obstacles}",     Color.TXT_WHITE),
             ("",                                             Color.TXT_WHITE),
             (f"{'  ⏸  PAUSED  ' if paused else '  ▶  RUNNING'}",
              Color.TXT_YELLOW if paused else Color.TXT_GREEN),
@@ -354,6 +368,9 @@ class Renderer:
                 (f"Actor:     {control_debug.get('active_agent', '-')}", Color.TXT_WHITE),
                 (f"Macro:     {control_debug.get('macro_type', 'none')}", Color.TXT_WHITE),
                 (f"BHuman:    {control_debug.get('skill_request', 'none')}", Color.TXT_WHITE),
+                (f"PB entry:  {control_debug.get('playball_entries', 0)}", Color.TXT_WHITE),
+                (f"RBW rate:  {control_debug.get('ready_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
+                (f"RTBW rate: {control_debug.get('ready_touch_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
             ])
         self._panel(left, x=8, y=8, font=f_md)
 
@@ -431,6 +448,10 @@ class EnvStateReader:
         return self._env._opponents_state
 
     @property
+    def static_obstacles(self) -> List[StaticObstacle]:
+        return self._env._static_obstacles
+
+    @property
     def ball(self) -> BallState:
         return self._env._ball
 
@@ -465,6 +486,11 @@ class EnvStateReader:
             "active_agent": str(info.get("active_agent_id", "-")),
             "macro_type": str(info.get("macro_type", "none")),
             "skill_request": str(info.get("sidecar_skill_request", "none")),
+            "playball_entries": int(info.get("episode_playball_entry_count", 0)),
+            "ready_walk_rate": float(info.get("episode_ready_but_walk_rate", 0.0)),
+            "ready_touch_walk_rate": float(
+                info.get("episode_ready_touch_but_walk_rate", 0.0)
+            ),
         }
 
     def nearest_agent_dist(self) -> float:
@@ -695,17 +721,21 @@ class SoccerVisualizer:
                 r.draw_fov_cone(agent)
 
         # 3. Oponentes
+        for obstacle in self._reader.static_obstacles:
+            r.draw_static_obstacle(obstacle)
+
+        # 4. Oponentes
         for opp in self._reader.opponents:
             r.draw_opponent(opp)
 
-        # 4. Agentes RL
+        # 5. Agentes RL
         for agent in self._reader.agents.values():
             r.draw_agent(agent)
 
-        # 5. Balón
+        # 6. Balón
         r.draw_ball(self._reader.ball, self._reader.nearest_agent_dist())
 
-        # 6. HUD
+        # 7. HUD
         r.draw_hud(
             game         = self._reader.game,
             stage        = CURRICULUM[self._stage_id],
@@ -758,10 +788,10 @@ class SoccerVisualizer:
 
 def main() -> None:
     # Configuración rápida: solo editar estos valores y presionar Play.
-    STAGE_IDX  = 0
+    STAGE_IDX  = 2
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "J:\ROBOTICA\runs\practical_stage0_fovTrue_1774934106\checkpoints\mappo_stage0_1v0_approach_800_ep000124.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "J:\ROBOTICA\runs\practical_stage0_fovTrue_1774978160\checkpoints\mappo_stage1_1v0_approach_1600_ep000277.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None
