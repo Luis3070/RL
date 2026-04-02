@@ -53,6 +53,14 @@ from config import (
 )
 from wrapper import NaoSoccerEnvWrapper
 
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ESCALA DE REWARDS
@@ -77,6 +85,9 @@ def scale_reward(r: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 NAN_DEBUG: bool = False  # NaN diagnosticado y corregido. Reactivar solo si reaparece.
+
+_MAPPO_ACT_COMPAT_MODE: Optional[int] = None
+_MAPPO_RECORD_COMPAT_MODE: Optional[int] = None
 
 def check_finite(name: str,
                  x: Any,
@@ -235,6 +246,8 @@ class MetricsLogger:
         "process_memory_mb", "stability_score",
         "bridge_reconnect_count", "contract_validation_rate",
         "non_pipe_rate", "not_playing_rate",
+        "ep_takeover_timeout_rate", "ep_takeover_skill_cleared_rate",
+        "ep_takeover_active_change_rate", "ep_takeover_other_end_rate",
     ]
 
     def __init__(self, log_dir: str):
@@ -278,7 +291,11 @@ class MetricsLogger:
                      bridge_reconnect_count: int = 0,
                      contract_validation_rate: float = 0.0,
                      non_pipe_rate: float = 0.0,
-                     not_playing_rate: float = 0.0) -> None:
+                     not_playing_rate: float = 0.0,
+                     ep_takeover_timeout_rate: float = 0.0,
+                     ep_takeover_skill_cleared_rate: float = 0.0,
+                     ep_takeover_active_change_rate: float = 0.0,
+                     ep_takeover_other_end_rate: float = 0.0) -> None:
         """Registra métricas BHuman-aware."""
         self._episode += 1
 
@@ -318,6 +335,10 @@ class MetricsLogger:
             "contract_validation_rate": round(contract_validation_rate, 4),
             "non_pipe_rate":        round(non_pipe_rate, 4),
             "not_playing_rate":     round(not_playing_rate, 4),
+            "ep_takeover_timeout_rate": round(ep_takeover_timeout_rate, 4),
+            "ep_takeover_skill_cleared_rate": round(ep_takeover_skill_cleared_rate, 4),
+            "ep_takeover_active_change_rate": round(ep_takeover_active_change_rate, 4),
+            "ep_takeover_other_end_rate": round(ep_takeover_other_end_rate, 4),
         }
         self._rows.append(row)
 
@@ -338,6 +359,8 @@ class MetricsLogger:
               f"TkSucc={r['takeover_success_rate']:.4f} | "
               f"PB={r['playball_entry_rate']:.2f} | "
               f"RBW={r['ready_but_walk_rate']:.2f} | "
+              f"TO={r['ep_takeover_timeout_rate']:.2f} | "
+              f"CLR={r['ep_takeover_skill_cleared_rate']:.2f} | "
               f"Stable={r['stability_score']:.2f} | "
               f"Win={r['win_rate_w50']:.2f} | "
               f"Elapsed={r['elapsed_s']:.0f}s")
@@ -592,7 +615,7 @@ def build_mappo_agent(env_wrapper: NaoSoccerEnvWrapper,
         }
         memories[aid] = RandomMemory(
             memory_size=ppo_cfg.rollout_steps,
-            num_envs=1,
+            num_envs=2,
             device=device,
         )
 
@@ -789,37 +812,162 @@ def _extract_mappo_actions(act_output: Any,
     raise TypeError("Salida de MAPPO.act no reconocida para múltiples agentes")
 
 
+def _copy_vector_to_tensor(dst: torch.Tensor, value: Any) -> None:
+    """
+    Copia un vector CPU/GPU a un tensor prealocado preservando forma y dtype.
+
+    Este helper reduce allocaciones repetidas dentro del loop de entrenamiento.
+    """
+    if value is None:
+        dst.zero_()
+        return
+
+    if isinstance(value, torch.Tensor):
+        src = value.detach()
+        if src.device != dst.device or src.dtype != dst.dtype:
+            src = src.to(device=dst.device, dtype=dst.dtype)
+        dst.copy_(src.reshape_as(dst), non_blocking=dst.is_cuda)
+        return
+
+    src_arr = np.ascontiguousarray(np.asarray(value, dtype=np.float32).reshape(-1))
+    if src_arr.shape[0] != dst.numel():
+        raise ValueError(
+            f"Shape mismatch copiando vector: expected={dst.numel()} got={src_arr.shape[0]}"
+        )
+    dst.copy_(torch.from_numpy(src_arr), non_blocking=dst.is_cuda)
+
+
+class TrainingTensorCache:
+    """
+    Reutiliza buffers por agente para act() y record_transition().
+
+    skrl copia las muestras al buffer de memoria, asÃ­ que es seguro reciclar
+    estos tensores entre pasos.
+    """
+
+    def __init__(self, agent_ids: List[str], device: str):
+        self.agent_ids = list(agent_ids)
+        self.device = torch.device(device)
+
+        self.obs = {
+            aid: torch.zeros(OBS.total, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.states = {
+            aid: torch.zeros(GLOBAL_STATE.total, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.actions = {
+            aid: torch.zeros(ACTION.size, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.rewards = {
+            aid: torch.zeros(1, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.next_obs = {
+            aid: torch.zeros(OBS.total, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.next_states = {
+            aid: torch.zeros(GLOBAL_STATE.total, dtype=torch.float32, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.terminated = {
+            aid: torch.zeros(1, dtype=torch.bool, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.truncated = {
+            aid: torch.zeros(1, dtype=torch.bool, device=self.device)
+            for aid in self.agent_ids
+        }
+        self.shared_states = torch.zeros(GLOBAL_STATE.total, dtype=torch.float32, device=self.device)
+        self.shared_next_states = torch.zeros(GLOBAL_STATE.total, dtype=torch.float32, device=self.device)
+        self.infos = {
+            "shared_states": self.shared_states,
+            "shared_next_states": self.shared_next_states,
+        }
+
+    def load_policy_inputs(self, obs: Dict[str, Any], infos: Dict[str, Any]) -> None:
+        for aid in self.agent_ids:
+            _copy_vector_to_tensor(self.obs[aid], obs.get(aid))
+            _copy_vector_to_tensor(self.states[aid], infos.get(aid, {}).get("state"))
+
+    def load_transition_inputs(
+        self,
+        curr_obs: Dict[str, Any],
+        curr_infos: Dict[str, Any],
+        actions_dict: Dict[str, np.ndarray],
+        rewards: Dict[str, float],
+        next_obs: Dict[str, Any],
+        infos: Dict[str, Any],
+        terminateds: Dict[str, Any],
+        truncateds: Dict[str, Any],
+        active_agents: List[str],
+    ) -> None:
+        active_set = set(active_agents)
+        _copy_vector_to_tensor(
+            self.shared_states,
+            next(iter(curr_infos.values()), {}).get("state"),
+        )
+        _copy_vector_to_tensor(
+            self.shared_next_states,
+            next(iter(infos.values()), {}).get("state"),
+        )
+
+        for aid in self.agent_ids:
+            _copy_vector_to_tensor(self.obs[aid], curr_obs.get(aid))
+            _copy_vector_to_tensor(self.states[aid], curr_infos.get(aid, {}).get("state"))
+            _copy_vector_to_tensor(self.actions[aid], actions_dict.get(aid))
+            self.rewards[aid].fill_(scale_reward(rewards.get(aid, 0.0)))
+            _copy_vector_to_tensor(self.next_obs[aid], next_obs.get(aid))
+            _copy_vector_to_tensor(self.next_states[aid], infos.get(aid, {}).get("state"))
+            self.terminated[aid].fill_(bool(terminateds.get(aid, aid not in active_set)))
+            self.truncated[aid].fill_(bool(truncateds.get(aid, False)))
+
+
 def _mappo_act_compat(agent: MAPPO,
                       observations: Dict[str, torch.Tensor],
                       states: Dict[str, torch.Tensor],
                       timestep: int,
                       timesteps: int) -> Dict[str, torch.Tensor]:
     """Llama MAPPO.act con compatibilidad entre firmas de skrl."""
-    attempts = [
-        lambda: agent.act(
-            observations=observations,
-            states=states,
-            timestep=timestep,
-            timesteps=timesteps,
-        ),
-        lambda: agent.act(
-            observations,
-            states,
-            timestep=timestep,
-            timesteps=timesteps,
-        ),
-        lambda: agent.act(
-            states=observations,
-            timestep=timestep,
-            timesteps=timesteps,
-        ),
-        lambda: agent.act(observations, timestep, timesteps),
-    ]
+    global _MAPPO_ACT_COMPAT_MODE
+
+    def _invoke(mode: int) -> Any:
+        if mode == 0:
+            return agent.act(
+                observations=observations,
+                states=states,
+                timestep=timestep,
+                timesteps=timesteps,
+            )
+        if mode == 1:
+            return agent.act(
+                observations,
+                states,
+                timestep=timestep,
+                timesteps=timesteps,
+            )
+        if mode == 2:
+            return agent.act(
+                states=observations,
+                timestep=timestep,
+                timesteps=timesteps,
+            )
+        if mode == 3:
+            return agent.act(observations, timestep, timesteps)
+        raise RuntimeError(f"Modo act compat desconocido: {mode}")
+
+    if _MAPPO_ACT_COMPAT_MODE is not None:
+        output = _invoke(_MAPPO_ACT_COMPAT_MODE)
+        return _extract_mappo_actions(output, list(observations.keys()))
 
     last_err: Optional[Exception] = None
-    for attempt in attempts:
+    for mode in range(4):
         try:
-            output = attempt()
+            output = _invoke(mode)
+            _MAPPO_ACT_COMPAT_MODE = mode
             return _extract_mappo_actions(output, list(observations.keys()))
         except TypeError as err:
             last_err = err
@@ -842,48 +990,61 @@ def _mappo_record_transition_compat(agent: MAPPO,
                                     timestep: int,
                                     timesteps: int) -> None:
     """Llama MAPPO.record_transition con compatibilidad entre firmas de skrl."""
-    attempts = [
-        lambda: agent.record_transition(
-            observations=observations,
-            states=states,
-            actions=actions,
-            rewards=rewards,
-            next_observations=next_observations,
-            next_states=next_states,
-            terminated=terminated,
-            truncated=truncated,
-            infos=infos,
-            timestep=timestep,
-            timesteps=timesteps,
-        ),
-        lambda: agent.record_transition(
-            states=observations,
-            actions=actions,
-            rewards=rewards,
-            next_states=next_observations,
-            terminated=terminated,
-            truncated=truncated,
-            infos=infos,
-            timestep=timestep,
-            timesteps=timesteps,
-        ),
-        lambda: agent.record_transition(
-            observations,
-            actions,
-            rewards,
-            next_observations,
-            terminated,
-            truncated,
-            infos,
-            timestep,
-            timesteps,
-        ),
-    ]
+    global _MAPPO_RECORD_COMPAT_MODE
+
+    def _invoke(mode: int) -> None:
+        if mode == 0:
+            agent.record_transition(
+                observations=observations,
+                states=states,
+                actions=actions,
+                rewards=rewards,
+                next_observations=next_observations,
+                next_states=next_states,
+                terminated=terminated,
+                truncated=truncated,
+                infos=infos,
+                timestep=timestep,
+                timesteps=timesteps,
+            )
+            return
+        if mode == 1:
+            agent.record_transition(
+                states=observations,
+                actions=actions,
+                rewards=rewards,
+                next_states=next_observations,
+                terminated=terminated,
+                truncated=truncated,
+                infos=infos,
+                timestep=timestep,
+                timesteps=timesteps,
+            )
+            return
+        if mode == 2:
+            agent.record_transition(
+                observations,
+                actions,
+                rewards,
+                next_observations,
+                terminated,
+                truncated,
+                infos,
+                timestep,
+                timesteps,
+            )
+            return
+        raise RuntimeError(f"Modo record compat desconocido: {mode}")
+
+    if _MAPPO_RECORD_COMPAT_MODE is not None:
+        _invoke(_MAPPO_RECORD_COMPAT_MODE)
+        return
 
     last_err: Optional[Exception] = None
-    for attempt in attempts:
+    for mode in range(3):
         try:
-            attempt()
+            _invoke(mode)
+            _MAPPO_RECORD_COMPAT_MODE = mode
             return
         except TypeError as err:
             last_err = err
@@ -996,6 +1157,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
     print(f"{'='*60}\n")
 
     all_agents = list(env_wrapper.possible_agents)
+    tensor_cache = TrainingTensorCache(all_agents, device)
 
     while total_env_steps < total_steps:
 
@@ -1012,6 +1174,11 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
         ep_not_playing_steps = 0
         ep_stability_good_steps = 0
         ep_bridge_reconnect_max = 0
+        current_rollout = getattr(
+            env_wrapper.curriculum_manager.current_stage,
+            'rollout_steps',
+            ppo_cfg.rollout_steps,
+        )
 
         # ── LOOP INTERNO: pasos del episodio ───────────────────────────────
         while True:
@@ -1021,25 +1188,12 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
 
             # ── Act: SOLO active_agents (Issue 4) ─────────────────────────
             actions_dict: Dict[str, np.ndarray] = {}
-            with torch.no_grad():
-                obs_t = {
-                    aid: torch.FloatTensor(
-                        obs.get(aid, np.zeros(OBS.total, dtype=np.float32))
-                    ).to(device)
-                    for aid in all_agents
-                }
-                state_t = {
-                    aid: torch.FloatTensor(
-                        infos.get(aid, {}).get(
-                            "state", np.zeros(GLOBAL_STATE.total, dtype=np.float32)
-                        )
-                    ).to(device)
-                    for aid in all_agents
-                }
+            tensor_cache.load_policy_inputs(obs, infos)
+            with torch.inference_mode():
                 actions_t = _mappo_act_compat(
                     agent=agent,
-                    observations=obs_t,
-                    states=state_t,
+                    observations=tensor_cache.obs,
+                    states=tensor_cache.states,
                     timestep=total_env_steps,
                     timesteps=total_steps,
                 )
@@ -1055,7 +1209,9 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                     if at is None:
                         actions_dict[aid] = np.zeros(ACTION.size, dtype=np.float32)
                     else:
-                        a_np = at.detach().cpu().numpy().reshape(-1)
+                        a_np = np.ascontiguousarray(
+                            at.detach().to(device="cpu", dtype=torch.float32).numpy().reshape(-1)
+                        )
                         if not np.all(np.isfinite(a_np)):
                             any_nan_this_step = True
                         actions_dict[aid] = a_np
@@ -1112,41 +1268,39 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             # ── Record: SOLO active_agents (Issue 4) ───────────────────────
             # Agentes inactivos no tienen obs real, reward real ni acción real.
             # Sus ceros contaminarían el buffer con gradientes falsos.
-            shared_state = np.asarray(
-                next(iter(curr_infos.values()), {}).get(
-                    "state", np.zeros(GLOBAL_STATE.total, dtype=np.float32)
-                ), dtype=np.float32,
+            tensor_cache.load_transition_inputs(
+                curr_obs=curr_obs,
+                curr_infos=curr_infos,
+                actions_dict=actions_dict,
+                rewards=rewards,
+                next_obs=next_obs,
+                infos=infos,
+                terminateds=terminateds,
+                truncateds=truncateds,
+                active_agents=active_agents,
             )
-            shared_next = np.asarray(
-                next(iter(infos.values()), {}).get(
-                    "state", np.zeros(GLOBAL_STATE.total, dtype=np.float32)
-                ), dtype=np.float32,
-            )
-            infos_t = {
-                "shared_states":      torch.FloatTensor(shared_state).to(device),
-                "shared_next_states": torch.FloatTensor(shared_next).to(device),
-            }
 
             with torch.no_grad():
                 _mappo_record_transition_compat(
                     agent=agent,
-                    observations={
-                        aid: torch.FloatTensor(
-                            curr_obs.get(aid, np.zeros(OBS.total, dtype=np.float32))
-                        ).to(device) for aid in all_agents
-                    },
-                    states={
-                        aid: torch.FloatTensor(
-                            curr_infos.get(aid, {}).get(
-                                "state", np.zeros(GLOBAL_STATE.total, dtype=np.float32)
-                            )
-                        ).to(device) for aid in all_agents
-                    },
-                    actions={
-                        aid: torch.FloatTensor(
-                            actions_dict.get(aid, np.zeros(ACTION.size, dtype=np.float32))
-                        ).to(device) for aid in all_agents
-                    },
+                    observations=tensor_cache.obs,
+                    states=tensor_cache.states,
+                    actions=tensor_cache.actions,
+                    rewards=tensor_cache.rewards,
+                    next_observations=tensor_cache.next_obs,
+                    next_states=tensor_cache.next_states,
+                    terminated=tensor_cache.terminated,
+                    truncated=tensor_cache.truncated,
+                    infos=tensor_cache.infos,
+                    timestep=total_env_steps,
+                    timesteps=total_steps,
+                )
+            if False:
+                _mappo_record_transition_compat(
+                    agent=agent,
+                    observations=tensor_cache.obs,
+                    states=tensor_cache.states,
+                    actions=tensor_cache.actions,
                     rewards={
                         # Normalizar rewards antes de entrar al buffer de skrl.
                         # Esto mantiene las ventajas GAE en un rango razonable
@@ -1235,11 +1389,6 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             obs = next_obs
 
             # ── Update ─────────────────────────────────────────────────────
-            current_rollout = getattr(
-                env_wrapper.curriculum_manager.current_stage,
-                'rollout_steps',
-                ppo_cfg.rollout_steps,
-            )
             if steps_since_update >= current_rollout:
                 if not warmup_done:
                     # Durante warmup: contar rollouts completos sin actualizar.
@@ -1312,6 +1461,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
 
         # Get BHuman metrics from aggregator
         bhuman_m = env_wrapper.metrics.get_metrics()
+        sample_info = next(iter(infos.values())) if infos else {}
 
         logger.log_episode(
             own_score             =env_wrapper._env._game.own_score,
@@ -1337,6 +1487,18 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             contract_validation_rate=contract_validation_rate,
             non_pipe_rate         =non_pipe_rate,
             not_playing_rate      =not_playing_rate,
+            ep_takeover_timeout_rate=float(
+                sample_info.get("episode_takeover_timeout_rate", 0.0)
+            ),
+            ep_takeover_skill_cleared_rate=float(
+                sample_info.get("episode_takeover_skill_cleared_rate", 0.0)
+            ),
+            ep_takeover_active_change_rate=float(
+                sample_info.get("episode_takeover_active_change_rate", 0.0)
+            ),
+            ep_takeover_other_end_rate=float(
+                sample_info.get("episode_takeover_other_end_rate", 0.0)
+            ),
         )
 
         if episode % log_cfg.print_every_eps == 0:
@@ -1350,6 +1512,8 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                   f"mean_bridge={mean_bridge_ms:.1f}ms "
                   f"playball={bhuman_m['playball_entry_rate']:.2f} "
                   f"ready_walk={bhuman_m['ready_but_walk_rate']:.2f} "
+                  f"to={float(sample_info.get('episode_takeover_timeout_rate', 0.0)):.2f} "
+                  f"clr={float(sample_info.get('episode_takeover_skill_cleared_rate', 0.0)):.2f} "
                   f"mem={process_memory_mb:.1f}MB "
                   f"stable={stability_score:.2f} "
                   f"cv_rate={contract_validation_rate:.2f} "

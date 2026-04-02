@@ -34,6 +34,7 @@ from trajectory_guidance.settings import AStarConfig, StageObjective
 from trajectory_guidance.heuristic import (
     SimplifiedWorldState,
     behind_ball_point,
+    estimate_takeover_proxy,
     heuristic_cost,
     nearest_goal_post,
     terminal_score,
@@ -136,12 +137,12 @@ def apply_primitive(primitive: Primitive,
                     heading: float,
                     stage_id: int,
                     objective: StageObjective) -> tuple[np.ndarray, np.ndarray, float,
-                                                        bool, int, bool, np.ndarray, bool]:
+                                                        bool, int, bool, np.ndarray, bool, bool]:
     """Simula un paso del agente usando la primitiva dada.
     
     Returns:
         (next_agent, next_ball, next_heading, touched_ball, recontact_inc,
-         goal_scored, waypoint_target, own_goal)
+         goal_scored, waypoint_target, own_goal, kicked)
          
     Cambios:
       - dribble_angle: dirección configurable del dribble
@@ -159,6 +160,7 @@ def apply_primitive(primitive: Primitive,
     recontact_inc = 1 if touched_ball else 0
     goal_scored = False
     own_goal = False
+    kicked = False
 
     if primitive.name == "align_then_kick":
         if d_ball > getattr(AGENT, "ball_kick_range", 400.0):
@@ -189,8 +191,9 @@ def apply_primitive(primitive: Primitive,
                                and abs(next_ball[1]) <= 900.0)
             touched_ball = True
             recontact_inc = 1
+            kicked = True
     else:
-        if d_ball > AGENT.ball_dribble_range:
+        if d_ball > getattr(AGENT, "ball_dribble_range", 340.0):
             # APPROACH: ir hacia el balón (con offset lateral si aplica)
             target = ball_pos.copy()
             move_dir = to_ball / (d_ball + 1e-6)
@@ -233,7 +236,7 @@ def apply_primitive(primitive: Primitive,
                     if np.linalg.norm(delta) > 1e-6 else heading)
     return (next_agent.astype(np.float32), next_ball.astype(np.float32),
             next_heading, touched_ball, recontact_inc, goal_scored,
-            target.astype(np.float32), own_goal)
+            target.astype(np.float32), own_goal, kicked)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,7 +433,7 @@ class AStarSolver:
             # Pero si estamos cerca del balón, desbloquear dribble/kick.
             dist_to_ball = float(np.linalg.norm(
                 state.agent_pos - state.ball_pos))
-            in_contact_zone = dist_to_ball <= AGENT.ball_dribble_range * 1.3
+            in_contact_zone = dist_to_ball <= getattr(AGENT, "ball_dribble_range", 340.0) * 1.3
 
             if in_contact_zone:
                 # Cerca del balón: usar la forzada + dribble + kick
@@ -499,7 +502,7 @@ class AStarSolver:
             for primitive in primitives:
                 (next_agent, next_ball, next_heading,
                  touched, recontact_inc, goal_scored,
-                 waypoint, prim_own_goal) = apply_primitive(
+                 waypoint, prim_own_goal, kicked) = apply_primitive(
                     primitive,
                     current.state.agent_pos,
                     current.state.ball_pos,
@@ -507,14 +510,31 @@ class AStarSolver:
                     objective.stage_id,
                     objective,
                 )
+                next_recontacts = current.state.recontacts + recontact_inc
+                handoff_ready, playball_active, ready_but_walk, takeover_success = (
+                    estimate_takeover_proxy(
+                        next_agent,
+                        next_ball,
+                        next_heading,
+                        recontacts=next_recontacts,
+                        objective=objective,
+                        goal_scored=(current.state.goal_scored or goal_scored),
+                        kicked=(current.state.kicked or kicked),
+                    )
+                )
                 next_state = SimplifiedWorldState(
                     agent_pos=next_agent,
                     ball_pos=next_ball,
                     heading=next_heading,
                     touched_ball=current.state.touched_ball or touched,
-                    recontacts=current.state.recontacts + recontact_inc,
+                    recontacts=next_recontacts,
                     goal_scored=current.state.goal_scored or goal_scored,
                     own_goal=current.state.own_goal or prim_own_goal,
+                    kicked=current.state.kicked or kicked,
+                    handoff_ready=handoff_ready,
+                    playball_active=playball_active,
+                    ready_but_walk=ready_but_walk,
+                    takeover_success=current.state.takeover_success or takeover_success,
                 )
                 step_cost = heuristic_cost(next_state, objective,
                                            next_heading=next_heading)
@@ -608,7 +628,7 @@ class AStarSolver:
             for primitive in primitives:
                 (next_agent, next_ball, next_heading,
                  touched, recontact_inc, goal_scored,
-                 waypoint, prim_own_goal) = apply_primitive(
+                 waypoint, prim_own_goal, kicked) = apply_primitive(
                     primitive,
                     current.state.agent_pos,
                     current.state.ball_pos,
@@ -616,14 +636,31 @@ class AStarSolver:
                     objective.stage_id,
                     objective,
                 )
+                next_recontacts = current.state.recontacts + recontact_inc
+                handoff_ready, playball_active, ready_but_walk, takeover_success = (
+                    estimate_takeover_proxy(
+                        next_agent,
+                        next_ball,
+                        next_heading,
+                        recontacts=next_recontacts,
+                        objective=objective,
+                        goal_scored=(current.state.goal_scored or goal_scored),
+                        kicked=(current.state.kicked or kicked),
+                    )
+                )
                 next_state = SimplifiedWorldState(
                     agent_pos=next_agent,
                     ball_pos=next_ball,
                     heading=next_heading,
                     touched_ball=current.state.touched_ball or touched,
-                    recontacts=current.state.recontacts + recontact_inc,
+                    recontacts=next_recontacts,
                     goal_scored=current.state.goal_scored or goal_scored,
                     own_goal=current.state.own_goal or prim_own_goal,
+                    kicked=current.state.kicked or kicked,
+                    handoff_ready=handoff_ready,
+                    playball_active=playball_active,
+                    ready_but_walk=ready_but_walk,
+                    takeover_success=current.state.takeover_success or takeover_success,
                 )
                 step_cost = heuristic_cost(next_state, objective,
                                            next_heading=next_heading)
@@ -661,6 +698,10 @@ class AStarSolver:
     def _is_terminal(self, node: TrajectoryNode,
                      objective: StageObjective) -> bool:
         state = node.state
+        if objective.require_handoff_ready and not state.handoff_ready:
+            return False
+        if objective.require_takeover_success and not state.takeover_success:
+            return False
         if objective.success_mode == "goal_completion":
             return state.goal_scored
         elif objective.success_mode == "touch_and_control":

@@ -333,6 +333,10 @@ class CurriculumStageConfig:
     advance_metric:        str       # "takeover_rate", "win_rate", etc.
     advance_threshold:     float
     advance_window:        int
+    min_playball_entry_rate: float = 0.0
+    min_takeover_success_rate: float = 0.0
+    max_ready_but_walk_rate: float = 1.0
+    max_ready_touch_but_walk_rate: float = 1.0
 
     # BHuman takeover
     takeover_required:     bool = False   # whether handoff/takeover flow is active
@@ -353,6 +357,8 @@ class CurriculumStageConfig:
     face_theta_alpha:      float = 0.18
     face_theta_deadband_deg: float = 6.0
     face_hold_dist_ratio:  float = 0.70
+    target_pos_alpha:      float = 1.0
+    rotation_threshold_rad: float = 0.5
     rollout_steps:         int   = 2048
     local_horizon:         float = 0.0
 
@@ -382,14 +388,20 @@ CURRICULUM: List[CurriculumStageConfig] = [
         advance_metric="takeover_rate",
         advance_threshold=0.95,
         advance_window=50,
+        min_playball_entry_rate=0.25,
+        min_takeover_success_rate=0.10,
+        max_ready_but_walk_rate=0.80,
+        max_ready_touch_but_walk_rate=0.60,
         takeover_required=True,
         ball_max_dist=800.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=60.0,
-        ema_alpha=0.55,
-        face_theta_alpha=0.10,
-        face_theta_deadband_deg=10.0,
+        ema_alpha=0.35,
+        face_theta_alpha=0.06,
+        face_theta_deadband_deg=14.0,
         face_hold_dist_ratio=0.90,
+        target_pos_alpha=0.30,
+        rotation_threshold_rad=0.85,
         rollout_steps=1024,
         local_horizon=400.0,
         shaping_approach_w=0.8,
@@ -411,6 +423,10 @@ CURRICULUM: List[CurriculumStageConfig] = [
         advance_metric="takeover_rate",
         advance_threshold=0.90,
         advance_window=80,
+        min_playball_entry_rate=0.40,
+        min_takeover_success_rate=0.25,
+        max_ready_but_walk_rate=0.65,
+        max_ready_touch_but_walk_rate=0.45,
         takeover_required=True,
         ball_max_dist=1600.0,
         spawn_ball_in_front=True,
@@ -440,6 +456,10 @@ CURRICULUM: List[CurriculumStageConfig] = [
         advance_metric="takeover_rate",
         advance_threshold=0.85,
         advance_window=100,
+        min_playball_entry_rate=0.50,
+        min_takeover_success_rate=0.35,
+        max_ready_but_walk_rate=0.55,
+        max_ready_touch_but_walk_rate=0.35,
         takeover_required=True,
         num_static_obstacles=2,
         ball_max_dist=3200.0,

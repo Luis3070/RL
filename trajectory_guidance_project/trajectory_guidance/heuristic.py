@@ -14,7 +14,7 @@ import math
 
 import numpy as np
 
-from config import FIELD
+from config import AGENT, CONTRACT, FIELD
 from trajectory_guidance.settings import StageObjective
 
 
@@ -74,6 +74,68 @@ def _normalize_angle(angle: float) -> float:
     while angle < -math.pi:
         angle += 2.0 * math.pi
     return angle
+
+
+def proxy_handoff_ready(agent_pos: np.ndarray,
+                        ball_pos: np.ndarray,
+                        heading: float) -> bool:
+    """Approximate the real handoff envelope using the same geometry contract."""
+    dx = float(ball_pos[0] - agent_pos[0])
+    dy = float(ball_pos[1] - agent_pos[1])
+
+    cos_t = math.cos(-heading)
+    sin_t = math.sin(-heading)
+    rel_x = dx * cos_t - dy * sin_t
+    rel_y = dx * sin_t + dy * cos_t
+
+    handoff = CONTRACT.handoff
+    if rel_x < float(handoff.ball_rel_x_min):
+        return False
+    if rel_x > float(handoff.ball_rel_x_max):
+        return False
+    if abs(rel_y) > float(handoff.ball_rel_y_abs_max):
+        return False
+
+    angle_to_ball = math.atan2(dy, dx)
+    angle_diff = abs(_normalize_angle(angle_to_ball - heading))
+    if math.degrees(angle_diff) > float(handoff.angle_to_ball_abs_max):
+        return False
+    return True
+
+
+def estimate_takeover_proxy(agent_pos: np.ndarray,
+                            ball_pos: np.ndarray,
+                            heading: float,
+                            recontacts: int,
+                            objective: StageObjective,
+                            goal_scored: bool = False,
+                            kicked: bool = False) -> tuple[bool, bool, bool, bool]:
+    """
+    Planner-side proxy flags aligned with handoff/takeover semantics.
+
+    They are search hints, not claims about the real backend. The final judge
+    remains the real rollout and its validity gates.
+    """
+    handoff_ready = proxy_handoff_ready(agent_pos, ball_pos, heading)
+    control_dist = max(
+        float(getattr(AGENT, "ball_dribble_range", 340.0)),
+        0.9 * float(getattr(AGENT, "ball_kick_range", 400.0)),
+    )
+    touching_ball = euclidean(agent_pos, ball_pos) <= control_dist
+    playball_active = handoff_ready and touching_ball
+    ready_but_walk = handoff_ready and not playball_active
+
+    takeover_success = bool(goal_scored)
+    if objective.success_mode == "touch_and_control":
+        takeover_success = takeover_success or (playball_active and recontacts >= 1)
+    elif objective.success_mode == "stable_dribble":
+        takeover_success = takeover_success or (playball_active and recontacts >= 2)
+    elif objective.success_mode == "dribble_align_kick":
+        takeover_success = takeover_success or kicked or (playball_active and recontacts >= 2)
+    elif objective.success_mode == "goal_completion":
+        takeover_success = takeover_success or kicked
+
+    return handoff_ready, playball_active, ready_but_walk, takeover_success
 
 
 # ── Costos individuales ──────────────────────────────────────────────────────
@@ -181,6 +243,10 @@ class SimplifiedWorldState:
     goal_scored: bool = False
     own_goal: bool = False
     kicked: bool = False
+    handoff_ready: bool = False
+    playball_active: bool = False
+    ready_but_walk: bool = False
+    takeover_success: bool = False
 
 
 # ── Costo heurístico principal ───────────────────────────────────────────────
@@ -218,6 +284,14 @@ def heuristic_cost(state: SimplifiedWorldState,
     cost += sustained_dribble_bonus(
         state.recontacts, objective.prefer_dribble,
         w.get("dribble_bonus", 80.0))
+    if state.handoff_ready:
+        cost -= 90.0 if objective.require_handoff_ready else 35.0
+    if state.playball_active:
+        cost -= 120.0
+    if state.ready_but_walk:
+        cost += 85.0
+    if state.takeover_success:
+        cost -= 220.0 if objective.require_takeover_success else 110.0
 
     # Bonos por modo de éxito
     if objective.success_mode == "touch_and_control":
@@ -256,6 +330,14 @@ def terminal_score(state: SimplifiedWorldState,
         score += 1.0
 
     score += 0.5 * math.sqrt(max(0, state.recontacts))
+    if state.handoff_ready:
+        score += 1.0
+    if state.playball_active:
+        score += 1.5
+    if state.takeover_success:
+        score += 4.0
+    if state.ready_but_walk:
+        score -= 1.5
 
     if state.goal_scored:
         score += 10.0

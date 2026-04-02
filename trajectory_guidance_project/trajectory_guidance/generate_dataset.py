@@ -7,6 +7,7 @@ BHuman-in-loop Option 1 baseline:
   - persistent_2d_cognition bridge mode
   - 2D / 4v4_Scaled environment
   - honest labels for stages 0-3
+  - hybrid starts: natural reset seeds + deterministic launch templates
 
 Stage intent policy:
   - Stage 0: control only
@@ -34,6 +35,10 @@ if __package__ in (None, ""):
 
 from config import FIELD as _FIELD
 from trajectory_guidance.dataset import export_snapshots_pkl
+from trajectory_guidance.launch_templates import (
+    get_stage_template_names,
+    resolve_launch_template,
+)
 from trajectory_guidance.settings import ASTAR_CFG, DATASET_CFG, GUMBEL_CFG
 
 
@@ -48,7 +53,15 @@ Task = Tuple[
     Optional[float],
     Optional[float],
     float,
+    str,
+    Optional[str],
 ]
+
+
+HYBRID_INCLUDE_RESET_SEEDS = True
+HYBRID_INCLUDE_LAUNCH_TEMPLATES = True
+HYBRID_MAX_ATTEMPT_MULTIPLIER = 12
+FAIL_CLOSED_ON_INSUFFICIENT_ACCEPTED = True
 
 
 def _field_bounds() -> Tuple[float, float, float, float]:
@@ -169,7 +182,7 @@ def _build_tasks(stage: int,
                  shoot_episodes: int,
                  pass_episodes: int,
                  base_seed: int,
-                 lookahead: int) -> List[Task]:
+                  lookahead: int) -> List[Task]:
     family_counts = _resolve_family_counts(
         stage=stage,
         primary_episodes=primary_episodes,
@@ -189,11 +202,13 @@ def _build_tasks(stage: int,
     pass_kick_dists    = [800.0, 1200.0, 1500.0, 2000.0]
     pass_dribble_bias  = [0.0, math.pi/6, -math.pi/6,
                           math.pi/8, -math.pi/8]
+    stage_templates = get_stage_template_names(stage)
 
     tasks: List[Task] = []
     global_ep = 0
     for intent_label, total in family_counts.items():
-        for family_ep in range(total):
+        max_attempts = max(total * HYBRID_MAX_ATTEMPT_MULTIPLIER, total)
+        for family_ep in range(max_attempts):
             current_seed = base_seed + global_ep
             approach_target = approach_targets[family_ep % len(approach_targets)]
             dribble_bias = biases[family_ep % len(biases)]
@@ -212,18 +227,38 @@ def _build_tasks(stage: int,
                 kick_dist = pass_kick_dists[family_ep % len(pass_kick_dists)]
                 dribble_bias = pass_dribble_bias[family_ep % len(pass_dribble_bias)]
 
-            tasks.append((
-                family_ep,
-                intent_label,
-                stage,
-                lookahead,
-                current_seed,
-                approach_target,
-                kick_target,
-                kick_angle,
-                kick_dist,
-                dribble_bias,
-            ))
+            if HYBRID_INCLUDE_RESET_SEEDS:
+                tasks.append((
+                    family_ep,
+                    intent_label,
+                    stage,
+                    lookahead,
+                    current_seed,
+                    approach_target,
+                    kick_target,
+                    kick_angle,
+                    kick_dist,
+                    dribble_bias,
+                    "reset_seed",
+                    None,
+                ))
+
+            if HYBRID_INCLUDE_LAUNCH_TEMPLATES and stage_templates:
+                template_name = stage_templates[family_ep % len(stage_templates)]
+                tasks.append((
+                    family_ep,
+                    intent_label,
+                    stage,
+                    lookahead,
+                    current_seed,
+                    approach_target,
+                    kick_target,
+                    kick_angle,
+                    kick_dist,
+                    dribble_bias,
+                    "launch_template",
+                    template_name,
+                ))
             global_ep += 1
     return tasks
 
@@ -231,7 +266,8 @@ def _build_tasks(stage: int,
 def generate_single_trajectory(args: Task) -> Dict[str, object]:
     """Isolated worker entrypoint to keep env state process-local."""
     (ep, intent_label, stage, lookahead, current_seed, approach_target,
-     kick_target, kick_angle, kick_dist, dribble_bias) = args
+     kick_target, kick_angle, kick_dist, dribble_bias,
+     start_mode, template_name) = args
 
     from trajectory_guidance.bridge import EnvBridge, GumbelPlanSampler
     from trajectory_guidance.evaluate_solver import SolverEvaluator
@@ -241,13 +277,28 @@ def generate_single_trajectory(args: Task) -> Dict[str, object]:
     solver = AStarSolver(ASTAR_CFG)
     evaluator = SolverEvaluator(bridge=bridge, solver=solver)
     sampler = GumbelPlanSampler(GUMBEL_CFG)
+    launch_template = None
+    if start_mode == "launch_template" and template_name is not None:
+        launch_template = resolve_launch_template(
+            stage_id=stage,
+            template_name=template_name,
+            approach_target=approach_target,
+            kick_target=kick_target,
+        )
 
     world_snapshot, plans = evaluator.plan_from_current_reset(
         stage_id=stage,
         seed=current_seed,
+        launch_template=launch_template,
     )
     if not plans:
-        return {"status": "no_plans", "ep": ep, "intent": intent_label}
+        return {
+            "status": "no_plans",
+            "ep": ep,
+            "intent": intent_label,
+            "start_mode": start_mode,
+            "template_name": template_name,
+        }
 
     sampled = sampler.sample(plans)
     ref_plan = sampled.selected
@@ -277,6 +328,8 @@ def generate_single_trajectory(args: Task) -> Dict[str, object]:
             "angle": kick_angle,
             "dist": kick_dist,
             "bias": dribble_bias,
+            "start_mode": start_mode,
+            "template_name": template_name,
         }
     if metrics.quality_score < DATASET_CFG.min_quality_score:
         return {
@@ -285,6 +338,8 @@ def generate_single_trajectory(args: Task) -> Dict[str, object]:
             "intent": intent_label,
             "quality": metrics.quality_score,
             "bias": dribble_bias,
+            "start_mode": start_mode,
+            "template_name": template_name,
         }
 
     return {
@@ -298,6 +353,8 @@ def generate_single_trajectory(args: Task) -> Dict[str, object]:
         "angle": kick_angle,
         "dist": kick_dist,
         "bias": dribble_bias,
+        "start_mode": start_mode,
+        "template_name": template_name,
     }
 
 
@@ -326,14 +383,20 @@ def _print_result(result: Dict[str, object]) -> None:
     ep = int(result["ep"])
     bias_rad = float(result.get("bias", 0.0))
     bias_deg = math.degrees(bias_rad)
+    start_mode = str(result.get("start_mode", "reset_seed"))
+    template_name = result.get("template_name")
+    start_label = start_mode if not template_name else f"{start_mode}:{template_name}"
 
     if result["status"] == "no_plans":
-        print(f"[SKIP] intent={intent_label} ep={ep} no plans")
+        print(f"[SKIP] start={start_label} intent={intent_label} ep={ep} no plans")
         return
 
     if result["status"] == "low_quality":
         quality = float(result.get("quality", 0.0))
-        print(f"[SKIP] intent={intent_label} ep={ep} low quality={quality:.2f}")
+        print(
+            f"[SKIP] start={start_label} intent={intent_label} ep={ep} "
+            f"low quality={quality:.2f}"
+        )
         return
 
     metrics = result["metrics"]
@@ -341,20 +404,24 @@ def _print_result(result: Dict[str, object]) -> None:
     approach_target = _format_target(result.get("approach_target"))
     tk_ready = int(getattr(metrics, "episode_handoff_achieved", 0) > 0)
     tk_succ = int(getattr(metrics, "episode_takeover_success", 0) > 0)
+    control_steps = int(getattr(metrics, "control_steps", 0))
+    semantic_dribble_steps = int(getattr(metrics, "dribble_steps", 0))
 
     if result["status"] == "invalid":
         print(
-            f"[SKIP] intent={intent_label} ep={ep} invalid "
+            f"[SKIP] start={start_label} intent={intent_label} ep={ep} invalid "
             f"approach={approach_target} kick={kick_target} bias={bias_deg:.0f}deg "
-            f"touch={int(metrics.touched_ball)} dribble={metrics.dribble_steps} "
+            f"touch={int(metrics.touched_ball)} control={control_steps} "
+            f"dribble_sem={semantic_dribble_steps} "
             f"TkReady={tk_ready} TkSucc={tk_succ}"
         )
         return
 
     print(
-        f"[OK] intent={intent_label} ep={ep} "
+        f"[OK] start={start_label} intent={intent_label} ep={ep} "
         f"approach={approach_target} kick={kick_target} bias={bias_deg:.0f}deg "
-        f"steps={metrics.steps} dribble={metrics.dribble_steps} "
+        f"steps={metrics.steps} control={control_steps} "
+        f"dribble_sem={semantic_dribble_steps} "
         f"TkReady={tk_ready} TkSucc={tk_succ} goal={int(metrics.goal_scored)}"
     )
 
@@ -386,35 +453,66 @@ def main() -> None:
         pass_episodes=pass_episodes,
     )
     stats = {
-        intent_label: {"total": total, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0}
+        intent_label: {
+            "target": total,
+            "attempted": 0,
+            "acc": 0,
+            "no_plans": 0,
+            "inv": 0,
+            "low_q": 0,
+        }
         for intent_label, total in family_counts.items()
     }
+    start_stats: Dict[str, Dict[str, int]] = {}
     all_snapshots = []
 
     print(
         f"\n[DATASET] stage={stage} tasks={len(tasks)} n_jobs={n_jobs} "
-        f"families={family_counts}\n"
+        f"families={family_counts} hybrid=(seed={HYBRID_INCLUDE_RESET_SEEDS} "
+        f"template={HYBRID_INCLUDE_LAUNCH_TEMPLATES}) "
+        f"attempt_multiplier={HYBRID_MAX_ATTEMPT_MULTIPLIER}\n"
     )
 
     for result in _run_tasks(tasks, n_jobs):
         intent_label = str(result["intent"])
         stats_row = stats[intent_label]
+        if stats_row["acc"] >= stats_row["target"]:
+            continue
         status = str(result["status"])
+        stats_row["attempted"] += 1
+        start_mode = str(result.get("start_mode", "reset_seed"))
+        template_name = result.get("template_name")
+        start_label = start_mode if not template_name else f"{start_mode}:{template_name}"
+        start_stats.setdefault(
+            start_label,
+            {"total": 0, "acc": 0, "no_plans": 0, "inv": 0, "low_q": 0},
+        )
+        start_stats[start_label]["total"] += 1
         if status == "ok":
             stats_row["acc"] += 1
+            start_stats[start_label]["acc"] += 1
             all_snapshots.extend(result["snapshots"])
         elif status == "no_plans":
             stats_row["no_plans"] += 1
+            start_stats[start_label]["no_plans"] += 1
         elif status == "invalid":
             stats_row["inv"] += 1
+            start_stats[start_label]["inv"] += 1
         elif status == "low_quality":
             stats_row["low_q"] += 1
+            start_stats[start_label]["low_q"] += 1
         _print_result(result)
 
-    out_path = Path(out)
-    export_snapshots_pkl(all_snapshots, str(out_path))
+        if all(row["acc"] >= row["target"] for row in stats.values()):
+            break
 
-    total_ep = sum(row["total"] for row in stats.values())
+    out_path = Path(out)
+    targets_met = all(row["acc"] >= row["target"] for row in stats.values())
+    if targets_met:
+        export_snapshots_pkl(all_snapshots, str(out_path))
+
+    total_target = sum(row["target"] for row in stats.values())
+    total_attempted = sum(row["attempted"] for row in stats.values())
     total_acc = sum(row["acc"] for row in stats.values())
 
     print(f"\n{'=' * 72}")
@@ -423,12 +521,32 @@ def main() -> None:
     for intent_label, row in stats.items():
         print(
             f"  {intent_label:11s} "
+            f"{row['acc']}/{row['target']} accepted "
+            f"(attempted={row['attempted']} "
+            f"no_plans={row['no_plans']} invalid={row['inv']} low_q={row['low_q']})"
+        )
+    print("  By start:")
+    for start_label, row in start_stats.items():
+        print(
+            f"    {start_label:28s} "
             f"{row['acc']}/{row['total']} accepted "
             f"(no_plans={row['no_plans']} invalid={row['inv']} low_q={row['low_q']})"
         )
-    print(f"  Total:   {total_acc}/{total_ep} episodes, {len(all_snapshots)} snapshots")
-    print(f"  Output:  {out_path}")
+    print(
+        f"  Total:   {total_acc}/{total_target} accepted "
+        f"(attempted={total_attempted}), {len(all_snapshots)} snapshots"
+    )
+    if targets_met:
+        print(f"  Output:  {out_path}")
+    else:
+        print("  Output:  NOT WRITTEN (insufficient accepted trajectories)")
     print(f"{'=' * 72}")
+
+    if FAIL_CLOSED_ON_INSUFFICIENT_ACCEPTED and not targets_met:
+        raise RuntimeError(
+            "Dataset generation failed closed: not enough trajectories with real takeover success "
+            f"to meet targets {family_counts}."
+        )
 
 
 if __name__ == "__main__":

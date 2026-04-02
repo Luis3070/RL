@@ -66,6 +66,9 @@ class TeamRewardInfo:
     takeover_active:   bool = False
     takeover_success:  Optional[bool] = None   # None = no event, True/False = result
     takeover_kick:     bool = False
+    playball_entry:    bool = False
+    ready_but_walk:    bool = False
+    ready_touch_but_walk: bool = False
     macro_duration_frames: int = 0
     # Backend provenance: "real", "contract_validation", or "python_stub".
     # When not "real", takeover_success is contractual validation only —
@@ -81,6 +84,8 @@ class RewardComponents:
     handoff_alignment:   float = 0.0   # continuous shaping toward handoff envelope
     handoff_ready_bonus: float = 0.0   # entry / short sustain bonus for handoff envelope
     handoff_break_penalty: float = 0.0 # penalty for dropping a clean handoff pose
+    playball_entry_bonus: float = 0.0  # bonus for first real playBall entry
+    ready_but_walk_penalty: float = 0.0 # penalty for handoff without playBall conversion
     takeover_success:    float = 0.0   # bonus for successful BHuman execution
     takeover_failure:    float = 0.0   # penalty for failed takeover
     support_spacing:     float = 0.0   # cooperative spacing quality
@@ -252,6 +257,36 @@ def _takeover_result_reward(takeover_success: Optional[bool],
     return reward
 
 
+def _playball_entry_reward(playball_entry: bool,
+                           sidecar_backend: str = "unknown") -> float:
+    """
+    Reward the first real playBall entry after a valid handoff pose.
+
+    This is the missing bridge between "I can stand in the envelope" and
+    "the real backend actually switched out of walk into playBall".
+    """
+    if sidecar_backend != "real":
+        return 0.0
+    return 0.75 if playball_entry else 0.0
+
+
+def _ready_but_walk_penalty(ready_but_walk: bool,
+                            ready_touch_but_walk: bool,
+                            sidecar_backend: str = "unknown") -> float:
+    """
+    Penalize the semantic plateau where the agent reaches handoff_ready but
+    the real backend keeps asking for walk instead of entering playBall.
+    """
+    if sidecar_backend != "real":
+        return 0.0
+    penalty = 0.0
+    if ready_but_walk:
+        penalty -= 0.06
+    if ready_touch_but_walk:
+        penalty -= 0.18
+    return penalty
+
+
 def _support_spacing_reward(agents: List[AgentRewardInfo]) -> float:
     """
     Reward for team spacing quality.
@@ -406,6 +441,21 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             )
             * takeover_weight
         )
+        components.playball_entry_bonus = (
+            _playball_entry_reward(
+                info.playball_entry,
+                sidecar_backend=info.sidecar_backend,
+            )
+            * takeover_weight
+        )
+        components.ready_but_walk_penalty = (
+            _ready_but_walk_penalty(
+                info.ready_but_walk,
+                info.ready_touch_but_walk,
+                sidecar_backend=info.sidecar_backend,
+            )
+            * takeover_weight
+        )
 
         # Takeover result (gated by backend provenance)
         takeover_r = _takeover_result_reward(
@@ -442,6 +492,8 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
         + components.handoff_alignment
         + components.handoff_ready_bonus
         + components.handoff_break_penalty
+        + components.playball_entry_bonus
+        + components.ready_but_walk_penalty
         + components.takeover_success
         + components.takeover_failure
         + components.support_spacing

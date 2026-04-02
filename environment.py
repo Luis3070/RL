@@ -38,6 +38,19 @@ from bhuman_cfg_parser import (
 )
 
 TAKEOVER_MACRO_TYPES = frozenset(mt for mt in MACRO_TYPES if mt != "none")
+TAKEOVER_END_REASONS = (
+    "timeout",
+    "skill_request_cleared",
+    "active_agent_changed",
+    "out",
+    "goal",
+    "game_state_changed",
+    "other",
+)
+
+
+def _new_takeover_reason_counts() -> Dict[str, int]:
+    return {reason: 0 for reason in TAKEOVER_END_REASONS}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,6 +187,14 @@ class BallPhysics:
 class NaoMovementModel:
     ROTATION_THRESHOLD = 0.5   # rad (~28.6°)
 
+    def __init__(self):
+        self.rotation_threshold = float(self.ROTATION_THRESHOLD)
+
+    def configure(self, stage_cfg) -> None:
+        self.rotation_threshold = float(
+            getattr(stage_cfg, "rotation_threshold_rad", self.ROTATION_THRESHOLD)
+        )
+
     def step(self, agent: AgentState, target_pos: np.ndarray,
              target_theta: float, dt: float) -> AgentState:
         if not agent.is_upright:
@@ -221,7 +242,7 @@ class NaoMovementModel:
         angle_to_target = math.atan2(dy, dx)
         dtheta = _normalize_angle(angle_to_target - theta)
 
-        if abs(dtheta) > self.ROTATION_THRESHOLD:
+        if abs(dtheta) > self.rotation_threshold:
             omega = np.clip(dtheta / dt, -AGENT.max_rotation_speed, AGENT.max_rotation_speed)
             new_theta = _normalize_angle(theta + omega * dt)
             return pos.copy(), new_theta, np.zeros(2), omega
@@ -960,6 +981,7 @@ class NaoSoccerEnv(ParallelEnv):
         # Components
         self._ball_physics = BallPhysics()
         self._movement     = NaoMovementModel()
+        self._movement.configure(self._stage)
         self._fov_filter   = FOVFilter(use_fov=use_fov)
         self._scripted_ai  = ScriptedOpponent(self._movement)
         self._obs_builder  = ObservationBuilder()
@@ -1029,6 +1051,8 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_playball_achieved = False
         self._episode_ready_but_walk_frames = 0
         self._episode_ready_touch_but_walk_frames = 0
+        self._episode_takeover_reason_counts: Dict[str, int] = _new_takeover_reason_counts()
+        self._last_macro_end_reason: str = "none"
         self._prev_playball_frame = False
         self._prev_handoff_ready = False
 
@@ -1094,6 +1118,8 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_playball_achieved = False
         self._episode_ready_but_walk_frames = 0
         self._episode_ready_touch_but_walk_frames = 0
+        self._episode_takeover_reason_counts = _new_takeover_reason_counts()
+        self._last_macro_end_reason = "none"
         self._prev_playball_frame = False
         self._prev_handoff_ready = False
 
@@ -1190,6 +1216,9 @@ class NaoSoccerEnv(ParallelEnv):
         takeover_progress = False
         macro_resolved_pre_physics = False
         sidecar_macro_type = "none"
+        playball_entry = False
+        ready_but_walk = False
+        ready_touch_but_walk = False
         if sidecar_output is not None:
             sidecar_macro_type = sidecar_output.macro_type
 
@@ -1212,6 +1241,7 @@ class NaoSoccerEnv(ParallelEnv):
                 self._episode_playball_achieved = True
             if sidecar_playball and not self._prev_playball_frame:
                 self._episode_playball_entry_count += 1
+                playball_entry = True
             self._prev_playball_frame = sidecar_playball
 
             ready_but_walk = (
@@ -1229,6 +1259,7 @@ class NaoSoccerEnv(ParallelEnv):
                         <= AGENT.ball_interaction_range
                     )
                     if touching_ball:
+                        ready_touch_but_walk = True
                         self._episode_ready_touch_but_walk_frames += 1
 
             # Takeover execution depends on mode:
@@ -1338,6 +1369,13 @@ class NaoSoccerEnv(ParallelEnv):
                     "end_reason": macro.macro_end_reason,
                     "success": macro.macro_success,
                 })
+                reason_key = (
+                    macro.macro_end_reason
+                    if macro.macro_end_reason in self._episode_takeover_reason_counts
+                    else "other"
+                )
+                self._episode_takeover_reason_counts[reason_key] += 1
+                self._last_macro_end_reason = macro.macro_end_reason
                 macro.event_recorded = True
 
         # ═══════════════════════════════════════════════════════════════
@@ -1354,6 +1392,9 @@ class NaoSoccerEnv(ParallelEnv):
             goal_conceded=goal_conceded,
             prev_ball_dists=prev_ball_dists,
             takeover_kick=takeover_kick,
+            playball_entry=playball_entry,
+            ready_but_walk=ready_but_walk,
+            ready_touch_but_walk=ready_touch_but_walk,
         )
 
         # Update tracking
@@ -1599,6 +1640,24 @@ class NaoSoccerEnv(ParallelEnv):
         target_pos[1] = float(np.clip(target_pos[1],
                               FIELD.y_right_sideline + 300.0, FIELD.y_left_sideline - 300.0))
 
+        target_alpha = float(getattr(self._stage, "target_pos_alpha", 1.0))
+        if agent_id and 0.0 < target_alpha < 1.0:
+            prev_target = self._prev_targets.get(agent_id, agent.pos.copy())
+            target_pos = (
+                target_alpha * target_pos
+                + (1.0 - target_alpha) * np.asarray(prev_target, dtype=np.float32)
+            ).astype(np.float32)
+            target_pos[0] = float(np.clip(
+                target_pos[0],
+                FIELD.x_own_ground + 300.0,
+                FIELD.x_opponent_ground - 300.0,
+            ))
+            target_pos[1] = float(np.clip(
+                target_pos[1],
+                FIELD.y_right_sideline + 300.0,
+                FIELD.y_left_sideline - 300.0,
+            ))
+
         if self._stage.theta_free:
             target_theta = float(action[2]) * ACTION.theta_range
         else:
@@ -1752,7 +1811,10 @@ class NaoSoccerEnv(ParallelEnv):
     # ── Rewards ────────────────────────────────────────────────────────
 
     def _compute_rewards(self, goal_scored, goal_conceded,
-                         prev_ball_dists, takeover_kick=False):
+                         prev_ball_dists, takeover_kick=False,
+                         playball_entry=False,
+                         ready_but_walk=False,
+                         ready_touch_but_walk=False):
         from reward import (
             AgentRewardInfo, TeamRewardInfo,
             compute_reward, compute_per_agent_reward,
@@ -1793,6 +1855,9 @@ class NaoSoccerEnv(ParallelEnv):
             takeover_active=macro.takeover_active,
             takeover_success=macro.macro_success if macro.macro_end_reason != "none" else None,
             takeover_kick=takeover_kick,
+            playball_entry=playball_entry,
+            ready_but_walk=ready_but_walk,
+            ready_touch_but_walk=ready_touch_but_walk,
             macro_duration_frames=macro.macro_duration_frames,
             # Backend provenance for reward gating
             sidecar_backend=(
@@ -1836,6 +1901,7 @@ class NaoSoccerEnv(ParallelEnv):
         if sidecar_output is not None and not macro.macro_active:
             effective_macro_type = sidecar_output.macro_type
         ready_frames = max(1, self._episode_handoff_ready_frames)
+        takeover_total = max(1, self._episode_takeover_count)
         base_info = {
             "own_score": self._game.own_score,
             "opp_score": self._game.opp_score,
@@ -1853,6 +1919,7 @@ class NaoSoccerEnv(ParallelEnv):
             "macro_duration_frames": macro.macro_duration_frames,
             "macro_end_reason": macro.macro_end_reason,
             "macro_success": macro.macro_success,
+            "last_macro_end_reason": self._last_macro_end_reason,
             "active_agent_id": self._active_agent_id,
             "episode_takeover_count": self._episode_takeover_count,
             "episode_takeover_success": self._episode_takeover_success,
@@ -1869,6 +1936,40 @@ class NaoSoccerEnv(ParallelEnv):
             "episode_ready_touch_but_walk_rate": (
                 self._episode_ready_touch_but_walk_frames / ready_frames
                 if self._episode_handoff_ready_frames > 0 else 0.0
+            ),
+            "episode_takeover_timeout_count": self._episode_takeover_reason_counts["timeout"],
+            "episode_takeover_skill_cleared_count": (
+                self._episode_takeover_reason_counts["skill_request_cleared"]
+            ),
+            "episode_takeover_active_change_count": (
+                self._episode_takeover_reason_counts["active_agent_changed"]
+            ),
+            "episode_takeover_other_end_count": (
+                self._episode_takeover_reason_counts["out"]
+                + self._episode_takeover_reason_counts["goal"]
+                + self._episode_takeover_reason_counts["game_state_changed"]
+                + self._episode_takeover_reason_counts["other"]
+            ),
+            "episode_takeover_timeout_rate": (
+                self._episode_takeover_reason_counts["timeout"] / takeover_total
+                if self._episode_takeover_count > 0 else 0.0
+            ),
+            "episode_takeover_skill_cleared_rate": (
+                self._episode_takeover_reason_counts["skill_request_cleared"] / takeover_total
+                if self._episode_takeover_count > 0 else 0.0
+            ),
+            "episode_takeover_active_change_rate": (
+                self._episode_takeover_reason_counts["active_agent_changed"] / takeover_total
+                if self._episode_takeover_count > 0 else 0.0
+            ),
+            "episode_takeover_other_end_rate": (
+                (
+                    self._episode_takeover_reason_counts["out"]
+                    + self._episode_takeover_reason_counts["goal"]
+                    + self._episode_takeover_reason_counts["game_state_changed"]
+                    + self._episode_takeover_reason_counts["other"]
+                ) / takeover_total
+                if self._episode_takeover_count > 0 else 0.0
             ),
             "static_obstacle_count": len(self._static_obstacles),
             "static_obstacles": [
@@ -1928,6 +2029,7 @@ class NaoSoccerEnv(ParallelEnv):
 
     def set_stage(self, stage_cfg):
         self._stage = stage_cfg
+        self._movement.configure(stage_cfg)
         self._fov_filter = FOVFilter(use_fov=self._use_fov)
         self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
 

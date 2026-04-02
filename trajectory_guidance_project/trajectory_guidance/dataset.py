@@ -27,6 +27,9 @@ class DemoSnapshot:
     world_snapshot: Optional[Dict[str, Any]] = None
     initial_agent_pos: Optional[np.ndarray] = None
     initial_ball_pos: Optional[np.ndarray] = None
+    start_mode: str = "reset_seed"
+    template_name: Optional[str] = None
+    template_family: Optional[str] = None
 
     # BC metadata: intención honesta del episodio.
     # Stage 0-1 no deben venderse como "pass/shoot" si solo enseñan postura.

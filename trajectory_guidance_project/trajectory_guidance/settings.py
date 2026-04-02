@@ -103,6 +103,8 @@ class StageObjective:
     name: str
     objective: str
     success_mode: str
+    require_handoff_ready: bool = False
+    require_takeover_success: bool = False
     target_recontacts: int = 1
     prefer_dribble: bool = False
     prefer_goal_alignment: bool = False
@@ -151,6 +153,8 @@ class StageObjective:
     name: str
     objective: str
     success_mode: str
+    require_handoff_ready: bool = False
+    require_takeover_success: bool = False
     target_recontacts: int = 1
     prefer_dribble: bool = False
     prefer_goal_alignment: bool = False
@@ -167,6 +171,8 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_find_ball",
         objective="Llegar al balon y mantener control corto.",
         success_mode="touch_and_control",
+        require_handoff_ready=True,
+        require_takeover_success=True,
         target_recontacts=4,
         prefer_dribble=True,
         planning_horizon_steps=100,
@@ -188,6 +194,8 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r800",
         objective="Llegar y dribblar de forma estable con variedad.",
         success_mode="stable_dribble",
+        require_handoff_ready=True,
+        require_takeover_success=True,
         target_recontacts=4,
         prefer_dribble=True,
         prefer_goal_alignment=True,
@@ -213,6 +221,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r1200",
         objective="Media distancia + dribble variado + alineacion + kick.",
         success_mode="dribble_align_kick",
+        require_handoff_ready=True,
         target_recontacts=3,
         prefer_dribble=True,
         prefer_goal_alignment=True,
@@ -242,6 +251,7 @@ STAGE_OBJECTIVES: Dict[int, StageObjective] = {
         name="1v0_r3500",
         objective="Campo abierto + navegacion + dribble variado + gol.",
         success_mode="goal_completion",
+        require_handoff_ready=True,
         target_recontacts=3,
         # prefer_dribble=True: activa el multiplicador 1.5× en
         # sustained_dribble_bonus, aumentando la recompensa por dribble

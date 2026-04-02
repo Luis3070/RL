@@ -34,12 +34,21 @@ class CurriculumManager:
       - takeover_success_rate: fraction of takeovers that succeeded
       - win_rate: fraction of episodes won
       - support_quality: fraction with good spacing metrics
+
+    Early takeover stages can additionally require semantic guard rails:
+      - minimum playBall entry rate
+      - minimum takeover success rate
+      - maximum ready_but_walk rates
     """
 
     def __init__(self, stages: List[CurriculumStageConfig] = CURRICULUM):
         self._stages = stages
         self._current_idx = 0
         self._window: deque = deque(maxlen=stages[0].advance_window)
+        self._playball_window: deque = deque(maxlen=stages[0].advance_window)
+        self._takeover_success_window: deque = deque(maxlen=stages[0].advance_window)
+        self._ready_but_walk_window: deque = deque(maxlen=stages[0].advance_window)
+        self._ready_touch_but_walk_window: deque = deque(maxlen=stages[0].advance_window)
 
     @property
     def current_stage(self) -> CurriculumStageConfig:
@@ -59,6 +68,9 @@ class CurriculumManager:
                        takeover_count: int = 0,
                        takeover_success_count: int = 0,
                        handoff_achieved: bool = False,
+                       playball_achieved: bool = False,
+                       ready_but_walk_rate: float = 0.0,
+                       ready_touch_but_walk_rate: float = 0.0,
                        support_quality: float = 0.0) -> bool:
         """
         Record episode result and evaluate advancement.
@@ -83,14 +95,49 @@ class CurriculumManager:
             success = float(own_score > opp_score)
 
         self._window.append(float(success))
+        self._playball_window.append(float(playball_achieved))
+        self._takeover_success_window.append(
+            float(takeover_success_count / takeover_count) if takeover_count > 0 else 0.0
+        )
+        self._ready_but_walk_window.append(float(ready_but_walk_rate))
+        self._ready_touch_but_walk_window.append(float(ready_touch_but_walk_rate))
 
         if self._window.maxlen != stage.advance_window:
             self._window = deque(self._window, maxlen=stage.advance_window)
+            self._playball_window = deque(self._playball_window, maxlen=stage.advance_window)
+            self._takeover_success_window = deque(
+                self._takeover_success_window, maxlen=stage.advance_window
+            )
+            self._ready_but_walk_window = deque(
+                self._ready_but_walk_window, maxlen=stage.advance_window
+            )
+            self._ready_touch_but_walk_window = deque(
+                self._ready_touch_but_walk_window, maxlen=stage.advance_window
+            )
 
         if (len(self._window) == stage.advance_window
                 and not self.is_final_stage):
             rate = float(np.mean(self._window))
-            if rate >= stage.advance_threshold:
+            playball_rate = float(np.mean(self._playball_window)) if self._playball_window else 0.0
+            takeover_success_rate = (
+                float(np.mean(self._takeover_success_window))
+                if self._takeover_success_window else 0.0
+            )
+            ready_but_walk_mean = (
+                float(np.mean(self._ready_but_walk_window))
+                if self._ready_but_walk_window else 0.0
+            )
+            ready_touch_but_walk_mean = (
+                float(np.mean(self._ready_touch_but_walk_window))
+                if self._ready_touch_but_walk_window else 0.0
+            )
+            guard_ok = (
+                playball_rate >= stage.min_playball_entry_rate
+                and takeover_success_rate >= stage.min_takeover_success_rate
+                and ready_but_walk_mean <= stage.max_ready_but_walk_rate
+                and ready_touch_but_walk_mean <= stage.max_ready_touch_but_walk_rate
+            )
+            if rate >= stage.advance_threshold and guard_ok:
                 self._advance()
                 return True
 
@@ -100,6 +147,10 @@ class CurriculumManager:
         self._current_idx += 1
         new_stage = self.current_stage
         self._window = deque(maxlen=new_stage.advance_window)
+        self._playball_window = deque(maxlen=new_stage.advance_window)
+        self._takeover_success_window = deque(maxlen=new_stage.advance_window)
+        self._ready_but_walk_window = deque(maxlen=new_stage.advance_window)
+        self._ready_touch_but_walk_window = deque(maxlen=new_stage.advance_window)
         print(f"\n[Curriculum] Advanced to Stage {self._current_idx}: {new_stage.name}")
 
     def jump_to_stage(self, stage_idx: int):
@@ -108,6 +159,10 @@ class CurriculumManager:
         self._current_idx = stage_idx
         new_stage = self.current_stage
         self._window = deque(maxlen=new_stage.advance_window)
+        self._playball_window = deque(maxlen=new_stage.advance_window)
+        self._takeover_success_window = deque(maxlen=new_stage.advance_window)
+        self._ready_but_walk_window = deque(maxlen=new_stage.advance_window)
+        self._ready_touch_but_walk_window = deque(maxlen=new_stage.advance_window)
         print(f"[Curriculum] jump_to_stage -> Stage {stage_idx}: {new_stage.name}")
 
     def get_progress_stats(self) -> Dict[str, Any]:
@@ -118,6 +173,21 @@ class CurriculumManager:
             "stage_name": stage.name,
             "advance_metric": stage.advance_metric,
             "current_rate": rate,
+            "playball_entry_rate": (
+                float(np.mean(self._playball_window)) if self._playball_window else 0.0
+            ),
+            "takeover_success_rate": (
+                float(np.mean(self._takeover_success_window))
+                if self._takeover_success_window else 0.0
+            ),
+            "ready_but_walk_rate": (
+                float(np.mean(self._ready_but_walk_window))
+                if self._ready_but_walk_window else 0.0
+            ),
+            "ready_touch_but_walk_rate": (
+                float(np.mean(self._ready_touch_but_walk_window))
+                if self._ready_touch_but_walk_window else 0.0
+            ),
             "advance_threshold": stage.advance_threshold,
             "window_fill": f"{len(self._window)}/{stage.advance_window}",
         }
@@ -301,6 +371,9 @@ class NaoSoccerEnvWrapper:
             takeover_count=takeover_count,
             takeover_success_count=takeover_success,
             handoff_achieved=handoff_achieved,
+            playball_achieved=playball_achieved,
+            ready_but_walk_rate=ready_but_walk_rate,
+            ready_touch_but_walk_rate=ready_touch_but_walk_rate,
         )
 
     def set_curriculum_stage(self, stage_idx: int):

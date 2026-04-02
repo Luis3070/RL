@@ -43,6 +43,7 @@ from trajectory_guidance.settings import (
     get_stage_objective,
 )
 from trajectory_guidance.dataset import DemoSnapshot
+from trajectory_guidance.launch_templates import ResolvedLaunchTemplate
 from trajectory_guidance.bridge import EnvBridge, WorldSnapshot
 from trajectory_guidance.heuristic import SimplifiedWorldState, nearest_goal_post
 from trajectory_guidance.solver import (
@@ -251,9 +252,9 @@ def compute_launch_position(agent_pos: np.ndarray,
     dist = float(np.linalg.norm(agent_pos - ball_pos))
 
     # Fase
-    if dist > AGENT.ball_dribble_range * 2.0:
+    if dist > getattr(AGENT, "ball_dribble_range", 340.0) * 2.0:
         phase = "approach"
-    elif dist > AGENT.ball_dribble_range:
+    elif dist > getattr(AGENT, "ball_dribble_range", 340.0):
         phase = "positioning"
     else:
         phase = "contact"
@@ -263,8 +264,9 @@ def compute_launch_position(agent_pos: np.ndarray,
     effective_bias = dribble_bias_angle
     
     # Suavizado de offset (distancia atrás) para que no rebote
-    approach_dist = AGENT.ball_dribble_range * 6.0  # ≈1920mm
-    t = float(np.clip((dist - AGENT.ball_dribble_range) / (approach_dist - AGENT.ball_dribble_range), 0.0, 1.0))
+    ball_dribble_range = getattr(AGENT, "ball_dribble_range", 340.0)
+    approach_dist = ball_dribble_range * 6.0  # ≈1920mm
+    t = float(np.clip((dist - ball_dribble_range) / (approach_dist - ball_dribble_range), 0.0, 1.0))
 
     if target_dir is not None:
         # Respetar la intencion del target (pase/tiro o postura lateral),
@@ -321,6 +323,7 @@ class RolloutMetrics:
     mean_reward: float = 0.0
     own_score: int = 0
     opp_score: int = 0
+    control_steps: int = 0
     dribble_steps: int = 0
     valid_plan: bool = False
     trajectory_id: str = ""
@@ -347,10 +350,14 @@ class SolverEvaluator:
         self.solver = solver
 
     def plan_from_current_reset(self, stage_id: int,
-                                seed: int | None = None
+                                seed: int | None = None,
+                                launch_template: ResolvedLaunchTemplate | None = None,
                                 ) -> Tuple[WorldSnapshot, List[PlannedTrajectory]]:
-        world = self.bridge.capture_world_snapshot(stage_id=stage_id,
-                                                    seed=seed)
+        world = self.bridge.capture_world_snapshot(
+            stage_id=stage_id,
+            seed=seed,
+            launch_template=launch_template,
+        )
         objective = get_stage_objective(stage_id)
         plans = self.solver.solve_topk(world.to_simplified_state(), objective)
         return world, plans
@@ -570,9 +577,20 @@ class SolverEvaluator:
                 metrics.episode_takeover_success,
                 int(agent_info.get("episode_takeover_success", 0)),
             )
+            semantic_dribble = bool(
+                agent_info.get("takeover_active", False)
+                or int(agent_info.get("episode_takeover_success", 0)) > 0
+                or (
+                    touched
+                    and bool(agent_info.get("handoff_ready", False))
+                    and recontacts >= 2
+                )
+            )
+
             event = {
                 "ball_touched": touched,
-                "dribbling": touched,
+                "controlled_touch": touched,
+                "dribbling": semantic_dribble,
                 "goal_scored": bool(agent_info.get("goal_scored", False)),
                 "own_score": int(agent_info.get("own_score", 0)),
                 "opp_score": int(agent_info.get("opp_score", 0)),
@@ -582,10 +600,13 @@ class SolverEvaluator:
                 "kick_phase_active": kick_phase_active,
                 "handoff_ready": bool(agent_info.get("handoff_ready", False)),
                 "takeover_active": bool(agent_info.get("takeover_active", False)),
+                "macro_end_reason": str(agent_info.get("macro_end_reason", "none")),
                 "sidecar_backend": backend_label,
                 "sidecar_bridge_mode": bridge_mode,
             }
             metrics.events.append(event)
+            if event["controlled_touch"]:
+                metrics.control_steps += 1
             if event["dribbling"]:
                 metrics.dribble_steps += 1
 
@@ -619,9 +640,15 @@ class SolverEvaluator:
                         "ball_pos": np.asarray(initial_snapshot.ball_pos,
                                                 dtype=np.float32),
                         "agent_theta": float(initial_snapshot.agent_theta),
+                        "start_mode": initial_snapshot.start_mode,
+                        "template_name": initial_snapshot.template_name,
+                        "template_family": initial_snapshot.template_family,
                     },
                     initial_agent_pos=initial_snapshot.agent_pos,
                     initial_ball_pos=initial_snapshot.ball_pos,
+                    start_mode=initial_snapshot.start_mode,
+                    template_name=initial_snapshot.template_name,
+                    template_family=initial_snapshot.template_family,
                     # FIX-3: Campos de intención BC-ready
                     intent=kick_mode_label,
                     kick_phase_active=kick_phase_active,
@@ -691,7 +718,7 @@ class SolverEvaluator:
                 metrics.touched_ball
                 and metrics.handoff_ready_steps >= 1
                 and metrics.episode_takeover_success >= 1
-                and metrics.dribble_steps >= 2
+                and metrics.control_steps >= 2
             )
 
         if metrics.intent == "dribble":
@@ -718,9 +745,17 @@ class SolverEvaluator:
             )
 
         if objective.success_mode == "touch_and_control":
-            return metrics.touched_ball and metrics.dribble_steps >= 3
+            return (
+                metrics.touched_ball
+                and metrics.episode_takeover_success >= 1
+                and metrics.control_steps >= 3
+            )
         elif objective.success_mode == "stable_dribble":
-            return metrics.touched_ball and metrics.dribble_steps >= 5
+            return (
+                metrics.touched_ball
+                and metrics.episode_takeover_success >= 1
+                and metrics.dribble_steps >= 5
+            )
         elif objective.success_mode == "dribble_align_kick":
             return (metrics.goal_scored
                     or (metrics.touched_ball and metrics.dribble_steps >= 2))

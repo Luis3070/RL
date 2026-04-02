@@ -367,10 +367,13 @@ class Renderer:
                 (f"Control:   {control_debug.get('owner', 'RL')}", owner_color),
                 (f"Actor:     {control_debug.get('active_agent', '-')}", Color.TXT_WHITE),
                 (f"Macro:     {control_debug.get('macro_type', 'none')}", Color.TXT_WHITE),
+                (f"End:       {control_debug.get('macro_end_reason', 'none')}", Color.TXT_WHITE),
                 (f"BHuman:    {control_debug.get('skill_request', 'none')}", Color.TXT_WHITE),
                 (f"PB entry:  {control_debug.get('playball_entries', 0)}", Color.TXT_WHITE),
                 (f"RBW rate:  {control_debug.get('ready_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"RTBW rate: {control_debug.get('ready_touch_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
+                (f"TO rate:   {control_debug.get('takeover_timeout_rate', 0.0):.2f}", Color.TXT_WHITE),
+                (f"CLR rate:  {control_debug.get('takeover_skill_cleared_rate', 0.0):.2f}", Color.TXT_WHITE),
             ])
         self._panel(left, x=8, y=8, font=f_md)
 
@@ -464,7 +467,7 @@ class EnvStateReader:
         infos = infos or {}
         return next(iter(infos.values()), {}) if infos else {}
 
-    def control_debug(self, infos: Optional[Dict[str, Dict]] = None) -> Dict[str, str]:
+    def control_debug(self, infos: Optional[Dict[str, Dict]] = None) -> Dict[str, object]:
         """Resume si manda RL, handoff o BHuman takeover."""
         info = self.sample_info(infos)
         takeover_active = bool(info.get("takeover_active", False))
@@ -485,11 +488,18 @@ class EnvStateReader:
             "color": color,
             "active_agent": str(info.get("active_agent_id", "-")),
             "macro_type": str(info.get("macro_type", "none")),
+            "macro_end_reason": str(info.get("last_macro_end_reason", "none")),
             "skill_request": str(info.get("sidecar_skill_request", "none")),
             "playball_entries": int(info.get("episode_playball_entry_count", 0)),
             "ready_walk_rate": float(info.get("episode_ready_but_walk_rate", 0.0)),
             "ready_touch_walk_rate": float(
                 info.get("episode_ready_touch_but_walk_rate", 0.0)
+            ),
+            "takeover_timeout_rate": float(
+                info.get("episode_takeover_timeout_rate", 0.0)
+            ),
+            "takeover_skill_cleared_rate": float(
+                info.get("episode_takeover_skill_cleared_rate", 0.0)
             ),
         }
 
@@ -788,10 +798,10 @@ class SoccerVisualizer:
 
 def main() -> None:
     # Configuración rápida: solo editar estos valores y presionar Play.
-    STAGE_IDX  = 2
+    STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "J:\ROBOTICA\runs\practical_stage0_fovTrue_1774978160\checkpoints\mappo_stage1_1v0_approach_1600_ep000277.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775100472").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None
