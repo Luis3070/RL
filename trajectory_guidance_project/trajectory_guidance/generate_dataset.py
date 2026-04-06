@@ -60,8 +60,10 @@ Task = Tuple[
 
 HYBRID_INCLUDE_RESET_SEEDS = True
 HYBRID_INCLUDE_LAUNCH_TEMPLATES = True
+ATTEMPT_BUDGET_MODE = "hard_cap"
 HYBRID_MAX_ATTEMPT_MULTIPLIER = 12
-FAIL_CLOSED_ON_INSUFFICIENT_ACCEPTED = True
+FAIL_CLOSED_ON_INSUFFICIENT_ACCEPTED = False
+EXPORT_PARTIAL_ON_FAILURE = True
 
 
 def _field_bounds() -> Tuple[float, float, float, float]:
@@ -177,6 +179,28 @@ def _resolve_family_counts(stage: int,
     }
 
 
+def _resolve_attempt_budget(total: int) -> int:
+    total = max(int(total), 0)
+    if ATTEMPT_BUDGET_MODE == "hard_cap":
+        return total
+    if ATTEMPT_BUDGET_MODE == "accepted_target":
+        return max(total * HYBRID_MAX_ATTEMPT_MULTIPLIER, total)
+    raise ValueError(
+        f"Unknown ATTEMPT_BUDGET_MODE='{ATTEMPT_BUDGET_MODE}'. "
+        "Expected 'hard_cap' or 'accepted_target'."
+    )
+
+
+def _use_reset_seeds(stage: int) -> bool:
+    if not HYBRID_INCLUDE_RESET_SEEDS:
+        return False
+    return stage >= 1
+
+
+def _use_launch_templates(stage: int) -> bool:
+    return HYBRID_INCLUDE_LAUNCH_TEMPLATES
+
+
 def _build_tasks(stage: int,
                  primary_episodes: int,
                  shoot_episodes: int,
@@ -207,7 +231,7 @@ def _build_tasks(stage: int,
     tasks: List[Task] = []
     global_ep = 0
     for intent_label, total in family_counts.items():
-        max_attempts = max(total * HYBRID_MAX_ATTEMPT_MULTIPLIER, total)
+        max_attempts = _resolve_attempt_budget(total)
         for family_ep in range(max_attempts):
             current_seed = base_seed + global_ep
             approach_target = approach_targets[family_ep % len(approach_targets)]
@@ -227,7 +251,7 @@ def _build_tasks(stage: int,
                 kick_dist = pass_kick_dists[family_ep % len(pass_kick_dists)]
                 dribble_bias = pass_dribble_bias[family_ep % len(pass_dribble_bias)]
 
-            if HYBRID_INCLUDE_RESET_SEEDS:
+            if _use_reset_seeds(stage):
                 tasks.append((
                     family_ep,
                     intent_label,
@@ -243,7 +267,7 @@ def _build_tasks(stage: int,
                     None,
                 ))
 
-            if HYBRID_INCLUDE_LAUNCH_TEMPLATES and stage_templates:
+            if _use_launch_templates(stage) and stage_templates:
                 template_name = stage_templates[family_ep % len(stage_templates)]
                 tasks.append((
                     family_ep,
@@ -429,9 +453,10 @@ def _print_result(result: Dict[str, object]) -> None:
 def main() -> None:
     # Configuracion editable localmente en vez de CLI.
     stage = 0
-    episodes = 5
-    shoot_episodes = 5
-    pass_episodes = 5
+    episodes = 30
+    # Stage 0-1 ignora shoot/pass por politica de intents.
+    shoot_episodes = 0
+    pass_episodes = 0
     out = "trajectory_demos/demos_fixed0.pkl"
     seed = 42
     lookahead = ASTAR_CFG.greedy_lookahead
@@ -452,6 +477,12 @@ def main() -> None:
         shoot_episodes=shoot_episodes,
         pass_episodes=pass_episodes,
     )
+    inactive_counts = {}
+    if stage < 2:
+        if shoot_episodes > 0:
+            inactive_counts["shoot_setup"] = shoot_episodes
+        if pass_episodes > 0:
+            inactive_counts["pass_setup"] = pass_episodes
     stats = {
         intent_label: {
             "target": total,
@@ -468,10 +499,13 @@ def main() -> None:
 
     print(
         f"\n[DATASET] stage={stage} tasks={len(tasks)} n_jobs={n_jobs} "
-        f"families={family_counts} hybrid=(seed={HYBRID_INCLUDE_RESET_SEEDS} "
-        f"template={HYBRID_INCLUDE_LAUNCH_TEMPLATES}) "
+        f"families={family_counts} hybrid=(seed={_use_reset_seeds(stage)} "
+        f"template={_use_launch_templates(stage)}) "
+        f"budget_mode={ATTEMPT_BUDGET_MODE} "
         f"attempt_multiplier={HYBRID_MAX_ATTEMPT_MULTIPLIER}\n"
     )
+    if inactive_counts:
+        print(f"[DATASET] ignored_for_stage_{stage}={inactive_counts}\n")
 
     for result in _run_tasks(tasks, n_jobs):
         intent_label = str(result["intent"])
@@ -508,8 +542,11 @@ def main() -> None:
 
     out_path = Path(out)
     targets_met = all(row["acc"] >= row["target"] for row in stats.values())
+    partial_out_path = out_path.with_name(f"{out_path.stem}_partial{out_path.suffix}")
     if targets_met:
         export_snapshots_pkl(all_snapshots, str(out_path))
+    elif EXPORT_PARTIAL_ON_FAILURE and all_snapshots:
+        export_snapshots_pkl(all_snapshots, str(partial_out_path))
 
     total_target = sum(row["target"] for row in stats.values())
     total_attempted = sum(row["attempted"] for row in stats.values())
@@ -538,6 +575,8 @@ def main() -> None:
     )
     if targets_met:
         print(f"  Output:  {out_path}")
+    elif EXPORT_PARTIAL_ON_FAILURE and all_snapshots:
+        print(f"  Output:  PARTIAL {partial_out_path}")
     else:
         print("  Output:  NOT WRITTEN (insufficient accepted trajectories)")
     print(f"{'=' * 72}")

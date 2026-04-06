@@ -30,6 +30,27 @@ def nearest_goal_post(ball_pos: np.ndarray) -> np.ndarray:
     y = float(np.clip(ball_pos[1], FIELD.y_right_goal, FIELD.y_left_goal))
     return np.array([FIELD.x_opponent_ground, y], dtype=np.float32)
 
+
+def safe_goal_lane_target(ball_pos: np.ndarray, stage_id: int = 0) -> np.ndarray:
+    """Objetivo de avance hacia arco con keep-out lateral.
+
+    Stages tempranos deben explorar hacia arco sin pegar el balon a la banda.
+    En vez de apuntar al poste mas cercano, usamos una calle ofensiva mas
+    centrada y dependiente del stage.
+    """
+    bx, by = float(ball_pos[0]), float(ball_pos[1])
+    if stage_id <= 0:
+        lane_limit = 420.0
+        lateral_scale = 0.22
+    elif stage_id == 1:
+        lane_limit = 580.0
+        lateral_scale = 0.30
+    else:
+        lane_limit = float(FIELD.y_left_goal) * 0.8
+        lateral_scale = 0.55
+    target_y = float(np.clip(by * lateral_scale, -lane_limit, lane_limit))
+    return np.array([FIELD.x_opponent_ground, target_y], dtype=np.float32)
+
 def behind_ball_point(ball_pos: np.ndarray, margin_mm: float = 220.0) -> np.ndarray:
     goal = nearest_goal_post(ball_pos)
     vec = goal - ball_pos
@@ -38,8 +59,9 @@ def behind_ball_point(ball_pos: np.ndarray, margin_mm: float = 220.0) -> np.ndar
         return ball_pos.copy()
     return ball_pos - (vec / n) * margin_mm
 
-def goal_alignment_score(agent_pos: np.ndarray, ball_pos: np.ndarray) -> float:
-    goal = nearest_goal_post(ball_pos)
+def goal_alignment_score(agent_pos: np.ndarray, ball_pos: np.ndarray,
+                         stage_id: int = 0) -> float:
+    goal = safe_goal_lane_target(ball_pos, stage_id)
     ab = ball_pos - agent_pos
     bg = goal - ball_pos
     nab = np.linalg.norm(ab)
@@ -57,8 +79,8 @@ def signed_lateral_offset(agent_pos: np.ndarray, ball_pos: np.ndarray) -> float:
     cross_z = float(bg[0] * ba[1] - bg[1] * ba[0])
     return cross_z / denom
 
-def ball_goal_distance(ball_pos: np.ndarray) -> float:
-    goal = nearest_goal_post(ball_pos)
+def ball_goal_distance(ball_pos: np.ndarray, stage_id: int = 0) -> float:
+    goal = safe_goal_lane_target(ball_pos, stage_id)
     return float(np.linalg.norm(goal - ball_pos))
 
 def angle_to_point(origin: np.ndarray, target: np.ndarray) -> float:
@@ -144,8 +166,9 @@ def agent_ball_distance_cost(agent_pos: np.ndarray,
                              ball_pos: np.ndarray, weight: float) -> float:
     return weight * euclidean(agent_pos, ball_pos)
 
-def ball_goal_distance_cost(ball_pos: np.ndarray, weight: float) -> float:
-    return weight * ball_goal_distance(ball_pos)
+def ball_goal_distance_cost(ball_pos: np.ndarray, weight: float,
+                            stage_id: int = 0) -> float:
+    return weight * ball_goal_distance(ball_pos, stage_id)
 
 def turn_penalty(prev_heading: float, next_heading: float,
                  weight: float) -> float:
@@ -162,8 +185,9 @@ def control_bonus(agent_pos: np.ndarray, ball_pos: np.ndarray,
     return 0.0
 
 def goal_alignment_bonus(agent_pos: np.ndarray, ball_pos: np.ndarray,
-                         weight: float) -> float:
-    score = goal_alignment_score(agent_pos, ball_pos)
+                         weight: float,
+                         stage_id: int = 0) -> float:
+    score = goal_alignment_score(agent_pos, ball_pos, stage_id)
     return -weight * max(score, 0.0)
 
 
@@ -181,18 +205,18 @@ def ball_out_of_bounds_penalty(ball_pos: np.ndarray, weight: float) -> float:
         return 100_000.0
 
     # 2. Zona de Peligro Continua en los laterales (repulsión progresiva)
-    danger_y_margin = 850.0 # Empieza a penalizar a 850mm de la banda
+    danger_y_margin = 1100.0
     danger_y = FIELD.y_left_sideline - danger_y_margin
     if abs_y > danger_y:
         penetration = (abs_y - danger_y) / danger_y_margin
-        return weight * 400.0 * (penetration ** 2)
+        return weight * 900.0 * (penetration ** 2)
 
     # 3. Zona de Peligro Continua en los fondos (evitar atascos en esquinas)
     danger_x_margin = 600.0
     opponent_danger_x = FIELD.x_opponent_ground - danger_x_margin
-    if bx > opponent_danger_x and abs_y > FIELD.y_left_goal + 200.0:
+    if bx > opponent_danger_x and abs_y > FIELD.y_left_goal + 120.0:
         penetration = (bx - opponent_danger_x) / danger_x_margin
-        return weight * 400.0 * (penetration ** 2)
+        return weight * 750.0 * (penetration ** 2)
 
     return 0.0
 
@@ -262,12 +286,13 @@ def heuristic_cost(state: SimplifiedWorldState,
     # ELIMINADO FIX-C (Gate binario). La distancia siempre computa
     # orgánicamente para evitar discontinuidades y overfits matemáticos.
     cost += ball_goal_distance_cost(
-        state.ball_pos, w.get("ball_goal_dist", 0.0))
+        state.ball_pos, w.get("ball_goal_dist", 0.0), objective.stage_id)
     cost += control_bonus(
         state.agent_pos, state.ball_pos,
         objective.prefer_dribble, w.get("control_bonus", 0.0))
     cost += goal_alignment_bonus(
-        state.agent_pos, state.ball_pos, w.get("goal_alignment", 0.0))
+        state.agent_pos, state.ball_pos, w.get("goal_alignment", 0.0),
+        objective.stage_id)
     if next_heading is not None:
         cost += turn_penalty(
             state.heading, next_heading, w.get("turn_penalty", 0.0))

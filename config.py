@@ -359,6 +359,10 @@ class CurriculumStageConfig:
     face_hold_dist_ratio:  float = 0.70
     target_pos_alpha:      float = 1.0
     rotation_threshold_rad: float = 0.5
+    ball_chase_blend:      float = 0.0
+    handoff_pose_blend:    float = 0.0
+    handoff_target_rel_x_mm: float = 250.0
+    ball_target_max_radius_mm: float = 0.0
     rollout_steps:         int   = 2048
     local_horizon:         float = 0.0
 
@@ -396,16 +400,20 @@ CURRICULUM: List[CurriculumStageConfig] = [
         ball_max_dist=800.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=60.0,
-        ema_alpha=0.35,
-        face_theta_alpha=0.06,
-        face_theta_deadband_deg=14.0,
-        face_hold_dist_ratio=0.90,
-        target_pos_alpha=0.30,
-        rotation_threshold_rad=0.85,
+        ema_alpha=0.42,
+        face_theta_alpha=0.10,
+        face_theta_deadband_deg=10.0,
+        face_hold_dist_ratio=0.95,
+        target_pos_alpha=0.45,
+        rotation_threshold_rad=1.05,
+        ball_chase_blend=0.82,
+        handoff_pose_blend=0.92,
+        handoff_target_rel_x_mm=210.0,
+        ball_target_max_radius_mm=650.0,
         rollout_steps=1024,
-        local_horizon=400.0,
-        shaping_approach_w=0.8,
-        shaping_takeover_w=1.0,
+        local_horizon=550.0,
+        shaping_approach_w=1.3,
+        shaping_takeover_w=1.6,
     ),
 
     # ═══════════════════════════════════════════════════════════════════
@@ -431,14 +439,20 @@ CURRICULUM: List[CurriculumStageConfig] = [
         ball_max_dist=1600.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=90.0,
-        ema_alpha=0.35,
-        face_theta_alpha=0.10,
-        face_theta_deadband_deg=10.0,
-        face_hold_dist_ratio=0.88,
+        ema_alpha=0.40,
+        face_theta_alpha=0.12,
+        face_theta_deadband_deg=9.0,
+        face_hold_dist_ratio=0.92,
+        target_pos_alpha=0.48,
+        rotation_threshold_rad=0.95,
+        ball_chase_blend=0.72,
+        handoff_pose_blend=0.84,
+        handoff_target_rel_x_mm=230.0,
+        ball_target_max_radius_mm=850.0,
         rollout_steps=1024,
-        local_horizon=500.0,
-        shaping_approach_w=0.8,
-        shaping_takeover_w=0.7,
+        local_horizon=700.0,
+        shaping_approach_w=1.1,
+        shaping_takeover_w=1.2,
     ),
 
     # ═══════════════════════════════════════════════════════════════════

@@ -37,6 +37,7 @@ from trajectory_guidance.heuristic import (
     estimate_takeover_proxy,
     heuristic_cost,
     nearest_goal_post,
+    safe_goal_lane_target,
     terminal_score,
 )
 
@@ -83,6 +84,24 @@ def _is_ball_out_of_bounds(ball_pos: np.ndarray) -> bool:
             or by < FIELD.y_right_sideline - 100)
 
 
+def _is_ball_sideline_risk(current_ball: np.ndarray,
+                           next_ball: np.ndarray,
+                           stage_id: int) -> bool:
+    margin = 260.0 if stage_id <= 1 else 180.0
+    corner_margin = 220.0 if stage_id <= 1 else 160.0
+    curr_abs_y = abs(float(current_ball[1]))
+    next_abs_y = abs(float(next_ball[1]))
+    if next_abs_y >= FIELD.y_left_sideline - margin and next_abs_y > curr_abs_y + 5.0:
+        return True
+    if (
+        float(next_ball[0]) >= FIELD.x_opponent_ground - 220.0
+        and next_abs_y >= FIELD.y_left_goal + corner_margin
+        and float(next_ball[0]) > float(current_ball[0]) + 5.0
+    ):
+        return True
+    return False
+
+
 def primitives_for_stage(stage_id: int) -> List[Primitive]:
     """Genera todas las primitivas disponibles para el stage.
     
@@ -110,6 +129,13 @@ def primitives_for_stage(stage_id: int) -> List[Primitive]:
         Primitive("dribble_safe", step_mm=180.0, dribble_gain=0.65),
         Primitive("dribble_aggressive", step_mm=240.0, dribble_gain=0.90),
     ]
+    if stage_id == 0:
+        base += [
+            Primitive("dribble_lane_left", step_mm=150.0,
+                      dribble_gain=0.44, dribble_angle=math.pi / 7),
+            Primitive("dribble_lane_right", step_mm=150.0,
+                      dribble_gain=0.44, dribble_angle=-math.pi / 7),
+        ]
     # Directional dribbles (disponibles desde stage 1)
     if stage_id >= 1:
         base += [
@@ -149,7 +175,7 @@ def apply_primitive(primitive: Primitive,
       - own_goal detection: si el dribble/kick manda el balón al arco propio
       - OOB clamp: si el balón sale de la cancha, se clampea al borde
     """
-    goal = nearest_goal_post(ball_pos)
+    goal = safe_goal_lane_target(ball_pos, stage_id)
     target_pos = getattr(objective, "kick_target", None)
     if target_pos is None:
         target_pos = goal.copy()
@@ -215,6 +241,15 @@ def apply_primitive(primitive: Primitive,
                 dribble_dir = _rotate_vec2(base_dir, primitive.dribble_angle)
             else:
                 dribble_dir = base_dir
+
+            if abs(float(ball_pos[1])) > FIELD.y_left_sideline - 700.0:
+                base_dir = (goal - ball_pos)
+                base_norm = float(np.linalg.norm(base_dir)) + 1e-6
+                base_dir = base_dir / base_norm
+                if abs(primitive.dribble_angle) > 0.01:
+                    dribble_dir = _rotate_vec2(base_dir, 0.45 * primitive.dribble_angle)
+                else:
+                    dribble_dir = base_dir
 
             dribble_step = primitive.step_mm * 0.75
             gain = max(primitive.dribble_gain, 0.25)
@@ -510,6 +545,12 @@ class AStarSolver:
                     objective.stage_id,
                     objective,
                 )
+                if _is_ball_out_of_bounds(next_ball):
+                    continue
+                if touched and _is_ball_sideline_risk(
+                    current.state.ball_pos, next_ball, objective.stage_id
+                ):
+                    continue
                 next_recontacts = current.state.recontacts + recontact_inc
                 handoff_ready, playball_active, ready_but_walk, takeover_success = (
                     estimate_takeover_proxy(
@@ -636,6 +677,12 @@ class AStarSolver:
                     objective.stage_id,
                     objective,
                 )
+                if _is_ball_out_of_bounds(next_ball):
+                    continue
+                if touched and _is_ball_sideline_risk(
+                    current.state.ball_pos, next_ball, objective.stage_id
+                ):
+                    continue
                 next_recontacts = current.state.recontacts + recontact_inc
                 handoff_ready, playball_active, ready_but_walk, takeover_success = (
                     estimate_takeover_proxy(
@@ -724,6 +771,10 @@ class AStarSolver:
                 break
             is_diverse = True
             for existing in selected:
+                candidate_head = candidate.primitive_seq[0] if candidate.primitive_seq else candidate.mode
+                existing_head = existing.primitive_seq[0] if existing.primitive_seq else existing.mode
+                if candidate_head != existing_head:
+                    continue
                 ep_dist = float(np.linalg.norm(
                     candidate.terminal_state.agent_pos
                     - existing.terminal_state.agent_pos))

@@ -254,7 +254,7 @@ class DatasetTrajectoryPlayer:
 
 def main() -> None:
     # Quick edit config: adjust these values and press Run Python File.
-    DATASET_PATH = "trajectory_demos/demos_fixed0.pkl"
+    DATASET_PATH = r"C:\ALEJO\trajectory_demos\demos_fixed0_partial.pkl"
     USE_FOV = True
     SEED = 42
 

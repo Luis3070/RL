@@ -784,22 +784,51 @@ class RealSidecarPhysicsExecutor:
                             ball: BallState,
                             output: Any,
                             dt: float) -> AgentState:
-        target_pos, target_theta = self._resolve_motion_target(agent, ball, output)
+        target_pos, target_theta = self._resolve_motion_target(agent, ball, output, dt)
         return self._movement.step(agent, target_pos, target_theta, dt)
+
+    def _resolve_reference_target(self,
+                                  agent: AgentState,
+                                  ball: BallState,
+                                  output: Any) -> Optional[np.ndarray]:
+        macro_type = str(getattr(output, "macro_type", "none") or "none")
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+        in_playball = macro_type.startswith("playBall_")
+
+        # During real takeover/playBall the strategic walk target can still be
+        # populated by BHuman, but it should not override the local execution
+        # target. Prioritize kick/dribble targets and finally the ball itself.
+        if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
+            if output.behavior_shooting_to is not None:
+                return np.array(output.behavior_shooting_to, dtype=np.float32)
+            if output.skill_target is not None:
+                return np.array(output.skill_target, dtype=np.float32)
+            return ball.pos.copy()
+
+        if output.behavior_walking_to is not None:
+            return np.array(output.behavior_walking_to, dtype=np.float32)
+        if output.motion_walk_target is not None:
+            return np.array(output.motion_walk_target[:2], dtype=np.float32)
+        if output.behavior_shooting_to is not None:
+            return np.array(output.behavior_shooting_to, dtype=np.float32)
+        if output.skill_target is not None:
+            return np.array(output.skill_target, dtype=np.float32)
+        if motion_request in {"walkToBallAndKick", "dribble"}:
+            return ball.pos.copy()
+        return None
 
     def _resolve_motion_target(self,
                                agent: AgentState,
                                ball: BallState,
-                               output: Any) -> Tuple[np.ndarray, float]:
-        if output.behavior_walking_to is not None:
-            target_pos = np.array(output.behavior_walking_to, dtype=np.float32)
-        elif output.motion_walk_target is not None:
-            target_pos = np.array(output.motion_walk_target[:2], dtype=np.float32)
-        elif output.skill_target is not None:
-            target_pos = np.array(output.skill_target, dtype=np.float32)
-        elif output.motion_request in {"walkToBallAndKick", "dribble"}:
-            target_pos = ball.pos.copy()
-        else:
+                               output: Any,
+                               dt: float) -> Tuple[np.ndarray, float]:
+        macro_type = str(getattr(output, "macro_type", "none") or "none")
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+        in_playball = macro_type.startswith("playBall_")
+        target_pos = self._resolve_reference_target(agent, ball, output)
+        if target_pos is None:
             vx, vy, _ = output.motion_speed
             if abs(vx) > 1e-6 or abs(vy) > 1e-6:
                 cos_t = math.cos(agent.theta)
@@ -810,7 +839,21 @@ class RealSidecarPhysicsExecutor:
             else:
                 target_pos = agent.pos.copy()
 
-        if output.motion_walk_target is not None:
+        if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
+            if output.behavior_shooting_to is not None:
+                shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
+                target_theta = math.atan2(shoot_to[1] - agent.pos[1], shoot_to[0] - agent.pos[0])
+            elif output.skill_target_direction is not None:
+                target_theta = float(output.skill_target_direction)
+            elif output.motion_target_direction is not None:
+                target_theta = float(output.motion_target_direction)
+            else:
+                delta = target_pos - agent.pos
+                if float(np.linalg.norm(delta)) > 1e-6:
+                    target_theta = math.atan2(delta[1], delta[0])
+                else:
+                    target_theta = agent.theta
+        elif output.motion_walk_target is not None:
             target_theta = float(output.motion_walk_target[2])
         elif output.motion_target_direction is not None:
             target_theta = float(output.motion_target_direction)
@@ -845,9 +888,10 @@ class RealSidecarPhysicsExecutor:
                     ball: BallState,
                     output: Any,
                     agents: Dict[str, AgentState]) -> BallState:
-        direction = self._resolve_kick_direction(agent, output, agents)
-        speed = self._kick_speed(output)
         contact_offset = AGENT.min_robot_distance + BALL.radius + 25.0
+        direction = self._resolve_kick_direction(agent, output, agents)
+        direction = self._constrain_contact_direction(agent, direction, contact_offset)
+        speed = self._kick_speed(output)
         return BallState(
             pos=agent.pos + direction * contact_offset,
             vel=direction * speed,
@@ -863,8 +907,9 @@ class RealSidecarPhysicsExecutor:
         if distance > AGENT.ball_interaction_range:
             return ball, False
 
-        direction = self._direction_from_agent(agent, output)
         contact_offset = AGENT.radius + BALL.radius + 10.0
+        direction = self._dribble_direction(agent, ball, output)
+        direction = self._constrain_contact_direction(agent, direction, contact_offset)
         dribble_speed = max(
             150.0,
             min(self._kick_info.ball_velocity_max * 0.45,
@@ -877,8 +922,30 @@ class RealSidecarPhysicsExecutor:
             last_touched_by=agent.agent_id,
             seen_age_ms=0.0,
         )
-        progress = float(next_pos[0] - ball.pos[0]) > 40.0
+        progress = float(np.dot(next_pos - ball.pos, direction)) > 25.0
         return dribble_ball, progress
+
+    def _dribble_direction(self,
+                           agent: AgentState,
+                           ball: BallState,
+                           output: Any) -> np.ndarray:
+        forward = np.array(
+            [math.cos(agent.theta), math.sin(agent.theta)],
+            dtype=np.float32,
+        )
+        target_dir = self._direction_from_agent(agent, ball, output)
+        dot = float(np.dot(forward, target_dir))
+
+        if dot >= 0.85:
+            return forward
+        if dot <= 0.0:
+            return forward
+
+        blended = 0.78 * forward + 0.22 * target_dir
+        norm = float(np.linalg.norm(blended))
+        if norm > 1e-6:
+            return blended / norm
+        return forward
 
     def _resolve_kick_direction(self,
                                 agent: AgentState,
@@ -906,9 +973,48 @@ class RealSidecarPhysicsExecutor:
             if norm > 1e-6:
                 return delta / norm
 
-        return self._direction_from_agent(agent, output)
+        return self._direction_from_agent(agent, ball=None, output=output)
 
-    def _direction_from_agent(self, agent: AgentState, output: Any) -> np.ndarray:
+    def _constrain_contact_direction(self,
+                                     agent: AgentState,
+                                     direction: np.ndarray,
+                                     contact_offset: float) -> np.ndarray:
+        candidate = agent.pos + direction * contact_offset
+        margin = BALL.radius + 50.0
+        safe_x = float(np.clip(
+            candidate[0],
+            FIELD.x_own_ground + margin,
+            FIELD.x_opponent_ground - margin,
+        ))
+        safe_y = float(np.clip(
+            candidate[1],
+            FIELD.y_right_sideline + margin,
+            FIELD.y_left_sideline - margin,
+        ))
+        safe_delta = np.array([safe_x, safe_y], dtype=np.float32) - agent.pos
+        norm = float(np.linalg.norm(safe_delta))
+        if norm > 1e-6:
+            return safe_delta / norm
+        return direction
+
+    def _direction_from_agent(self,
+                              agent: AgentState,
+                              ball: Optional[BallState],
+                              output: Any) -> np.ndarray:
+        reference = self._resolve_reference_target(
+            agent,
+            ball if ball is not None else BallState(
+                pos=agent.pos.copy(),
+                vel=np.zeros(2, dtype=np.float32),
+            ),
+            output,
+        )
+        if reference is not None:
+            delta = reference - agent.pos
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return delta / norm
+
         if output.motion_target_direction is not None:
             theta = float(output.motion_target_direction)
         elif output.skill_target_direction is not None:
@@ -1426,6 +1532,9 @@ class NaoSoccerEnv(ParallelEnv):
             goal_conceded,
             sidecar_output=sidecar_output,
             agent_ids=live_agent_ids,
+            playball_entry=playball_entry,
+            ready_but_walk=ready_but_walk,
+            ready_touch_but_walk=ready_touch_but_walk,
         )
 
         if truncated:
@@ -1624,6 +1733,29 @@ class NaoSoccerEnv(ParallelEnv):
                     )
             self._agents_state[aid] = corrected
 
+    def _guided_ball_target(self, agent: AgentState) -> np.ndarray:
+        ball_vec = self._ball.pos - agent.pos
+        dist_to_ball = float(np.linalg.norm(ball_vec))
+        if dist_to_ball > 1e-6:
+            approach_dir = ball_vec / dist_to_ball
+        else:
+            approach_dir = np.array(
+                [math.cos(agent.theta), math.sin(agent.theta)],
+                dtype=np.float32,
+            )
+
+        desired_rel_x = float(getattr(
+            self._stage,
+            "handoff_target_rel_x_mm",
+            0.5 * (
+                float(self._handoff_mgr._handoff_cfg.ball_rel_x_min)
+                + float(self._handoff_mgr._handoff_cfg.ball_rel_x_max)
+            ),
+        ))
+        return (
+            self._ball.pos - approach_dir.astype(np.float32) * desired_rel_x
+        ).astype(np.float32)
+
     # ── Action decoding ───────────────────────────────────────────────
 
     def _decode_action(self, action, agent, agent_id=""):
@@ -1647,6 +1779,46 @@ class NaoSoccerEnv(ParallelEnv):
                 target_alpha * target_pos
                 + (1.0 - target_alpha) * np.asarray(prev_target, dtype=np.float32)
             ).astype(np.float32)
+            target_pos[0] = float(np.clip(
+                target_pos[0],
+                FIELD.x_own_ground + 300.0,
+                FIELD.x_opponent_ground - 300.0,
+            ))
+            target_pos[1] = float(np.clip(
+                target_pos[1],
+                FIELD.y_right_sideline + 300.0,
+                FIELD.y_left_sideline - 300.0,
+            ))
+
+        if (
+            self._stage.takeover_required
+            and agent_id
+            and agent_id == self._active_agent_id
+        ):
+            guided_target = self._guided_ball_target(agent)
+            dist_to_ball = float(np.linalg.norm(self._ball.pos - agent.pos))
+            chase_blend = float(getattr(self._stage, "ball_chase_blend", 0.0))
+            pose_blend = float(getattr(self._stage, "handoff_pose_blend", 0.0))
+            near_ball = dist_to_ball <= AGENT.ball_interaction_range * 1.15
+            guidance_blend = pose_blend if near_ball else chase_blend
+            if guidance_blend > 0.0:
+                target_pos = (
+                    guidance_blend * guided_target
+                    + (1.0 - guidance_blend) * target_pos
+                ).astype(np.float32)
+
+            max_ball_radius = float(
+                getattr(self._stage, "ball_target_max_radius_mm", 0.0)
+            )
+            if max_ball_radius > 0.0:
+                target_offset = target_pos - self._ball.pos
+                offset_norm = float(np.linalg.norm(target_offset))
+                if offset_norm > max_ball_radius and offset_norm > 1e-6:
+                    target_pos = (
+                        self._ball.pos
+                        + target_offset * (max_ball_radius / offset_norm)
+                    ).astype(np.float32)
+
             target_pos[0] = float(np.clip(
                 target_pos[0],
                 FIELD.x_own_ground + 300.0,
@@ -1859,6 +2031,7 @@ class NaoSoccerEnv(ParallelEnv):
             ready_but_walk=ready_but_walk,
             ready_touch_but_walk=ready_touch_but_walk,
             macro_duration_frames=macro.macro_duration_frames,
+            macro_end_reason=macro.macro_end_reason,
             # Backend provenance for reward gating
             sidecar_backend=(
                 self._sidecar.backend_label if self._sidecar is not None
@@ -1879,6 +2052,8 @@ class NaoSoccerEnv(ParallelEnv):
             r = compute_per_agent_reward(
                 team_components, agents_list[i],
                 self._ball.pos, self._stage.shaping_weight,
+                handoff_ready=macro.handoff_ready,
+                takeover_active=macro.takeover_active,
             )
             if not math.isfinite(r):
                 r = 0.0
@@ -1893,7 +2068,9 @@ class NaoSoccerEnv(ParallelEnv):
             return False
         return self._fov_filter._is_in_fov(agent.pos, agent.theta, self._ball.pos)
 
-    def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None):
+    def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None,
+                     playball_entry=False, ready_but_walk=False,
+                     ready_touch_but_walk=False):
         macro = self._handoff_mgr.macro
         if agent_ids is None:
             agent_ids = self.agents
@@ -1920,6 +2097,9 @@ class NaoSoccerEnv(ParallelEnv):
             "macro_end_reason": macro.macro_end_reason,
             "macro_success": macro.macro_success,
             "last_macro_end_reason": self._last_macro_end_reason,
+            "playball_entry": playball_entry,
+            "ready_but_walk": ready_but_walk,
+            "ready_touch_but_walk": ready_touch_but_walk,
             "active_agent_id": self._active_agent_id,
             "episode_takeover_count": self._episode_takeover_count,
             "episode_takeover_success": self._episode_takeover_success,
@@ -2016,6 +2196,26 @@ class NaoSoccerEnv(ParallelEnv):
             base_info["sidecar_pass_origin_player_number"] = sidecar_output.pass_origin_player_number
             base_info["sidecar_backend"] = sidecar_output.backend
             base_info["sidecar_bridge_mode"] = sidecar_output.bridge_mode
+            if (
+                self._active_agent_id in self._agents_state
+                and self._sidecar_physics is not None
+            ):
+                active_agent = self._agents_state[self._active_agent_id]
+                effective_target = self._sidecar_physics._resolve_reference_target(
+                    active_agent,
+                    self._ball,
+                    sidecar_output,
+                )
+                if effective_target is not None:
+                    base_info["sidecar_effective_target"] = effective_target.tolist()
+                effective_motion_target, effective_theta = self._sidecar_physics._resolve_motion_target(
+                    active_agent,
+                    self._ball,
+                    sidecar_output,
+                    SIM.dt,
+                )
+                base_info["sidecar_effective_motion_target"] = effective_motion_target.tolist()
+                base_info["sidecar_effective_target_theta"] = float(effective_theta)
             base_info["sidecar_contract_validation_mode"] = sidecar_output.contract_validation_mode
             base_info["takeover_simulator_active"] = (self._takeover_sim is not None)
             base_info["bridge_frame_id"] = sidecar_output.bridge_frame_id

@@ -91,6 +91,9 @@ class Color:
 
     # Walk target
     TARGET           = (255, 255,   0)
+    SIDECAR_WALK     = ( 90, 220, 255)
+    SIDECAR_SHOOT    = (255, 165,  60)
+    SIDECAR_EXEC     = (255, 105, 180)
     SHADOW           = (  0,   0,   0)
 
 
@@ -317,6 +320,18 @@ class Renderer:
             ey = int(cy - vlen * vn[1])
             pygame.draw.line(self._surf, Color.BALL_MOVING, (cx, cy), (ex, ey), 3)
 
+    def draw_world_target(self,
+                          origin_mm: np.ndarray,
+                          target_mm: Tuple[float, float],
+                          color: tuple,
+                          label: str) -> None:
+        t = self._t
+        ox, oy = t.to_px(float(origin_mm[0]), float(origin_mm[1]))
+        tx, ty = t.to_px(float(target_mm[0]), float(target_mm[1]))
+        self._dashed_line(color, (ox, oy), (tx, ty), dash=5)
+        pygame.draw.circle(self._surf, color, (tx, ty), 5, 2)
+        self._label(label, tx, ty - 16, color, size=11)
+
     # ── HUD ───────────────────────────────────────────────────────────────────
 
     def draw_hud(self,
@@ -374,6 +389,9 @@ class Renderer:
                 (f"RTBW rate: {control_debug.get('ready_touch_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"TO rate:   {control_debug.get('takeover_timeout_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"CLR rate:  {control_debug.get('takeover_skill_cleared_rate', 0.0):.2f}", Color.TXT_WHITE),
+                (f"WalkTo:    {control_debug.get('walk_target_text', '-')}", Color.TXT_CYAN),
+                (f"ShootTo:   {control_debug.get('shoot_target_text', '-')}", Color.TXT_ORANGE),
+                (f"ExecTo:    {control_debug.get('effective_target_text', '-')}", Color.SIDECAR_EXEC),
             ])
         self._panel(left, x=8, y=8, font=f_md)
 
@@ -501,7 +519,28 @@ class EnvStateReader:
             "takeover_skill_cleared_rate": float(
                 info.get("episode_takeover_skill_cleared_rate", 0.0)
             ),
+            "walk_target": info.get("sidecar_behavior_walking_to")
+            or info.get("sidecar_motion_walk_target"),
+            "shoot_target": info.get("sidecar_behavior_shooting_to"),
+            "effective_target": info.get("sidecar_effective_target"),
+            "walk_target_text": self._fmt_target(
+                info.get("sidecar_behavior_walking_to")
+                or info.get("sidecar_motion_walk_target")
+            ),
+            "shoot_target_text": self._fmt_target(
+                info.get("sidecar_behavior_shooting_to")
+            ),
+            "effective_target_text": self._fmt_target(
+                info.get("sidecar_effective_target")
+            ),
         }
+
+    def _fmt_target(self, target) -> str:
+        if target is None:
+            return "-"
+        if isinstance(target, (list, tuple)) and len(target) >= 2:
+            return f"({int(target[0])},{int(target[1])})"
+        return str(target)
 
     def nearest_agent_dist(self) -> float:
         """Distancia del agente RL más cercano al balón."""
@@ -721,6 +760,7 @@ class SoccerVisualizer:
     def _render(self) -> None:
         r = self._renderer
         control_debug = self._reader.control_debug(self._infos)
+        info = self._reader.sample_info(self._infos)
 
         # 1. Campo
         r.draw_field()
@@ -744,6 +784,37 @@ class SoccerVisualizer:
 
         # 6. Balón
         r.draw_ball(self._reader.ball, self._reader.nearest_agent_dist())
+
+        active_agent_id = str(info.get("active_agent_id", ""))
+        active_agent = self._reader.agents.get(active_agent_id)
+        if active_agent is not None:
+            walk_target = (
+                info.get("sidecar_behavior_walking_to")
+                or info.get("sidecar_motion_walk_target")
+            )
+            if isinstance(walk_target, (list, tuple)) and len(walk_target) >= 2:
+                r.draw_world_target(
+                    active_agent.pos,
+                    (float(walk_target[0]), float(walk_target[1])),
+                    Color.SIDECAR_WALK,
+                    "W",
+                )
+            shoot_target = info.get("sidecar_behavior_shooting_to")
+            if isinstance(shoot_target, (list, tuple)) and len(shoot_target) >= 2:
+                r.draw_world_target(
+                    active_agent.pos,
+                    (float(shoot_target[0]), float(shoot_target[1])),
+                    Color.SIDECAR_SHOOT,
+                    "S",
+                )
+            exec_target = info.get("sidecar_effective_target")
+            if isinstance(exec_target, (list, tuple)) and len(exec_target) >= 2:
+                r.draw_world_target(
+                    active_agent.pos,
+                    (float(exec_target[0]), float(exec_target[1])),
+                    Color.SIDECAR_EXEC,
+                    "E",
+                )
 
         # 7. HUD
         r.draw_hud(
@@ -801,7 +872,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775100472").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775491386\checkpoints\mappo_ep000100.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None

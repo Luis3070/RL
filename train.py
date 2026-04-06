@@ -51,6 +51,7 @@ from config import (
     PRACTICAL_TRAINING, build_practical_training_cfg,
     build_practical_logging_cfg,
 )
+from takeover_trace import TakeoverTraceLogger
 from wrapper import NaoSoccerEnvWrapper
 
 try:
@@ -1097,6 +1098,7 @@ def load_checkpoint(agent: MAPPO, checkpoint_path: str) -> None:
 def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                    agent: MAPPO,
                    logger: MetricsLogger,
+                   trace_logger: Optional[TakeoverTraceLogger],
                    device: str,
                    use_fov: bool,
                    total_steps: int,
@@ -1348,6 +1350,13 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
 
             if infos:
                 sample          = next(iter(infos.values()))
+                if trace_logger is not None:
+                    trace_logger.log_step(
+                        episode=episode + 1,
+                        stage_id=env_wrapper.curriculum_manager.current_stage.stage_id,
+                        stage_name=env_wrapper.curriculum_manager.current_stage.name,
+                        info=sample,
+                    )
                 ep_goal_scored += int(sample.get("goal_scored",   False))
                 ep_goal_ceded  += int(sample.get("goal_conceded", False))
                 ep_bridge_us_sum += float(sample.get("bridge_decision_time_us", 0.0))
@@ -1705,21 +1714,29 @@ def main() -> None:
     run_name = f"{run_prefix}stage{INITIAL_STAGE}_fov{USE_OPPONENT_FOV}_{int(time.time())}"
     log_dir  = os.path.join(LOG.log_dir, run_name)
     logger   = MetricsLogger(log_dir)
+    trace_logger = TakeoverTraceLogger.maybe_create(log_dir)
     active_log_cfg.checkpoint_dir = os.path.join(log_dir, "checkpoints")
 
     print(f"[Main] Logs en: {log_dir}")
+    if trace_logger is not None:
+        print(f"[Main] Takeover trace en: {trace_logger.path}")
 
-    training_loop(
-        env_wrapper   =env_wrapper,
-        agent         =agent,
-        logger        =logger,
-        device        =device,
-        use_fov       =USE_OPPONENT_FOV,
-        total_steps   =active_training_cfg.total_steps,
-        log_cfg       =active_log_cfg,
-        ppo_cfg       =active_ppo_cfg,
-        initial_stage =INITIAL_STAGE,
-    )
+    try:
+        training_loop(
+            env_wrapper   =env_wrapper,
+            agent         =agent,
+            logger        =logger,
+            trace_logger  =trace_logger,
+            device        =device,
+            use_fov       =USE_OPPONENT_FOV,
+            total_steps   =active_training_cfg.total_steps,
+            log_cfg       =active_log_cfg,
+            ppo_cfg       =active_ppo_cfg,
+            initial_stage =INITIAL_STAGE,
+        )
+    finally:
+        if trace_logger is not None:
+            trace_logger.close()
 
 
 if __name__ == "__main__":

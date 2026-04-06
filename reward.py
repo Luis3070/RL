@@ -70,6 +70,7 @@ class TeamRewardInfo:
     ready_but_walk:    bool = False
     ready_touch_but_walk: bool = False
     macro_duration_frames: int = 0
+    macro_end_reason:  str = "none"
     # Backend provenance: "real", "contract_validation", or "python_stub".
     # When not "real", takeover_success is contractual validation only —
     # NOT real BHuman execution evidence. Reward must be gated accordingly.
@@ -86,6 +87,7 @@ class RewardComponents:
     handoff_break_penalty: float = 0.0 # penalty for dropping a clean handoff pose
     playball_entry_bonus: float = 0.0  # bonus for first real playBall entry
     ready_but_walk_penalty: float = 0.0 # penalty for handoff without playBall conversion
+    takeover_stability:  float = 0.0   # small bonus for holding an early real takeover
     takeover_success:    float = 0.0   # bonus for successful BHuman execution
     takeover_failure:    float = 0.0   # penalty for failed takeover
     support_spacing:     float = 0.0   # cooperative spacing quality
@@ -128,7 +130,7 @@ def _approach_ball_reward(agents: List[AgentRewardInfo],
     prev_dist = nearest.prev_ball_dist
 
     delta = (prev_dist - curr_dist) / FIELD.diagonal
-    raw = 130.0 * delta
+    raw = 220.0 * delta
 
     if ball_speed > AGENT.max_forward_speed and raw < 0.0:
         return 0.0
@@ -150,9 +152,9 @@ def _handoff_ready_reward(handoff_ready: bool,
     if takeover_active:
         return 0.0
     if handoff_ready and not prev_handoff_ready:
-        return 0.9
+        return 0.55
     if handoff_ready:
-        return 0.08
+        return 0.005
     return 0.0
 
 
@@ -168,12 +170,14 @@ def _handoff_break_penalty(prev_handoff_ready: bool,
     if takeover_active:
         return 0.0
     if prev_handoff_ready and not handoff_ready:
-        return -0.35
+        return -0.50
     return 0.0
 
 
 def _handoff_alignment_reward(agents: List[AgentRewardInfo],
-                              ball_pos: np.ndarray) -> float:
+                              ball_pos: np.ndarray,
+                              handoff_ready: bool = False,
+                              takeover_active: bool = False) -> float:
     """
     Continuous shaping toward the real handoff envelope.
 
@@ -182,6 +186,9 @@ def _handoff_alignment_reward(agents: List[AgentRewardInfo],
     BHuman takeover can trigger. This reward uses the same geometry as the
     handoff contract, but stays dense outside the exact envelope.
     """
+    if takeover_active:
+        return 0.0
+
     active = next((a for a in agents if a.is_active and a.is_upright), None)
     if active is None:
         upright = [a for a in agents if a.is_upright]
@@ -225,11 +232,14 @@ def _handoff_alignment_reward(agents: List[AgentRewardInfo],
     angle_score = max(0.0, 1.0 - angle_abs / angle_limit)
 
     combined = 0.40 * x_score + 0.35 * y_score + 0.25 * angle_score
-    return 0.6 * combined
+    scale = 0.12 if handoff_ready else 0.6
+    return scale * combined
 
 
 def _takeover_result_reward(takeover_success: Optional[bool],
                             takeover_kick: bool,
+                            macro_end_reason: str = "none",
+                            ball_out_of_bounds: bool = False,
                             sidecar_backend: str = "unknown") -> float:
     """
     Reward based on BHuman takeover outcome.
@@ -249,12 +259,47 @@ def _takeover_result_reward(takeover_success: Optional[bool],
         return 0.0
     reward = 0.0
     if takeover_success is True:
-        reward += 5.0
+        reward += 7.5
     elif takeover_success is False:
-        reward -= 1.0
+        reward -= 2.5
+        if macro_end_reason == "skill_request_cleared":
+            reward -= 1.75
+        elif macro_end_reason == "timeout":
+            reward -= 0.75
+        elif macro_end_reason == "out":
+            reward -= 1.5
+        elif macro_end_reason == "active_agent_changed":
+            reward -= 0.75
+        elif macro_end_reason not in {"none", "goal", "game_state_changed"}:
+            reward -= 0.5
+        if ball_out_of_bounds and macro_end_reason != "out":
+            reward -= 1.0
     if takeover_kick:
-        reward += 1.0
+        reward += 1.25
     return reward
+
+
+def _takeover_stability_reward(takeover_active: bool,
+                               macro_duration_frames: int,
+                               sidecar_backend: str = "unknown") -> float:
+    """
+    Reward the first stable frames of a real takeover.
+
+    This shifts value from "arrive and camp in handoff" toward "enter
+    playBall and keep it alive long enough to finish". It is intentionally
+    front-loaded so long stalled macros do not become profitable.
+    """
+    if sidecar_backend != "real" or not takeover_active:
+        return 0.0
+
+    frames = max(0, int(macro_duration_frames))
+    if frames <= 0:
+        return 0.0
+    if frames <= 6:
+        return 0.18
+    if frames <= 14:
+        return 0.07
+    return 0.0
 
 
 def _playball_entry_reward(playball_entry: bool,
@@ -267,7 +312,7 @@ def _playball_entry_reward(playball_entry: bool,
     """
     if sidecar_backend != "real":
         return 0.0
-    return 0.75 if playball_entry else 0.0
+    return 1.75 if playball_entry else 0.0
 
 
 def _ready_but_walk_penalty(ready_but_walk: bool,
@@ -281,9 +326,9 @@ def _ready_but_walk_penalty(ready_but_walk: bool,
         return 0.0
     penalty = 0.0
     if ready_but_walk:
-        penalty -= 0.06
+        penalty -= 0.12
     if ready_touch_but_walk:
-        penalty -= 0.18
+        penalty -= 0.35
     return penalty
 
 
@@ -418,9 +463,18 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             _approach_ball_reward(info.agents, info.ball_pos, ball_speed)
             * approach_weight
         )
+        if info.takeover_active:
+            components.approach_ball = 0.0
+        elif info.handoff_ready:
+            components.approach_ball *= 0.15
 
         components.handoff_alignment = (
-            _handoff_alignment_reward(info.agents, info.ball_pos)
+            _handoff_alignment_reward(
+                info.agents,
+                info.ball_pos,
+                handoff_ready=info.handoff_ready,
+                takeover_active=info.takeover_active,
+            )
             * max(approach_weight, takeover_weight)
         )
 
@@ -456,10 +510,21 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             )
             * takeover_weight
         )
+        components.takeover_stability = (
+            _takeover_stability_reward(
+                info.takeover_active,
+                info.macro_duration_frames,
+                sidecar_backend=info.sidecar_backend,
+            )
+            * takeover_weight
+        )
 
         # Takeover result (gated by backend provenance)
         takeover_r = _takeover_result_reward(
-            info.takeover_success, info.takeover_kick,
+            info.takeover_success,
+            info.takeover_kick,
+            macro_end_reason=info.macro_end_reason,
+            ball_out_of_bounds=info.ball_out_of_bounds,
             sidecar_backend=info.sidecar_backend,
         )
         if takeover_r >= 0:
@@ -494,6 +559,7 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
         + components.handoff_break_penalty
         + components.playball_entry_bonus
         + components.ready_but_walk_penalty
+        + components.takeover_stability
         + components.takeover_success
         + components.takeover_failure
         + components.support_spacing
@@ -513,6 +579,8 @@ def compute_per_agent_reward(
     agent_info: AgentRewardInfo,
     ball_pos: np.ndarray,
     shaping_weight: float,
+    handoff_ready: bool = False,
+    takeover_active: bool = False,
 ) -> float:
     """
     Adjust team reward with individual bonus.
@@ -520,7 +588,7 @@ def compute_per_agent_reward(
     """
     team_reward = team_components.total
 
-    if shaping_weight > 0.0 and agent_info.is_upright:
+    if shaping_weight > 0.0 and agent_info.is_upright and not handoff_ready and not takeover_active:
         curr_dist = float(np.linalg.norm(agent_info.pos - ball_pos))
         delta = (agent_info.prev_ball_dist - curr_dist) / FIELD.diagonal
         individual_bonus = 0.1 * shaping_weight * 130.0 * delta

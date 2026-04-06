@@ -183,12 +183,6 @@ def get_stage_template_names(stage_id: int) -> List[str]:
         return [
             "carry_left",
             "carry_right",
-            "carry_left",
-            "carry_right",
-            "deep_control",
-            "corridor_left",
-            "corridor_right",
-            "corridor_center",
         ]
     if stage_id == 1:
         return [
