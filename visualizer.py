@@ -87,6 +87,7 @@ class Color:
     TXT_CYAN         = ( 90, 220, 255)
     TXT_ORANGE       = (255, 165,  60)
     TXT_GRAY         = (160, 160, 160)
+    TXT_MAGENTA      = (255, 0, 255)
     HUD_BG           = ( 20,  20,  20, 185)
 
     # Walk target
@@ -325,9 +326,19 @@ class Renderer:
                           target_mm: Tuple[float, float],
                           color: tuple,
                           label: str) -> None:
+        values = (
+            float(origin_mm[0]),
+            float(origin_mm[1]),
+            float(target_mm[0]),
+            float(target_mm[1]),
+        )
+        if not all(math.isfinite(v) for v in values):
+            return
+        if any(abs(v) > 1e6 for v in values):
+            return
         t = self._t
-        ox, oy = t.to_px(float(origin_mm[0]), float(origin_mm[1]))
-        tx, ty = t.to_px(float(target_mm[0]), float(target_mm[1]))
+        ox, oy = t.to_px(values[0], values[1])
+        tx, ty = t.to_px(values[2], values[3])
         self._dashed_line(color, (ox, oy), (tx, ty), dash=5)
         pygame.draw.circle(self._surf, color, (tx, ty), 5, 2)
         self._label(label, tx, ty - 16, color, size=11)
@@ -384,13 +395,19 @@ class Renderer:
                 (f"Macro:     {control_debug.get('macro_type', 'none')}", Color.TXT_WHITE),
                 (f"End:       {control_debug.get('macro_end_reason', 'none')}", Color.TXT_WHITE),
                 (f"BHuman:    {control_debug.get('skill_request', 'none')}", Color.TXT_WHITE),
+                (f"Motion:    {control_debug.get('motion_request', 'none')}", Color.TXT_WHITE),
+                (f"BallAct:   {control_debug.get('ball_action', '-')}", Color.TXT_YELLOW),
+                (f"PreKick:   {control_debug.get('pending_kick_text', '-')}", Color.TXT_YELLOW),
                 (f"PB entry:  {control_debug.get('playball_entries', 0)}", Color.TXT_WHITE),
                 (f"RBW rate:  {control_debug.get('ready_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"RTBW rate: {control_debug.get('ready_touch_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"TO rate:   {control_debug.get('takeover_timeout_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"CLR rate:  {control_debug.get('takeover_skill_cleared_rate', 0.0):.2f}", Color.TXT_WHITE),
-                (f"WalkTo:    {control_debug.get('walk_target_text', '-')}", Color.TXT_CYAN),
+                (f"WalkRel:   {control_debug.get('walk_target_text', '-')}", Color.TXT_CYAN),
+                (f"WalkFld:   {control_debug.get('walk_target_field_text', '-')}", Color.TXT_CYAN),
+                (f"SkillTo:   {control_debug.get('skill_target_text', '-')}", Color.TXT_MAGENTA),
                 (f"ShootTo:   {control_debug.get('shoot_target_text', '-')}", Color.TXT_ORANGE),
+                (f"BallTo:    {control_debug.get('ball_target_text', '-')}", Color.TXT_ORANGE),
                 (f"ExecTo:    {control_debug.get('effective_target_text', '-')}", Color.SIDECAR_EXEC),
             ])
         self._panel(left, x=8, y=8, font=f_md)
@@ -508,6 +525,10 @@ class EnvStateReader:
             "macro_type": str(info.get("macro_type", "none")),
             "macro_end_reason": str(info.get("last_macro_end_reason", "none")),
             "skill_request": str(info.get("sidecar_skill_request", "none")),
+            "motion_request": str(info.get("sidecar_motion_request", "none")),
+            "ball_action": self._ball_action_label(info),
+            "pending_kick_hold": bool(info.get("pending_kick_hold", False)),
+            "pending_kick_text": self._pending_kick_text(info),
             "playball_entries": int(info.get("episode_playball_entry_count", 0)),
             "ready_walk_rate": float(info.get("episode_ready_but_walk_rate", 0.0)),
             "ready_touch_walk_rate": float(
@@ -521,19 +542,62 @@ class EnvStateReader:
             ),
             "walk_target": info.get("sidecar_behavior_walking_to")
             or info.get("sidecar_motion_walk_target"),
-            "shoot_target": info.get("sidecar_behavior_shooting_to"),
+            "walk_target_field": (
+                info.get("sidecar_behavior_walking_to_field")
+                or info.get("sidecar_motion_walk_target_field")
+            ),
+            "skill_target": info.get("sidecar_skill_target"),
+            "shoot_target": (
+                info.get("sidecar_behavior_shooting_to_field")
+                or info.get("sidecar_behavior_shooting_to")
+            ),
+            "ball_target": info.get("sidecar_ball_target_field"),
             "effective_target": info.get("sidecar_effective_target"),
             "walk_target_text": self._fmt_target(
                 info.get("sidecar_behavior_walking_to")
                 or info.get("sidecar_motion_walk_target")
             ),
+            "walk_target_field_text": self._fmt_target(
+                info.get("sidecar_behavior_walking_to_field")
+                or info.get("sidecar_motion_walk_target_field")
+            ),
+            "skill_target_text": self._fmt_target(
+                info.get("sidecar_skill_target")
+            ),
             "shoot_target_text": self._fmt_target(
-                info.get("sidecar_behavior_shooting_to")
+                info.get("sidecar_behavior_shooting_to_field")
+                or info.get("sidecar_behavior_shooting_to")
+            ),
+            "ball_target_text": self._fmt_target(
+                info.get("sidecar_ball_target_field")
             ),
             "effective_target_text": self._fmt_target(
                 info.get("sidecar_effective_target")
             ),
         }
+
+    def _ball_action_label(self, info: Dict[str, object]) -> str:
+        macro_type = str(info.get("macro_type", "none") or "none")
+        skill_request = str(info.get("sidecar_skill_request", "none") or "none")
+        motion_request = str(info.get("sidecar_motion_request", "none") or "none")
+        kick_type = str(info.get("sidecar_kick_type", "none") or "none")
+        last_kick_type = str(info.get("sidecar_last_kick_type", "unavailable") or "unavailable")
+
+        if last_kick_type not in {"none", "unavailable", ""}:
+            return f"KICK[{last_kick_type}]"
+        if "dribble" in macro_type or skill_request == "dribble" or motion_request == "dribble":
+            return "DRIBBLE"
+        if "pass" in macro_type or skill_request == "pass":
+            return "PASS"
+        if "shoot" in macro_type or skill_request == "shoot" or motion_request == "walkToBallAndKick":
+            return f"SHOOT[{kick_type}]" if kick_type not in {"none", ""} else "SHOOT"
+        return "-"
+
+    def _pending_kick_text(self, info: Dict[str, object]) -> str:
+        if not bool(info.get("pending_kick_hold", False)):
+            return "-"
+        frames = int(info.get("pending_kick_hold_frames", 0) or 0)
+        return f"HOLD[{frames}]"
 
     def _fmt_target(self, target) -> str:
         if target is None:
@@ -789,8 +853,8 @@ class SoccerVisualizer:
         active_agent = self._reader.agents.get(active_agent_id)
         if active_agent is not None:
             walk_target = (
-                info.get("sidecar_behavior_walking_to")
-                or info.get("sidecar_motion_walk_target")
+                info.get("sidecar_behavior_walking_to_field")
+                or info.get("sidecar_motion_walk_target_field")
             )
             if isinstance(walk_target, (list, tuple)) and len(walk_target) >= 2:
                 r.draw_world_target(
@@ -799,7 +863,10 @@ class SoccerVisualizer:
                     Color.SIDECAR_WALK,
                     "W",
                 )
-            shoot_target = info.get("sidecar_behavior_shooting_to")
+            shoot_target = (
+                info.get("sidecar_behavior_shooting_to_field")
+                or info.get("sidecar_ball_target_field")
+            )
             if isinstance(shoot_target, (list, tuple)) and len(shoot_target) >= 2:
                 r.draw_world_target(
                     active_agent.pos,
@@ -872,7 +939,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775491386\checkpoints\mappo_ep000100.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775653580\checkpoints\mappo_ep000100.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None

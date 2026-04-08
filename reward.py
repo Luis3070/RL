@@ -466,7 +466,7 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
         if info.takeover_active:
             components.approach_ball = 0.0
         elif info.handoff_ready:
-            components.approach_ball *= 0.15
+            components.approach_ball = max(0.0, components.approach_ball) * 0.10
 
         components.handoff_alignment = (
             _handoff_alignment_reward(

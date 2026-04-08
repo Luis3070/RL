@@ -76,11 +76,22 @@ class TakeoverTraceLogger:
         "sidecar_behavior_status",
         "behavior_walk_x",
         "behavior_walk_y",
+        "behavior_walk_field_x",
+        "behavior_walk_field_y",
         "motion_walk_x",
         "motion_walk_y",
         "motion_walk_theta",
+        "motion_walk_field_x",
+        "motion_walk_field_y",
+        "motion_target_direction",
+        "skill_target_direction",
+        "kick_length",
+        "skill_target_x",
+        "skill_target_y",
         "shoot_target_x",
         "shoot_target_y",
+        "ball_target_x",
+        "ball_target_y",
         "effective_target_x",
         "effective_target_y",
         "bridge_frame_id",
@@ -100,7 +111,7 @@ class TakeoverTraceLogger:
 
     @classmethod
     def maybe_create(cls, log_dir: str) -> Optional["TakeoverTraceLogger"]:
-        if not _env_flag("TRACE_TAKEOVER_STEPS", default=False):
+        if not _env_flag("TRACE_TAKEOVER_STEPS", default=True):
             return None
         return cls(log_dir)
 
@@ -127,7 +138,9 @@ class TakeoverTraceLogger:
             return
 
         behavior_walk_x, behavior_walk_y = _xy(info.get("sidecar_behavior_walking_to"))
+        behavior_walk_field_x, behavior_walk_field_y = _xy(info.get("sidecar_behavior_walking_to_field"))
         motion_walk_x, motion_walk_y = _xy(info.get("sidecar_motion_walk_target"))
+        motion_walk_field_x, motion_walk_field_y = _xy(info.get("sidecar_motion_walk_target_field"))
         motion_walk_theta = None
         motion_walk_target = info.get("sidecar_motion_walk_target")
         if isinstance(motion_walk_target, (list, tuple)) and len(motion_walk_target) >= 3:
@@ -135,7 +148,9 @@ class TakeoverTraceLogger:
                 motion_walk_theta = float(motion_walk_target[2])
             except (TypeError, ValueError):
                 motion_walk_theta = None
+        skill_x, skill_y = _xy(info.get("sidecar_skill_target"))
         shoot_x, shoot_y = _xy(info.get("sidecar_behavior_shooting_to"))
+        ball_target_x, ball_target_y = _xy(info.get("sidecar_ball_target_field"))
         effective_x, effective_y = _xy(info.get("sidecar_effective_target"))
         ball_x, ball_y = _xy(info.get("ball_pos"))
 
@@ -166,11 +181,22 @@ class TakeoverTraceLogger:
             "sidecar_behavior_status": str(info.get("sidecar_behavior_status", "")),
             "behavior_walk_x": behavior_walk_x,
             "behavior_walk_y": behavior_walk_y,
+            "behavior_walk_field_x": behavior_walk_field_x,
+            "behavior_walk_field_y": behavior_walk_field_y,
             "motion_walk_x": motion_walk_x,
             "motion_walk_y": motion_walk_y,
             "motion_walk_theta": motion_walk_theta,
+            "motion_walk_field_x": motion_walk_field_x,
+            "motion_walk_field_y": motion_walk_field_y,
+            "motion_target_direction": info.get("sidecar_motion_target_direction"),
+            "skill_target_direction": info.get("sidecar_skill_target_direction"),
+            "kick_length": info.get("sidecar_kick_length"),
+            "skill_target_x": skill_x,
+            "skill_target_y": skill_y,
             "shoot_target_x": shoot_x,
             "shoot_target_y": shoot_y,
+            "ball_target_x": ball_target_x,
+            "ball_target_y": ball_target_y,
             "effective_target_x": effective_x,
             "effective_target_y": effective_y,
             "bridge_frame_id": int(info.get("bridge_frame_id", -1) or -1),

@@ -755,29 +755,52 @@ class RealSidecarPhysicsExecutor:
             entry.kick_type: entry for entry in contract.kick_info.kicks
         }
         self._last_kick_timestamps: Dict[str, int] = {}
+        self._pending_kick_hold_frames: Dict[str, int] = {}
+        self._pending_kick_hold_limit = 6
 
     def reset(self) -> None:
         self._last_kick_timestamps.clear()
+        self._pending_kick_hold_frames.clear()
 
     def apply(self,
               agent: AgentState,
               ball: BallState,
               output: Any,
               agents: Dict[str, AgentState],
-              dt: float) -> Tuple[AgentState, BallState, bool, bool]:
+              dt: float) -> Tuple[AgentState, BallState, bool, bool, bool, int]:
         if not agent.is_upright:
-            return agent, ball, False, False
+            return agent, ball, False, False, False, 0
 
         updated_agent = self._apply_agent_motion(agent, ball, output, dt)
+        pending_kick_hold = False
+        pending_kick_hold_frames = 0
+
+        if self._is_pending_kick_intent(output):
+            updated_agent, pending_kick_hold = self._stabilize_pre_kick_pose(
+                updated_agent,
+                ball,
+                output,
+            )
+            pending_kick_hold_frames = self._pending_kick_hold_frames.get(agent.agent_id, 0) + 1
+            self._pending_kick_hold_frames[agent.agent_id] = pending_kick_hold_frames
+        else:
+            self._pending_kick_hold_frames[agent.agent_id] = 0
 
         if self._has_new_kick(agent.agent_id, output):
-            return updated_agent, self._apply_kick(updated_agent, ball, output, agents), True, False
+            self._pending_kick_hold_frames[agent.agent_id] = 0
+            return updated_agent, self._apply_kick(updated_agent, ball, output, agents), True, False, False, 0
+
+        if pending_kick_hold and pending_kick_hold_frames >= self._pending_kick_hold_limit:
+            touch_ball, touch_progress = self._apply_guided_pre_kick_touch(updated_agent, ball, output)
+            self._pending_kick_hold_frames[agent.agent_id] = 0
+            return updated_agent, touch_ball, False, touch_progress, False, pending_kick_hold_frames
 
         if output.motion_request == "dribble":
             dribble_ball, dribble_progress = self._apply_dribble(updated_agent, ball, output)
-            return updated_agent, dribble_ball, False, dribble_progress
+            self._pending_kick_hold_frames[agent.agent_id] = 0
+            return updated_agent, dribble_ball, False, dribble_progress, False, 0
 
-        return updated_agent, ball, False, False
+        return updated_agent, ball, False, False, pending_kick_hold, pending_kick_hold_frames
 
     def _apply_agent_motion(self,
                             agent: AgentState,
@@ -787,6 +810,226 @@ class RealSidecarPhysicsExecutor:
         target_pos, target_theta = self._resolve_motion_target(agent, ball, output, dt)
         return self._movement.step(agent, target_pos, target_theta, dt)
 
+    def _is_pending_kick_intent(self, output: Any) -> bool:
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+        return (
+            skill_request in {"shoot", "pass"}
+            and motion_request == "walkToBallAndKick"
+        )
+
+    def _stabilize_pre_kick_pose(self,
+                                 agent: AgentState,
+                                 ball: BallState,
+                                 output: Any) -> Tuple[AgentState, bool]:
+        desired_pos, desired_theta = self._resolve_playball_body_target(agent, ball, output)
+        desired_delta = desired_pos - agent.pos
+        desired_dist = float(np.linalg.norm(desired_delta))
+        ball_dist = float(np.linalg.norm(agent.pos - ball.pos))
+        min_clearance = AGENT.radius + BALL.radius + 8.0
+
+        if ball_dist >= min_clearance and desired_dist <= 45.0:
+            return agent, False
+
+        corrected_pos = desired_pos.astype(np.float32)
+        corrected_vel = np.zeros(2, dtype=np.float32)
+        return AgentState(
+            agent_id=agent.agent_id,
+            pos=corrected_pos,
+            theta=desired_theta,
+            vel=corrected_vel,
+            omega=0.0,
+            role=agent.role,
+            is_upright=agent.is_upright,
+            recovery_steps=agent.recovery_steps,
+            battery=agent.battery,
+            walk_target=agent.walk_target.copy(),
+            speed_scalar=0.0,
+            is_active=agent.is_active,
+        ), True
+
+    def _apply_guided_pre_kick_touch(self,
+                                     agent: AgentState,
+                                     ball: BallState,
+                                     output: Any) -> Tuple[BallState, bool]:
+        distance = float(np.linalg.norm(agent.pos - ball.pos))
+        if distance > AGENT.ball_interaction_range * 1.05:
+            return ball, False
+
+        contact_offset = AGENT.radius + BALL.radius + 8.0
+        direction = self._resolve_kick_direction(agent, ball, output, {})
+        direction = self._constrain_contact_direction(agent, direction, contact_offset)
+        touch_speed = max(
+            180.0,
+            min(self._kick_info.ball_velocity_max * 0.22, 320.0),
+        )
+        next_pos = agent.pos + direction * contact_offset
+        touched_ball = BallState(
+            pos=next_pos,
+            vel=direction * touch_speed,
+            last_touched_by=agent.agent_id,
+            seen_age_ms=0.0,
+        )
+        progress = float(np.dot(next_pos - ball.pos, direction)) > 10.0
+        return touched_ball, progress
+
+    def _target_array(self, value: Any) -> Optional[np.ndarray]:
+        if value is None:
+            return None
+        if isinstance(value, np.ndarray):
+            if value.size < 2:
+                return None
+            target = value[:2].astype(np.float32, copy=True)
+            if not np.all(np.isfinite(target)):
+                return None
+            return target
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            target = np.array([value[0], value[1]], dtype=np.float32)
+            if not np.all(np.isfinite(target)):
+                return None
+            return target
+        return None
+
+    def _sanitize_angle(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            angle = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(angle):
+            return None
+        if abs(angle) > math.pi + 0.25:
+            return None
+        return angle
+
+    def _sanitize_kick_length(self, value: Any) -> float:
+        try:
+            kick_length = float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(kick_length):
+            return 0.0
+        return float(np.clip(kick_length, 0.0, FIELD.length * 1.25))
+
+    def _sanitize_sidecar_target(self,
+                                 value: Any,
+                                 ball: BallState,
+                                 *,
+                                 allow_origin: bool = False) -> Optional[np.ndarray]:
+        target = self._target_array(value)
+        if target is None:
+            return None
+        if allow_origin:
+            return target
+
+        # The bridge occasionally publishes (0, 0) as a placeholder for
+        # optional targets. When the ball is far from midfield, treating that
+        # as a real target makes the robot drift diagonally toward nowhere.
+        if (
+            float(np.linalg.norm(target)) <= 1.0
+            and float(np.linalg.norm(ball.pos)) > 250.0
+        ):
+            return None
+        return target
+
+    def _robot_relative_target_to_field(self,
+                                        agent: AgentState,
+                                        value: Any) -> Optional[np.ndarray]:
+        target = self._target_array(value)
+        if target is None:
+            return None
+        cos_t = math.cos(agent.theta)
+        sin_t = math.sin(agent.theta)
+        dx = float(target[0]) * cos_t - float(target[1]) * sin_t
+        dy = float(target[0]) * sin_t + float(target[1]) * cos_t
+        return np.array([agent.pos[0] + dx, agent.pos[1] + dy], dtype=np.float32)
+
+    def _motion_walk_target_to_field(self,
+                                     agent: AgentState,
+                                     value: Any) -> Optional[Tuple[np.ndarray, float]]:
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            return None
+        pos = self._robot_relative_target_to_field(agent, value[:2])
+        if pos is None:
+            return None
+        theta = _normalize_angle(agent.theta + float(value[2]))
+        return pos, theta
+
+    def _resolve_playball_ball_target(self,
+                                      agent: AgentState,
+                                      ball: BallState,
+                                      output: Any) -> Optional[np.ndarray]:
+        shoot_target_field = self._robot_relative_target_to_field(agent, output.behavior_shooting_to)
+        if shoot_target_field is not None:
+            return shoot_target_field
+
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
+        skill_target_dir = self._sanitize_angle(getattr(output, "skill_target_direction", None))
+        motion_target_dir = self._sanitize_angle(getattr(output, "motion_target_direction", None))
+        kick_length = self._sanitize_kick_length(getattr(output, "kick_length", 0.0))
+
+        if skill_request in {"walk", "block", "mark", "observe"} and skill_target is not None:
+            return skill_target
+
+        if motion_request in {"walkToBallAndKick", "dribble"} and motion_target_dir is not None:
+            target_theta = _normalize_angle(agent.theta + float(motion_target_dir))
+            target_length = kick_length
+            if motion_request == "dribble":
+                target_length = max(600.0, min(900.0, target_length if target_length > 0.0 else 600.0))
+            else:
+                target_length = max(1200.0, target_length if target_length > 0.0 else 1200.0)
+            return (
+                ball.pos
+                + np.array(
+                    [math.cos(target_theta), math.sin(target_theta)],
+                    dtype=np.float32,
+                ) * target_length
+            ).astype(np.float32)
+
+        if skill_request == "dribble" and skill_target_dir is not None:
+            target_theta = float(skill_target_dir)
+            return (
+                ball.pos
+                + np.array(
+                    [math.cos(target_theta), math.sin(target_theta)],
+                    dtype=np.float32,
+                ) * 600.0
+            ).astype(np.float32)
+
+        return None
+
+    def _resolve_playball_body_target(self,
+                                      agent: AgentState,
+                                      ball: BallState,
+                                      output: Any) -> Tuple[np.ndarray, float]:
+        ball_target = self._resolve_playball_ball_target(agent, ball, output)
+        if ball_target is None:
+            return ball.pos.copy(), agent.theta
+
+        direction = ball_target - ball.pos
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-6:
+            return ball.pos.copy(), agent.theta
+
+        direction = direction / norm
+        contact_offset = AGENT.radius + BALL.radius + 35.0
+        body_target = ball.pos - direction * contact_offset
+        body_target[0] = float(np.clip(
+            body_target[0],
+            FIELD.x_own_ground + 50.0,
+            FIELD.x_opponent_ground - 50.0,
+        ))
+        body_target[1] = float(np.clip(
+            body_target[1],
+            FIELD.y_right_sideline + 50.0,
+            FIELD.y_left_sideline - 50.0,
+        ))
+        target_theta = math.atan2(direction[1], direction[0])
+        return body_target.astype(np.float32), target_theta
+
     def _resolve_reference_target(self,
                                   agent: AgentState,
                                   ball: BallState,
@@ -795,25 +1038,26 @@ class RealSidecarPhysicsExecutor:
         skill_request = str(getattr(output, "skill_request", "none") or "none")
         motion_request = str(getattr(output, "motion_request", "none") or "none")
         in_playball = macro_type.startswith("playBall_")
+        shoot_target = self._robot_relative_target_to_field(agent, output.behavior_shooting_to)
+        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
+        walk_target = self._robot_relative_target_to_field(agent, output.behavior_walking_to)
+        motion_walk_target = self._motion_walk_target_to_field(agent, output.motion_walk_target)
 
         # During real takeover/playBall the strategic walk target can still be
         # populated by BHuman, but it should not override the local execution
-        # target. Prioritize kick/dribble targets and finally the ball itself.
+        # target. Use the ball-direction semantics that BHuman actually emits.
         if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
-            if output.behavior_shooting_to is not None:
-                return np.array(output.behavior_shooting_to, dtype=np.float32)
-            if output.skill_target is not None:
-                return np.array(output.skill_target, dtype=np.float32)
-            return ball.pos.copy()
+            target_pos, _ = self._resolve_playball_body_target(agent, ball, output)
+            return target_pos
 
-        if output.behavior_walking_to is not None:
-            return np.array(output.behavior_walking_to, dtype=np.float32)
-        if output.motion_walk_target is not None:
-            return np.array(output.motion_walk_target[:2], dtype=np.float32)
-        if output.behavior_shooting_to is not None:
-            return np.array(output.behavior_shooting_to, dtype=np.float32)
-        if output.skill_target is not None:
-            return np.array(output.skill_target, dtype=np.float32)
+        if skill_target is not None:
+            return skill_target
+        if walk_target is not None:
+            return walk_target
+        if motion_walk_target is not None:
+            return motion_walk_target[0]
+        if shoot_target is not None:
+            return shoot_target
         if motion_request in {"walkToBallAndKick", "dribble"}:
             return ball.pos.copy()
         return None
@@ -840,34 +1084,31 @@ class RealSidecarPhysicsExecutor:
                 target_pos = agent.pos.copy()
 
         if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
-            if output.behavior_shooting_to is not None:
-                shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
+            target_pos, target_theta = self._resolve_playball_body_target(agent, ball, output)
+        elif output.motion_walk_target is not None:
+            motion_walk_target = self._motion_walk_target_to_field(agent, output.motion_walk_target)
+            if motion_walk_target is not None:
+                target_theta = motion_walk_target[1]
+            else:
+                target_theta = agent.theta
+        else:
+            motion_target_dir = self._sanitize_angle(output.motion_target_direction)
+            skill_target_dir = self._sanitize_angle(output.skill_target_direction)
+            if motion_target_dir is not None:
+                target_theta = _normalize_angle(agent.theta + motion_target_dir)
+            elif skill_target_dir is not None:
+                target_theta = float(skill_target_dir)
+            elif output.behavior_shooting_to is not None:
+                shoot_to = self._robot_relative_target_to_field(agent, output.behavior_shooting_to)
+                if shoot_to is None:
+                    shoot_to = agent.pos.copy()
                 target_theta = math.atan2(shoot_to[1] - agent.pos[1], shoot_to[0] - agent.pos[0])
-            elif output.skill_target_direction is not None:
-                target_theta = float(output.skill_target_direction)
-            elif output.motion_target_direction is not None:
-                target_theta = float(output.motion_target_direction)
             else:
                 delta = target_pos - agent.pos
                 if float(np.linalg.norm(delta)) > 1e-6:
                     target_theta = math.atan2(delta[1], delta[0])
                 else:
                     target_theta = agent.theta
-        elif output.motion_walk_target is not None:
-            target_theta = float(output.motion_walk_target[2])
-        elif output.motion_target_direction is not None:
-            target_theta = float(output.motion_target_direction)
-        elif output.skill_target_direction is not None:
-            target_theta = float(output.skill_target_direction)
-        elif output.behavior_shooting_to is not None:
-            shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
-            target_theta = math.atan2(shoot_to[1] - agent.pos[1], shoot_to[0] - agent.pos[0])
-        else:
-            delta = target_pos - agent.pos
-            if float(np.linalg.norm(delta)) > 1e-6:
-                target_theta = math.atan2(delta[1], delta[0])
-            else:
-                target_theta = agent.theta
 
         return target_pos, target_theta
 
@@ -889,7 +1130,7 @@ class RealSidecarPhysicsExecutor:
                     output: Any,
                     agents: Dict[str, AgentState]) -> BallState:
         contact_offset = AGENT.min_robot_distance + BALL.radius + 25.0
-        direction = self._resolve_kick_direction(agent, output, agents)
+        direction = self._resolve_kick_direction(agent, ball, output, agents)
         direction = self._constrain_contact_direction(agent, direction, contact_offset)
         speed = self._kick_speed(output)
         return BallState(
@@ -949,6 +1190,7 @@ class RealSidecarPhysicsExecutor:
 
     def _resolve_kick_direction(self,
                                 agent: AgentState,
+                                ball: BallState,
                                 output: Any,
                                 agents: Dict[str, AgentState]) -> np.ndarray:
         if output.pass_target_player_number is not None:
@@ -959,21 +1201,22 @@ class RealSidecarPhysicsExecutor:
                 if norm > 1e-6:
                     return delta / norm
 
-        if output.behavior_shooting_to is not None:
-            shoot_to = np.array(output.behavior_shooting_to, dtype=np.float32)
-            delta = shoot_to - agent.pos
+        ball_target = self._resolve_playball_ball_target(agent, ball, output)
+        if ball_target is not None:
+            delta = ball_target - ball.pos
             norm = float(np.linalg.norm(delta))
             if norm > 1e-6:
                 return delta / norm
 
-        if output.skill_target is not None:
-            target = np.array(output.skill_target, dtype=np.float32)
+        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
+        if skill_target is not None:
+            target = skill_target
             delta = target - agent.pos
             norm = float(np.linalg.norm(delta))
             if norm > 1e-6:
                 return delta / norm
 
-        return self._direction_from_agent(agent, ball=None, output=output)
+        return self._direction_from_agent(agent, ball=ball, output=output)
 
     def _constrain_contact_direction(self,
                                      agent: AgentState,
@@ -1015,10 +1258,28 @@ class RealSidecarPhysicsExecutor:
             if norm > 1e-6:
                 return delta / norm
 
-        if output.motion_target_direction is not None:
-            theta = float(output.motion_target_direction)
-        elif output.skill_target_direction is not None:
-            theta = float(output.skill_target_direction)
+        ball_target = self._resolve_playball_ball_target(agent, ball if ball is not None else BallState(
+            pos=agent.pos.copy(),
+            vel=np.zeros(2, dtype=np.float32),
+        ), output)
+        if ball is not None and ball_target is not None:
+            delta = ball_target - ball.pos
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return delta / norm
+
+        if ball is not None:
+            delta = ball.pos - agent.pos
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return delta / norm
+
+        motion_target_dir = self._sanitize_angle(output.motion_target_direction)
+        skill_target_dir = self._sanitize_angle(output.skill_target_direction)
+        if motion_target_dir is not None:
+            theta = _normalize_angle(agent.theta + motion_target_dir)
+        elif skill_target_dir is not None:
+            theta = float(skill_target_dir)
         else:
             theta = agent.theta
         return np.array([math.cos(theta), math.sin(theta)], dtype=np.float32)
@@ -1045,7 +1306,7 @@ class RealSidecarPhysicsExecutor:
             kick_key = output.kick_type
 
         entry = self._kick_entries.get(str(kick_key))
-        kick_length = float(output.kick_length or 0.0)
+        kick_length = self._sanitize_kick_length(output.kick_length)
         if entry is not None:
             span = max(1.0, entry.range_max - entry.range_min)
             alpha = float(np.clip((kick_length - entry.range_min) / span, 0.0, 1.0))
@@ -1136,6 +1397,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._prev_ball_dists: Dict[str, float] = {}
         self._current_tactic: str = "t121_4v4_scaled"
         self._active_agent_id: Optional[str] = None
+        self._ball_collision_skip_agent_id: Optional[str] = None
 
         # Smoothing and tracking
         self._prev_actions: Dict[str, np.ndarray] = {}
@@ -1228,6 +1490,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._last_macro_end_reason = "none"
         self._prev_playball_frame = False
         self._prev_handoff_ready = False
+        self._ball_collision_skip_agent_id = None
 
         observations = self._build_observations()
         infos = {aid: {} for aid in self.agents}
@@ -1320,6 +1583,8 @@ class NaoSoccerEnv(ParallelEnv):
         # ═══════════════════════════════════════════════════════════════
         takeover_kick = False
         takeover_progress = False
+        pending_kick_hold = False
+        pending_kick_hold_frames = 0
         macro_resolved_pre_physics = False
         sidecar_macro_type = "none"
         playball_entry = False
@@ -1383,10 +1648,13 @@ class NaoSoccerEnv(ParallelEnv):
                     and self._sidecar_physics is not None
                 ):
                     agent = self._agents_state[self._active_agent_id]
-                    agent, self._ball, takeover_kick, takeover_progress = self._sidecar_physics.apply(
+                    agent, self._ball, takeover_kick, takeover_progress, pending_kick_hold, pending_kick_hold_frames = self._sidecar_physics.apply(
                         agent, self._ball, sidecar_output, self._agents_state, SIM.dt
                     )
                     self._agents_state[self._active_agent_id] = agent
+                    self._ball_collision_skip_agent_id = (
+                        self._active_agent_id if pending_kick_hold else None
+                    )
 
                     if takeover_kick and sidecar_output.skill_request in {"shoot", "pass"}:
                         self._handoff_mgr.force_end("completed", True)
@@ -1430,6 +1698,7 @@ class NaoSoccerEnv(ParallelEnv):
 
         # Collision resolution
         self._ball = self._resolve_ball_collisions()
+        self._ball_collision_skip_agent_id = None
 
         # ═══════════════════════════════════════════════════════════════
         # 6. GOAL CHECK
@@ -1535,6 +1804,8 @@ class NaoSoccerEnv(ParallelEnv):
             playball_entry=playball_entry,
             ready_but_walk=ready_but_walk,
             ready_touch_but_walk=ready_touch_but_walk,
+            pending_kick_hold=pending_kick_hold,
+            pending_kick_hold_frames=pending_kick_hold_frames,
         )
 
         if truncated:
@@ -1734,15 +2005,29 @@ class NaoSoccerEnv(ParallelEnv):
             self._agents_state[aid] = corrected
 
     def _guided_ball_target(self, agent: AgentState) -> np.ndarray:
-        ball_vec = self._ball.pos - agent.pos
-        dist_to_ball = float(np.linalg.norm(ball_vec))
-        if dist_to_ball > 1e-6:
-            approach_dir = ball_vec / dist_to_ball
+        # Guide the agent to a body pose *behind the ball toward the opponent
+        # goal*, not just behind the ball along the current chase line. This
+        # makes the fallback behavior more offensive and reduces the incentive
+        # to push the ball out of bounds to force a center reset.
+        goal_center = np.array([FIELD.x_opponent_ground, 0.0], dtype=np.float32)
+        goal_vec = goal_center - self._ball.pos
+        # Pull slightly toward midfield near the sidelines so the preferred
+        # approach lane stays in-bounds instead of hugging the line.
+        sideline_bias = float(np.clip(-0.22 * self._ball.pos[1], -450.0, 450.0))
+        goal_vec[1] += sideline_bias
+        goal_dist = float(np.linalg.norm(goal_vec))
+        if goal_dist > 1e-6:
+            approach_dir = goal_vec / goal_dist
         else:
-            approach_dir = np.array(
-                [math.cos(agent.theta), math.sin(agent.theta)],
-                dtype=np.float32,
-            )
+            ball_vec = self._ball.pos - agent.pos
+            dist_to_ball = float(np.linalg.norm(ball_vec))
+            if dist_to_ball > 1e-6:
+                approach_dir = ball_vec / dist_to_ball
+            else:
+                approach_dir = np.array(
+                    [math.cos(agent.theta), math.sin(agent.theta)],
+                    dtype=np.float32,
+                )
 
         desired_rel_x = float(getattr(
             self._stage,
@@ -1752,9 +2037,20 @@ class NaoSoccerEnv(ParallelEnv):
                 + float(self._handoff_mgr._handoff_cfg.ball_rel_x_max)
             ),
         ))
-        return (
+        target = (
             self._ball.pos - approach_dir.astype(np.float32) * desired_rel_x
         ).astype(np.float32)
+        target[0] = float(np.clip(
+            target[0],
+            FIELD.x_own_ground + 300.0,
+            FIELD.x_opponent_ground - 300.0,
+        ))
+        target[1] = float(np.clip(
+            target[1],
+            FIELD.y_right_sideline + 300.0,
+            FIELD.y_left_sideline - 300.0,
+        ))
+        return target
 
     # ── Action decoding ───────────────────────────────────────────────
 
@@ -1889,6 +2185,8 @@ class NaoSoccerEnv(ParallelEnv):
 
         for aid, agent in self._agents_state.items():
             if not agent.is_upright:
+                continue
+            if aid == self._ball_collision_skip_agent_id:
                 continue
             diff = ball.pos - agent.pos
             dist = float(np.linalg.norm(diff))
@@ -2070,7 +2368,8 @@ class NaoSoccerEnv(ParallelEnv):
 
     def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None,
                      playball_entry=False, ready_but_walk=False,
-                     ready_touch_but_walk=False):
+                     ready_touch_but_walk=False, pending_kick_hold=False,
+                     pending_kick_hold_frames=0):
         macro = self._handoff_mgr.macro
         if agent_ids is None:
             agent_ids = self.agents
@@ -2100,6 +2399,8 @@ class NaoSoccerEnv(ParallelEnv):
             "playball_entry": playball_entry,
             "ready_but_walk": ready_but_walk,
             "ready_touch_but_walk": ready_touch_but_walk,
+            "pending_kick_hold": bool(pending_kick_hold),
+            "pending_kick_hold_frames": int(pending_kick_hold_frames),
             "active_agent_id": self._active_agent_id,
             "episode_takeover_count": self._episode_takeover_count,
             "episode_takeover_success": self._episode_takeover_success,
@@ -2201,6 +2502,32 @@ class NaoSoccerEnv(ParallelEnv):
                 and self._sidecar_physics is not None
             ):
                 active_agent = self._agents_state[self._active_agent_id]
+                walk_target_field = self._sidecar_physics._robot_relative_target_to_field(
+                    active_agent,
+                    sidecar_output.behavior_walking_to,
+                )
+                if walk_target_field is not None:
+                    base_info["sidecar_behavior_walking_to_field"] = walk_target_field.tolist()
+                shoot_target_field = self._sidecar_physics._robot_relative_target_to_field(
+                    active_agent,
+                    sidecar_output.behavior_shooting_to,
+                )
+                if shoot_target_field is not None:
+                    base_info["sidecar_behavior_shooting_to_field"] = shoot_target_field.tolist()
+                motion_walk_target_field = self._sidecar_physics._motion_walk_target_to_field(
+                    active_agent,
+                    sidecar_output.motion_walk_target,
+                )
+                if motion_walk_target_field is not None:
+                    base_info["sidecar_motion_walk_target_field"] = motion_walk_target_field[0].tolist()
+                    base_info["sidecar_motion_walk_target_theta_field"] = float(motion_walk_target_field[1])
+                playball_ball_target = self._sidecar_physics._resolve_playball_ball_target(
+                    active_agent,
+                    self._ball,
+                    sidecar_output,
+                )
+                if playball_ball_target is not None:
+                    base_info["sidecar_ball_target_field"] = playball_ball_target.tolist()
                 effective_target = self._sidecar_physics._resolve_reference_target(
                     active_agent,
                     self._ball,
