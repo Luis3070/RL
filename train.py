@@ -239,6 +239,10 @@ class MetricsLogger:
         "own_score", "opp_score",
         "mean_reward", "steps",
         "takeover_ready_rate", "takeover_success_rate",
+        "takeover_success_rate_dribble_duel",
+        "takeover_success_rate_shoot", "takeover_success_rate_pass",
+        "takeover_coverage_rate_dribble_duel",
+        "takeover_coverage_rate_shoot", "takeover_coverage_rate_pass",
         "playball_entry_rate", "ready_but_walk_rate", "ready_touch_but_walk_rate",
         "goal_rate_w50", "win_rate_w50",
         "policy_loss", "value_loss", "entropy",
@@ -278,6 +282,12 @@ class MetricsLogger:
                      stage_name: str,
                      takeover_ready_rate: float = 0.0,
                      takeover_success_rate: float = 0.0,
+                     takeover_success_rate_dribble_duel: float = 0.0,
+                     takeover_success_rate_shoot: float = 0.0,
+                     takeover_success_rate_pass: float = 0.0,
+                     takeover_coverage_rate_dribble_duel: float = 0.0,
+                     takeover_coverage_rate_shoot: float = 0.0,
+                     takeover_coverage_rate_pass: float = 0.0,
                      playball_entry_rate: float = 0.0,
                      ready_but_walk_rate: float = 0.0,
                      ready_touch_but_walk_rate: float = 0.0,
@@ -318,6 +328,12 @@ class MetricsLogger:
             "steps":                steps,
             "takeover_ready_rate":  round(takeover_ready_rate, 4),
             "takeover_success_rate": round(takeover_success_rate, 4),
+            "takeover_success_rate_dribble_duel": round(takeover_success_rate_dribble_duel, 4),
+            "takeover_success_rate_shoot": round(takeover_success_rate_shoot, 4),
+            "takeover_success_rate_pass": round(takeover_success_rate_pass, 4),
+            "takeover_coverage_rate_dribble_duel": round(takeover_coverage_rate_dribble_duel, 4),
+            "takeover_coverage_rate_shoot": round(takeover_coverage_rate_shoot, 4),
+            "takeover_coverage_rate_pass": round(takeover_coverage_rate_pass, 4),
             "playball_entry_rate":  round(playball_entry_rate, 4),
             "ready_but_walk_rate":  round(ready_but_walk_rate, 4),
             "ready_touch_but_walk_rate": round(ready_touch_but_walk_rate, 4),
@@ -358,6 +374,9 @@ class MetricsLogger:
               f"Reward={r['mean_reward']:+.3f} | "
               f"TkReady={r['takeover_ready_rate']:.2f} | "
               f"TkSucc={r['takeover_success_rate']:.4f} | "
+              f"DD={r['takeover_success_rate_dribble_duel']:.3f} | "
+              f"Sh={r['takeover_success_rate_shoot']:.3f} | "
+              f"Pa={r['takeover_success_rate_pass']:.3f} | "
               f"PB={r['playball_entry_rate']:.2f} | "
               f"RBW={r['ready_but_walk_rate']:.2f} | "
               f"TO={r['ep_takeover_timeout_rate']:.2f} | "
@@ -432,14 +451,17 @@ class MetricsLogger:
 
     def plot_rates(self) -> None:
         """
-        PNG dedicado a takeover_ready_rate, takeover_success_rate, goal_rate y win_rate.
+        PNG dedicado a readiness, takeover success agregado, success por macro y cobertura.
 
         Métricas BHuman-aware para monitorear el progreso del curriculum.
 
         takeover_ready (azul):   handoff envelope alcanzado
         takeover_success (naranja): BHuman ejecutó exitosamente
-        goal_rate  (verde):      metió al menos un gol
-        win_rate   (rojo):       ganó el episodio
+        dribble_duel (verde):    éxito en macros hoy cubiertos por curriculum
+        shoot/pass (rojo/morado): éxito en macros avanzados
+        coverage (líneas punteadas): porcentaje de episodios donde hubo al menos
+        una oportunidad observada para esa familia de macros
+        goal_rate / win_rate:    resultado deportivo agregado
 
         Las líneas verticales grises marcan los cambios de stage.
         """
@@ -449,18 +471,25 @@ class MetricsLogger:
         episodes       = [r["episode"]               for r in self._rows]
         tk_ready_rates = [r["takeover_ready_rate"]    for r in self._rows]
         tk_succ_rates  = [r["takeover_success_rate"]  for r in self._rows]
+        tk_dd_rates    = [r["takeover_success_rate_dribble_duel"] for r in self._rows]
+        tk_sh_rates    = [r["takeover_success_rate_shoot"] for r in self._rows]
+        tk_pa_rates    = [r["takeover_success_rate_pass"] for r in self._rows]
+        cov_dd_rates   = [r["takeover_coverage_rate_dribble_duel"] for r in self._rows]
+        cov_sh_rates   = [r["takeover_coverage_rate_shoot"] for r in self._rows]
+        cov_pa_rates   = [r["takeover_coverage_rate_pass"] for r in self._rows]
         goal_rates     = [r["goal_rate_w50"]          for r in self._rows]
         win_rates      = [r["win_rate_w50"]           for r in self._rows]
         stages         = [r["stage_id"]               for r in self._rows]
 
-        fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
+        fig, axes = plt.subplots(5, 1, figsize=(14, 15), sharex=True)
         fig.suptitle("MAPPO NAO Soccer — BHuman Metrics por Stage", fontsize=14)
 
         series = [
             (axes[0], tk_ready_rates, "Takeover Ready Rate", "Tasa", "steelblue",  "Handoff ready"),
             (axes[1], tk_succ_rates,  "Takeover Success Rate","Tasa", "darkorange", "BHuman success"),
-            (axes[2], goal_rates,     "Goal Rate (w100)",     "Tasa", "seagreen",   "Metió gol"),
-            (axes[3], win_rates,      "Win Rate (w100)",      "Tasa", "firebrick",  "Ganó el episodio"),
+            (axes[2], tk_dd_rates,    "Takeover Success D+D", "Tasa", "seagreen",   "Dribble/Duel success"),
+            (axes[3], tk_sh_rates,    "Takeover Success Shoot/Pass", "Tasa", "firebrick", "Shoot success"),
+            (axes[4], goal_rates,     "Goal / Win Rate (w100)", "Tasa", "teal", "Metió gol"),
         ]
 
         for ax, data, title, ylabel, color, label in series:
@@ -486,6 +515,30 @@ class MetricsLogger:
                     ax.text(episodes[i], 1.05, f"S{s}",
                             fontsize=7, color="gray", ha="center")
                     prev_s = s
+
+        axes[2].plot(episodes, cov_dd_rates, linestyle="--", linewidth=1.5,
+                     color="darkgreen", alpha=0.9, label="D+D coverage")
+        axes[2].legend(loc="upper left", fontsize=8)
+
+        axes[3].plot(episodes, tk_pa_rates, linewidth=0.8, alpha=0.55,
+                     color="purple", label="Pass success")
+        if len(tk_pa_rates) >= 20:
+            smooth_pa = np.convolve(tk_pa_rates, np.ones(20) / 20, mode="valid")
+            axes[3].plot(episodes[19:], smooth_pa, linewidth=2.0,
+                         color="purple", alpha=0.95)
+        axes[3].plot(episodes, cov_sh_rates, linestyle="--", linewidth=1.5,
+                     color="firebrick", alpha=0.8, label="Shoot coverage")
+        axes[3].plot(episodes, cov_pa_rates, linestyle="--", linewidth=1.5,
+                     color="mediumpurple", alpha=0.8, label="Pass coverage")
+        axes[3].legend(loc="upper left", fontsize=8)
+
+        axes[4].plot(episodes, win_rates, linewidth=0.8, alpha=0.5,
+                     color="goldenrod", label="Ganó el episodio")
+        if len(win_rates) >= 20:
+            smooth_win = np.convolve(win_rates, np.ones(20) / 20, mode="valid")
+            axes[4].plot(episodes[19:], smooth_win, linewidth=2.0,
+                         color="goldenrod", alpha=0.95)
+        axes[4].legend(loc="upper left", fontsize=8)
 
         axes[-1].set_xlabel("Episodio", fontsize=10)
         plt.tight_layout()
@@ -1481,6 +1534,12 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             stage_name            =stage.name,
             takeover_ready_rate   =bhuman_m["takeover_ready_rate"],
             takeover_success_rate =bhuman_m["takeover_success_rate"],
+            takeover_success_rate_dribble_duel = bhuman_m["takeover_success_rate_dribble_duel"],
+            takeover_success_rate_shoot = bhuman_m["takeover_success_rate_shoot"],
+            takeover_success_rate_pass = bhuman_m["takeover_success_rate_pass"],
+            takeover_coverage_rate_dribble_duel = bhuman_m["takeover_coverage_rate_dribble_duel"],
+            takeover_coverage_rate_shoot = bhuman_m["takeover_coverage_rate_shoot"],
+            takeover_coverage_rate_pass = bhuman_m["takeover_coverage_rate_pass"],
             playball_entry_rate   =bhuman_m["playball_entry_rate"],
             ready_but_walk_rate   =bhuman_m["ready_but_walk_rate"],
             ready_touch_but_walk_rate=bhuman_m["ready_touch_but_walk_rate"],

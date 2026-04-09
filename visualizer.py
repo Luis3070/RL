@@ -397,12 +397,35 @@ class Renderer:
                 (f"BHuman:    {control_debug.get('skill_request', 'none')}", Color.TXT_WHITE),
                 (f"Motion:    {control_debug.get('motion_request', 'none')}", Color.TXT_WHITE),
                 (f"BallAct:   {control_debug.get('ball_action', '-')}", Color.TXT_YELLOW),
+                (f"KickEvt:   {control_debug.get('kick_event_text', '-')}", Color.TXT_YELLOW),
                 (f"PreKick:   {control_debug.get('pending_kick_text', '-')}", Color.TXT_YELLOW),
+                (f"PostKick:  {control_debug.get('post_kick_text', '-')}", Color.TXT_YELLOW),
                 (f"PB entry:  {control_debug.get('playball_entries', 0)}", Color.TXT_WHITE),
                 (f"RBW rate:  {control_debug.get('ready_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"RTBW rate: {control_debug.get('ready_touch_walk_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"TO rate:   {control_debug.get('takeover_timeout_rate', 0.0):.2f}", Color.TXT_WHITE),
                 (f"CLR rate:  {control_debug.get('takeover_skill_cleared_rate', 0.0):.2f}", Color.TXT_WHITE),
+                (
+                    f"D+D:      {control_debug.get('takeover_success_dribble_duel', 0)}/"
+                    f"{control_debug.get('takeover_count_dribble_duel', 0)}  "
+                    f"r={control_debug.get('takeover_success_rate_dribble_duel', 0.0):.2f}  "
+                    f"cov={control_debug.get('takeover_coverage_dribble_duel', 0.0):.2f}",
+                    Color.TXT_GREEN,
+                ),
+                (
+                    f"Shoot:    {control_debug.get('takeover_success_shoot', 0)}/"
+                    f"{control_debug.get('takeover_count_shoot', 0)}  "
+                    f"r={control_debug.get('takeover_success_rate_shoot', 0.0):.2f}  "
+                    f"cov={control_debug.get('takeover_coverage_shoot', 0.0):.2f}",
+                    Color.TXT_ORANGE,
+                ),
+                (
+                    f"Pass:     {control_debug.get('takeover_success_pass', 0)}/"
+                    f"{control_debug.get('takeover_count_pass', 0)}  "
+                    f"r={control_debug.get('takeover_success_rate_pass', 0.0):.2f}  "
+                    f"cov={control_debug.get('takeover_coverage_pass', 0.0):.2f}",
+                    Color.TXT_MAGENTA,
+                ),
                 (f"WalkRel:   {control_debug.get('walk_target_text', '-')}", Color.TXT_CYAN),
                 (f"WalkFld:   {control_debug.get('walk_target_field_text', '-')}", Color.TXT_CYAN),
                 (f"SkillTo:   {control_debug.get('skill_target_text', '-')}", Color.TXT_MAGENTA),
@@ -518,6 +541,21 @@ class EnvStateReader:
             owner = "RL"
             color = "green"
 
+        takeover_count_dribble = int(info.get("episode_takeover_count_dribble", 0) or 0)
+        takeover_count_duel = int(info.get("episode_takeover_count_duel", 0) or 0)
+        takeover_count_shoot = int(info.get("episode_takeover_count_shoot", 0) or 0)
+        takeover_count_pass = int(info.get("episode_takeover_count_pass", 0) or 0)
+        takeover_success_dribble = int(info.get("episode_takeover_success_dribble", 0) or 0)
+        takeover_success_duel = int(info.get("episode_takeover_success_duel", 0) or 0)
+        takeover_success_shoot = int(info.get("episode_takeover_success_shoot", 0) or 0)
+        takeover_success_pass = int(info.get("episode_takeover_success_pass", 0) or 0)
+
+        takeover_count_dribble_duel = takeover_count_dribble + takeover_count_duel
+        takeover_success_dribble_duel = takeover_success_dribble + takeover_success_duel
+
+        def _safe_rate(success: int, total: int) -> float:
+            return float(success) / float(total) if total > 0 else 0.0
+
         return {
             "owner": owner,
             "color": color,
@@ -527,8 +565,10 @@ class EnvStateReader:
             "skill_request": str(info.get("sidecar_skill_request", "none")),
             "motion_request": str(info.get("sidecar_motion_request", "none")),
             "ball_action": self._ball_action_label(info),
+            "kick_event_text": self._kick_event_text(info),
             "pending_kick_hold": bool(info.get("pending_kick_hold", False)),
             "pending_kick_text": self._pending_kick_text(info),
+            "post_kick_text": self._post_kick_text(info),
             "playball_entries": int(info.get("episode_playball_entry_count", 0)),
             "ready_walk_rate": float(info.get("episode_ready_but_walk_rate", 0.0)),
             "ready_touch_walk_rate": float(
@@ -540,6 +580,26 @@ class EnvStateReader:
             "takeover_skill_cleared_rate": float(
                 info.get("episode_takeover_skill_cleared_rate", 0.0)
             ),
+            "takeover_count_dribble_duel": takeover_count_dribble_duel,
+            "takeover_success_dribble_duel": takeover_success_dribble_duel,
+            "takeover_success_rate_dribble_duel": _safe_rate(
+                takeover_success_dribble_duel, takeover_count_dribble_duel
+            ),
+            "takeover_coverage_dribble_duel": float(
+                1.0 if takeover_count_dribble_duel > 0 else 0.0
+            ),
+            "takeover_count_shoot": takeover_count_shoot,
+            "takeover_success_shoot": takeover_success_shoot,
+            "takeover_success_rate_shoot": _safe_rate(
+                takeover_success_shoot, takeover_count_shoot
+            ),
+            "takeover_coverage_shoot": float(1.0 if takeover_count_shoot > 0 else 0.0),
+            "takeover_count_pass": takeover_count_pass,
+            "takeover_success_pass": takeover_success_pass,
+            "takeover_success_rate_pass": _safe_rate(
+                takeover_success_pass, takeover_count_pass
+            ),
+            "takeover_coverage_pass": float(1.0 if takeover_count_pass > 0 else 0.0),
             "walk_target": info.get("sidecar_behavior_walking_to")
             or info.get("sidecar_motion_walk_target"),
             "walk_target_field": (
@@ -582,6 +642,8 @@ class EnvStateReader:
         motion_request = str(info.get("sidecar_motion_request", "none") or "none")
         kick_type = str(info.get("sidecar_kick_type", "none") or "none")
         last_kick_type = str(info.get("sidecar_last_kick_type", "unavailable") or "unavailable")
+        if bool(info.get("takeover_kick_proxy", False)):
+            return f"KICK_PROXY[{kick_type}]" if kick_type not in {"none", ""} else "KICK_PROXY"
 
         if last_kick_type not in {"none", "unavailable", ""}:
             return f"KICK[{last_kick_type}]"
@@ -590,6 +652,8 @@ class EnvStateReader:
         if "pass" in macro_type or skill_request == "pass":
             return "PASS"
         if "shoot" in macro_type or skill_request == "shoot" or motion_request == "walkToBallAndKick":
+            if motion_request == "walkToBallAndKick":
+                return f"PREP_SHOOT[{kick_type}]" if kick_type not in {"none", ""} else "PREP_SHOOT"
             return f"SHOOT[{kick_type}]" if kick_type not in {"none", ""} else "SHOOT"
         return "-"
 
@@ -598,6 +662,19 @@ class EnvStateReader:
             return "-"
         frames = int(info.get("pending_kick_hold_frames", 0) or 0)
         return f"HOLD[{frames}]"
+
+    def _kick_event_text(self, info: Dict[str, object]) -> str:
+        if bool(info.get("takeover_kick", False)):
+            return "YES"
+        if bool(info.get("takeover_kick_proxy", False)):
+            return "PROXY"
+        return "-"
+
+    def _post_kick_text(self, info: Dict[str, object]) -> str:
+        frames = int(info.get("post_kick_release_frames", 0) or 0)
+        if frames <= 0:
+            return "-"
+        return f"REL[{frames}]"
 
     def _fmt_target(self, target) -> str:
         if target is None:
@@ -939,7 +1016,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775653580\checkpoints\mappo_ep000100.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775696651\checkpoints\mappo_ep000100.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None

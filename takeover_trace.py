@@ -65,6 +65,15 @@ class TakeoverTraceLogger:
         "playball_entry",
         "ready_but_walk",
         "ready_touch_but_walk",
+        "takeover_kick",
+        "takeover_kick_proxy",
+        "pending_kick_hold",
+        "pending_kick_hold_frames",
+        "post_kick_release_frames",
+        "takeover_control_frames",
+        "takeover_progress_frames",
+        "takeover_ball_progress_mm",
+        "takeover_ball_progress_along_target_mm",
         "ball_out",
         "ball_x",
         "ball_y",
@@ -88,6 +97,14 @@ class TakeoverTraceLogger:
         "kick_length",
         "skill_target_x",
         "skill_target_y",
+        "bridge_ball_target_x",
+        "bridge_ball_target_y",
+        "bridge_contact_x",
+        "bridge_contact_y",
+        "field_ball_x",
+        "field_ball_y",
+        "field_ball_intercept_x",
+        "field_ball_intercept_y",
         "shoot_target_x",
         "shoot_target_y",
         "ball_target_x",
@@ -125,6 +142,10 @@ class TakeoverTraceLogger:
             or info.get("takeover_active")
             or str(info.get("macro_type", "none")) != "none"
             or bool(info.get("playball_entry"))
+            or bool(info.get("pending_kick_hold"))
+            or bool(info.get("takeover_kick"))
+            or bool(info.get("takeover_kick_proxy"))
+            or int(info.get("post_kick_release_frames", 0) or 0) > 0
             or bool(info.get("ball_out"))
             or str(info.get("last_macro_end_reason", "none")) != "none"
         )
@@ -149,6 +170,12 @@ class TakeoverTraceLogger:
             except (TypeError, ValueError):
                 motion_walk_theta = None
         skill_x, skill_y = _xy(info.get("sidecar_skill_target"))
+        bridge_ball_target_x, bridge_ball_target_y = _xy(info.get("sidecar_motion_ball_target_field"))
+        bridge_contact_x, bridge_contact_y = _xy(info.get("sidecar_motion_contact_point_field"))
+        field_ball_x, field_ball_y = _xy(info.get("sidecar_field_ball_position"))
+        field_ball_intercept_x, field_ball_intercept_y = _xy(
+            info.get("sidecar_field_ball_intercepted_position")
+        )
         shoot_x, shoot_y = _xy(info.get("sidecar_behavior_shooting_to"))
         ball_target_x, ball_target_y = _xy(info.get("sidecar_ball_target_field"))
         effective_x, effective_y = _xy(info.get("sidecar_effective_target"))
@@ -170,6 +197,17 @@ class TakeoverTraceLogger:
             "playball_entry": int(bool(info.get("playball_entry", False))),
             "ready_but_walk": int(bool(info.get("ready_but_walk", False))),
             "ready_touch_but_walk": int(bool(info.get("ready_touch_but_walk", False))),
+            "takeover_kick": int(bool(info.get("takeover_kick", False))),
+            "takeover_kick_proxy": int(bool(info.get("takeover_kick_proxy", False))),
+            "pending_kick_hold": int(bool(info.get("pending_kick_hold", False))),
+            "pending_kick_hold_frames": int(info.get("pending_kick_hold_frames", 0) or 0),
+            "post_kick_release_frames": int(info.get("post_kick_release_frames", 0) or 0),
+            "takeover_control_frames": int(info.get("takeover_control_frames", 0) or 0),
+            "takeover_progress_frames": int(info.get("takeover_progress_frames", 0) or 0),
+            "takeover_ball_progress_mm": float(info.get("takeover_ball_progress_mm", 0.0) or 0.0),
+            "takeover_ball_progress_along_target_mm": float(
+                info.get("takeover_ball_progress_along_target_mm", 0.0) or 0.0
+            ),
             "ball_out": int(bool(info.get("ball_out", False))),
             "ball_x": ball_x,
             "ball_y": ball_y,
@@ -193,6 +231,14 @@ class TakeoverTraceLogger:
             "kick_length": info.get("sidecar_kick_length"),
             "skill_target_x": skill_x,
             "skill_target_y": skill_y,
+            "bridge_ball_target_x": bridge_ball_target_x,
+            "bridge_ball_target_y": bridge_ball_target_y,
+            "bridge_contact_x": bridge_contact_x,
+            "bridge_contact_y": bridge_contact_y,
+            "field_ball_x": field_ball_x,
+            "field_ball_y": field_ball_y,
+            "field_ball_intercept_x": field_ball_intercept_x,
+            "field_ball_intercept_y": field_ball_intercept_y,
             "shoot_target_x": shoot_x,
             "shoot_target_y": shoot_y,
             "ball_target_x": ball_target_x,

@@ -213,6 +213,14 @@ class BHumanMetricsAggregator:
         self._window_size = window_size
         self._takeover_ready: deque = deque(maxlen=window_size)
         self._takeover_success: deque = deque(maxlen=window_size)
+        self._takeover_success_dribble: deque = deque(maxlen=window_size)
+        self._takeover_success_duel: deque = deque(maxlen=window_size)
+        self._takeover_success_shoot: deque = deque(maxlen=window_size)
+        self._takeover_success_pass: deque = deque(maxlen=window_size)
+        self._takeover_success_dribble_duel: deque = deque(maxlen=window_size)
+        self._takeover_coverage_dribble_duel: deque = deque(maxlen=window_size)
+        self._takeover_coverage_shoot: deque = deque(maxlen=window_size)
+        self._takeover_coverage_pass: deque = deque(maxlen=window_size)
         self._playball_entry: deque = deque(maxlen=window_size)
         self._ready_but_walk: deque = deque(maxlen=window_size)
         self._ready_touch_but_walk: deque = deque(maxlen=window_size)
@@ -225,6 +233,14 @@ class BHumanMetricsAggregator:
                handoff_achieved: bool,
                takeover_count: int,
                takeover_success_count: int,
+               takeover_count_dribble: int,
+               takeover_count_duel: int,
+               takeover_count_shoot: int,
+               takeover_count_pass: int,
+               takeover_success_dribble: int,
+               takeover_success_duel: int,
+               takeover_success_shoot: int,
+               takeover_success_pass: int,
                playball_achieved: bool,
                ready_but_walk_rate: float,
                ready_touch_but_walk_rate: float,
@@ -237,6 +253,26 @@ class BHumanMetricsAggregator:
             self._takeover_success.append(float(takeover_success_count / takeover_count))
         else:
             self._takeover_success.append(0.0)
+        dribble_duel_count = takeover_count_dribble + takeover_count_duel
+        dribble_duel_success = takeover_success_dribble + takeover_success_duel
+        self._takeover_success_dribble.append(
+            float(takeover_success_dribble / takeover_count_dribble) if takeover_count_dribble > 0 else 0.0
+        )
+        self._takeover_success_duel.append(
+            float(takeover_success_duel / takeover_count_duel) if takeover_count_duel > 0 else 0.0
+        )
+        self._takeover_success_shoot.append(
+            float(takeover_success_shoot / takeover_count_shoot) if takeover_count_shoot > 0 else 0.0
+        )
+        self._takeover_success_pass.append(
+            float(takeover_success_pass / takeover_count_pass) if takeover_count_pass > 0 else 0.0
+        )
+        self._takeover_success_dribble_duel.append(
+            float(dribble_duel_success / dribble_duel_count) if dribble_duel_count > 0 else 0.0
+        )
+        self._takeover_coverage_dribble_duel.append(1.0 if dribble_duel_count > 0 else 0.0)
+        self._takeover_coverage_shoot.append(1.0 if takeover_count_shoot > 0 else 0.0)
+        self._takeover_coverage_pass.append(1.0 if takeover_count_pass > 0 else 0.0)
         self._playball_entry.append(float(playball_achieved))
         self._ready_but_walk.append(float(ready_but_walk_rate))
         self._ready_touch_but_walk.append(float(ready_touch_but_walk_rate))
@@ -250,6 +286,14 @@ class BHumanMetricsAggregator:
             "takeover_ready_rate": self._safe_mean(self._takeover_ready),
             "takeover_success_rate": self._safe_mean(self._takeover_success),
             "bhuman_exec_success_rate": self._safe_mean(self._takeover_success),
+            "takeover_success_rate_dribble": self._safe_mean(self._takeover_success_dribble),
+            "takeover_success_rate_duel": self._safe_mean(self._takeover_success_duel),
+            "takeover_success_rate_shoot": self._safe_mean(self._takeover_success_shoot),
+            "takeover_success_rate_pass": self._safe_mean(self._takeover_success_pass),
+            "takeover_success_rate_dribble_duel": self._safe_mean(self._takeover_success_dribble_duel),
+            "takeover_coverage_rate_dribble_duel": self._safe_mean(self._takeover_coverage_dribble_duel),
+            "takeover_coverage_rate_shoot": self._safe_mean(self._takeover_coverage_shoot),
+            "takeover_coverage_rate_pass": self._safe_mean(self._takeover_coverage_pass),
             "playball_entry_rate": self._safe_mean(self._playball_entry),
             "ready_but_walk_rate": self._safe_mean(self._ready_but_walk),
             "ready_touch_but_walk_rate": self._safe_mean(self._ready_touch_but_walk),
@@ -357,6 +401,14 @@ class NaoSoccerEnvWrapper:
             handoff_achieved=handoff_achieved,
             takeover_count=takeover_count,
             takeover_success_count=takeover_success,
+            takeover_count_dribble=int(sample_info.get("episode_takeover_count_dribble", 0)),
+            takeover_count_duel=int(sample_info.get("episode_takeover_count_duel", 0)),
+            takeover_count_shoot=int(sample_info.get("episode_takeover_count_shoot", 0)),
+            takeover_count_pass=int(sample_info.get("episode_takeover_count_pass", 0)),
+            takeover_success_dribble=int(sample_info.get("episode_takeover_success_dribble", 0)),
+            takeover_success_duel=int(sample_info.get("episode_takeover_success_duel", 0)),
+            takeover_success_shoot=int(sample_info.get("episode_takeover_success_shoot", 0)),
+            takeover_success_pass=int(sample_info.get("episode_takeover_success_pass", 0)),
             playball_achieved=playball_achieved,
             ready_but_walk_rate=ready_but_walk_rate,
             ready_touch_but_walk_rate=ready_touch_but_walk_rate,

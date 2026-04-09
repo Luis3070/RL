@@ -173,6 +173,11 @@ class SidecarOutput:
     motion_target_direction: Optional[float] = None
     motion_executed_phase: str = "unavailable"
     motion_executed_speed: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    motion_ball_target_field: Optional[Tuple[float, float]] = None
+    motion_contact_point_field: Optional[Tuple[float, float]] = None
+    robot_pose_field: Optional[Tuple[float, float, float]] = None
+    field_ball_position: Optional[Tuple[float, float]] = None
+    field_ball_intercepted_position: Optional[Tuple[float, float]] = None
 
     # Kick metadata
     kick_type: str = "none"
@@ -523,6 +528,11 @@ class RealSidecarBackend:
             motion_target_direction=result.get("motion_target_direction_rad"),
             motion_executed_phase=result.get("motion_executed_phase", "unavailable"),
             motion_executed_speed=motion_executed_speed,
+            motion_ball_target_field=self._parse_xy(result.get("motion_ball_target_field")),
+            motion_contact_point_field=self._parse_xy(result.get("motion_contact_point_field")),
+            robot_pose_field=self._parse_pose(result.get("robot_pose_field")),
+            field_ball_position=self._parse_xy(result.get("field_ball_position")),
+            field_ball_intercepted_position=self._parse_xy(result.get("field_ball_intercepted_position")),
             kick_type=result.get("kick_type", "none"),
             kick_length=result.get("kick_length_mm", 0.0),
             last_kick_type=result.get("last_kick_type", "unavailable"),

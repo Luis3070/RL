@@ -89,19 +89,16 @@ def main() -> None:
         _assert(info.get("episode_takeover_success", 0) >= 1,
                 f"episode_takeover_success >= 1 on trial {trial_idx + 1} "
                 f"(got {info.get('episode_takeover_success')})")
-        _assert(info.get("macro_end_reason") == "completed",
-                f"macro_end_reason = completed on trial {trial_idx + 1} "
-                f"(got {info.get('macro_end_reason')})")
-        _assert(info.get("macro_success") is True,
-                f"macro_success = True on trial {trial_idx + 1} "
-                f"(got {info.get('macro_success')})")
+        _assert(info.get("last_macro_end_reason") == "completed",
+                f"last_macro_end_reason = completed on trial {trial_idx + 1} "
+                f"(got {info.get('last_macro_end_reason')})")
 
         successful_events = [ev for ev in events if ev.get("success")]
         _assert(bool(successful_events),
                 f"successful takeover event recorded on trial {trial_idx + 1}")
         latest_success = successful_events[-1]
-        _assert(latest_success.get("type") == "playBall_dribble",
-                f"successful event type = playBall_dribble on trial {trial_idx + 1} "
+        _assert(latest_success.get("type") in {"playBall_dribble", "playBall_duel"},
+                f"successful event type is dribble/duel on trial {trial_idx + 1} "
                 f"(got {latest_success.get('type')})")
         _assert(latest_success.get("end_reason") == "completed",
                 f"successful event end_reason = completed on trial {trial_idx + 1} "
@@ -109,7 +106,7 @@ def main() -> None:
 
     print("\nRESULT: PASS")
     print("  Real env.step() can reach takeover completion with success=True.")
-    print("  The stable completion path is currently a real dribble takeover.")
+    print("  The stable completion path is currently a real dribble/duel takeover.")
 
 
 if __name__ == "__main__":

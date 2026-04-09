@@ -26,6 +26,7 @@ Important Option-1 nuance:
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +50,7 @@ REAL_PLAYBALL_MACROS = {
     "playBall_duel",
 }
 EXPECTED_TACTICS = {"t121_4v4_scaled", "t13_4v4_scaled"}
+PASS_SNAPSHOT_JSON = Path(__file__).resolve().parent / "artifacts" / "real_pass_snapshot.json"
 
 
 def _assert(condition: bool, msg: str) -> None:
@@ -113,9 +115,32 @@ def _make_real_playball_frame() -> GroundTruthFrame:
 
 def _make_real_pass_frame() -> GroundTruthFrame:
     """
-    Stable 4v4 context where the real bridge has produced a true pass
-    decision in repeated probes.
+    Load a pass fixture from real BHuman telemetry when available.
+
+    Fallback to the legacy snapshot only when no telemetry-derived artifact
+    exists yet inside the repo.
     """
+    if PASS_SNAPSHOT_JSON.exists():
+        payload = json.loads(PASS_SNAPSHOT_JSON.read_text(encoding="utf-8"))
+        frame = payload.get("frame", {})
+        return GroundTruthFrame(
+            ball_pos=np.array(frame["ball_pos"], dtype=np.float32),
+            ball_vel=np.array(frame.get("ball_vel", [0.0, 0.0]), dtype=np.float32),
+            ball_seen_age_ms=float(frame.get("ball_seen_age_ms", 0.0)),
+            own_poses={
+                aid: np.array(pos, dtype=np.float32)
+                for aid, pos in frame["own_poses"].items()
+            },
+            own_thetas={aid: float(theta) for aid, theta in frame["own_thetas"].items()},
+            own_upright={aid: bool(flag) for aid, flag in frame["own_upright"].items()},
+            own_roles=dict(frame["own_roles"]),
+            opp_poses=[np.array(pos, dtype=np.float32) for pos in frame["opp_poses"]],
+            opp_upright=[bool(flag) for flag in frame["opp_upright"]],
+            is_playing=bool(frame.get("is_playing", True)),
+            own_score=int(frame.get("own_score", 0)),
+            opp_score=int(frame.get("opp_score", 0)),
+        )
+
     return GroundTruthFrame(
         ball_pos=np.array([819.2516200456632, 403.05814402973715], dtype=np.float32),
         ball_vel=np.zeros(2, dtype=np.float32),

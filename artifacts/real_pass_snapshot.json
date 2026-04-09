@@ -1,0 +1,88 @@
+{
+  "provenance": {
+    "source": "real_bhuman_bridge_search",
+    "description": "Snapshot discovered by querying the real persistent_2d_cognition backend until it emitted playBall_pass.",
+    "attempt": 114,
+    "backend": "real",
+    "bridge_mode": "persistent_2d_cognition",
+    "macro_type": "playBall_pass",
+    "skill_request": "pass",
+    "active_agent": "agent_1",
+    "pass_target_player_number": -1,
+    "current_tactic": "t121_4v4_scaled"
+  },
+  "frame": {
+    "ball_pos": [
+      -1182.6087646484375,
+      -397.19805908203125
+    ],
+    "ball_vel": [
+      0.0,
+      0.0
+    ],
+    "ball_seen_age_ms": 0.0,
+    "own_poses": {
+      "agent_0": [
+        1555.2330322265625,
+        132.26739501953125
+      ],
+      "agent_1": [
+        -1265.8721923828125,
+        -429.711181640625
+      ],
+      "agent_2": [
+        -1653.4189453125,
+        573.5078735351562
+      ],
+      "agent_3": [
+        -2601.92626953125,
+        -1551.997802734375
+      ]
+    },
+    "own_thetas": {
+      "agent_0": 0.0,
+      "agent_1": 0.2360874426715467,
+      "agent_2": 0.0,
+      "agent_3": 0.0
+    },
+    "own_upright": {
+      "agent_0": true,
+      "agent_1": true,
+      "agent_2": true,
+      "agent_3": true
+    },
+    "own_roles": {
+      "agent_0": "forwardR",
+      "agent_1": "forwardL",
+      "agent_2": "defenderR",
+      "agent_3": "defenderL"
+    },
+    "opp_poses": [
+      [
+        -712.3446044921875,
+        -496.6610107421875
+      ],
+      [
+        -460.9398193359375,
+        -286.1810302734375
+      ],
+      [
+        106.7498779296875,
+        -582.510986328125
+      ],
+      [
+        1969.2313232421875,
+        -973.4220581054688
+      ]
+    ],
+    "opp_upright": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "is_playing": true,
+    "own_score": 0,
+    "opp_score": 0
+  }
+}

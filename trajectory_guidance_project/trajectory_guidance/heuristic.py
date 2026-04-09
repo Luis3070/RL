@@ -125,6 +125,57 @@ def proxy_handoff_ready(agent_pos: np.ndarray,
     return True
 
 
+def _proxy_takeover_success(agent_pos: np.ndarray,
+                            ball_pos: np.ndarray,
+                            heading: float,
+                            recontacts: int,
+                            objective: StageObjective,
+                            *,
+                            handoff_ready: bool,
+                            playball_active: bool,
+                            goal_scored: bool,
+                            kicked: bool) -> bool:
+    """
+    Conservative planner-side proxy for takeover success.
+
+    Important:
+      - This is NOT a substitute for the real environment signal.
+      - It intentionally under-claims to avoid training/planning artifacts.
+      - Goal scored remains a hard success.
+      - For non-goal stages we only accept success after a stable handoff/playBall
+        situation with a stronger contact chain than the old heuristic used.
+    """
+    if goal_scored:
+        return True
+
+    if not handoff_ready or not playball_active:
+        return False
+
+    # Keep kick-based modes conservative. A planner-side "kicked=True" does not
+    # prove real execution, so we do not elevate it to takeover success here.
+    if objective.success_mode == "goal_completion":
+        return False
+
+    min_recontacts = max(int(objective.target_recontacts), 3)
+    if objective.success_mode == "stable_dribble":
+        min_recontacts = max(min_recontacts + 1, 4)
+    elif objective.success_mode == "dribble_align_kick":
+        min_recontacts = max(min_recontacts + 1, 4)
+
+    if recontacts < min_recontacts:
+        return False
+
+    # Require the carrier to be in a plausible attacking orientation before we
+    # call the proxy successful. This avoids rewarding sideways/backward control
+    # chains that would not look like a completed takeover in the real env.
+    alignment = goal_alignment_score(agent_pos, ball_pos, objective.stage_id)
+    min_alignment = 0.10 if objective.success_mode == "touch_and_control" else 0.25
+    if alignment < min_alignment:
+        return False
+
+    return True
+
+
 def estimate_takeover_proxy(agent_pos: np.ndarray,
                             ball_pos: np.ndarray,
                             heading: float,
@@ -147,15 +198,17 @@ def estimate_takeover_proxy(agent_pos: np.ndarray,
     playball_active = handoff_ready and touching_ball
     ready_but_walk = handoff_ready and not playball_active
 
-    takeover_success = bool(goal_scored)
-    if objective.success_mode == "touch_and_control":
-        takeover_success = takeover_success or (playball_active and recontacts >= 1)
-    elif objective.success_mode == "stable_dribble":
-        takeover_success = takeover_success or (playball_active and recontacts >= 2)
-    elif objective.success_mode == "dribble_align_kick":
-        takeover_success = takeover_success or kicked or (playball_active and recontacts >= 2)
-    elif objective.success_mode == "goal_completion":
-        takeover_success = takeover_success or kicked
+    takeover_success = _proxy_takeover_success(
+        agent_pos,
+        ball_pos,
+        heading,
+        recontacts,
+        objective,
+        handoff_ready=handoff_ready,
+        playball_active=playball_active,
+        goal_scored=goal_scored,
+        kicked=kicked,
+    )
 
     return handoff_ready, playball_active, ready_but_walk, takeover_success
 
