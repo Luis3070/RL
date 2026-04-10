@@ -182,6 +182,7 @@ class SidecarOutput:
     # Kick metadata
     kick_type: str = "none"
     kick_length: float = 0.0
+    kick_length_raw: float = 0.0
     # last_kick_type: comes from MotionInfo evidence ONLY.
     # "unavailable" = no real execution evidence exists.
     last_kick_type: str = "unavailable"
@@ -535,6 +536,7 @@ class RealSidecarBackend:
             field_ball_intercepted_position=self._parse_xy(result.get("field_ball_intercepted_position")),
             kick_type=result.get("kick_type", "none"),
             kick_length=result.get("kick_length_mm", 0.0),
+            kick_length_raw=result.get("kick_length_mm_raw", result.get("kick_length_mm", 0.0)),
             last_kick_type=result.get("last_kick_type", "unavailable"),
             last_kick_timestamp=result.get("last_kick_timestamp_ms", 0),
             activation_graph=activation_graph,

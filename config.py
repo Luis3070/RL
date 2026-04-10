@@ -819,7 +819,7 @@ class PracticalTrainingProfile:
     """
     enabled: bool = True
     total_steps: int = 2_000_000
-    save_every_eps: int = 100
+    save_every_eps: int = 60
     plot_every_eps: int = 25
     print_every_eps: int = 5
 

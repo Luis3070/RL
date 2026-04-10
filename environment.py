@@ -779,13 +779,18 @@ class RealSidecarPhysicsExecutor:
         self._last_kick_timestamps: Dict[str, int] = {}
         self._pending_kick_hold_frames: Dict[str, int] = {}
         self._pending_kick_hold_limit = 6
+        self._pending_kick_ready_frames: Dict[str, int] = {}
+        self._pending_kick_ready_limit = 2
         self._post_kick_release_frames: Dict[str, int] = {}
         self._post_kick_release_limit = 5
+        self._pre_kick_pose_cache: Dict[str, Tuple[np.ndarray, float]] = {}
 
     def reset(self) -> None:
         self._last_kick_timestamps.clear()
         self._pending_kick_hold_frames.clear()
+        self._pending_kick_ready_frames.clear()
         self._post_kick_release_frames.clear()
+        self._pre_kick_pose_cache.clear()
 
     def apply(self,
               agent: AgentState,
@@ -801,34 +806,59 @@ class RealSidecarPhysicsExecutor:
             self._post_kick_release_frames.get(agent.agent_id, 0) - 1,
         )
         self._post_kick_release_frames[agent.agent_id] = post_kick_release
-        updated_agent = self._apply_agent_motion(agent, ball, output, dt)
         pending_kick_hold = False
         pending_kick_hold_frames = 0
+        kick_intent_active = post_kick_release <= 0 and self._is_kick_intent_active(output)
 
-        if post_kick_release <= 0 and self._is_pending_kick_intent(output):
+        if kick_intent_active:
             updated_agent, pending_kick_hold = self._stabilize_pre_kick_pose(
-                updated_agent,
+                agent,
                 ball,
                 output,
+                dt,
             )
-            pending_kick_hold_frames = self._pending_kick_hold_frames.get(agent.agent_id, 0) + 1
-            self._pending_kick_hold_frames[agent.agent_id] = pending_kick_hold_frames
+            if pending_kick_hold:
+                pending_kick_hold_frames = self._pending_kick_hold_frames.get(agent.agent_id, 0) + 1
+                self._pending_kick_hold_frames[agent.agent_id] = pending_kick_hold_frames
+                self._pending_kick_ready_frames[agent.agent_id] = 0
+            else:
+                self._pending_kick_hold_frames[agent.agent_id] = 0
+                self._pending_kick_ready_frames[agent.agent_id] = (
+                    self._pending_kick_ready_frames.get(agent.agent_id, 0) + 1
+                )
         else:
+            updated_agent = self._apply_agent_motion(agent, ball, output, dt)
             self._pending_kick_hold_frames[agent.agent_id] = 0
+            self._pending_kick_ready_frames[agent.agent_id] = 0
+            self._pre_kick_pose_cache.pop(agent.agent_id, None)
 
         if self._has_new_kick(agent.agent_id, output):
             self._pending_kick_hold_frames[agent.agent_id] = 0
+            self._pending_kick_ready_frames[agent.agent_id] = 0
             self._post_kick_release_frames[agent.agent_id] = self._post_kick_release_limit
+            self._pre_kick_pose_cache.pop(agent.agent_id, None)
             return updated_agent, self._apply_kick(updated_agent, ball, output, agents), True, False, False, 0
 
-        if pending_kick_hold and pending_kick_hold_frames >= self._pending_kick_hold_limit:
+        if kick_intent_active and (
+            (pending_kick_hold and pending_kick_hold_frames >= self._pending_kick_hold_limit)
+            or self._pending_kick_ready_frames.get(agent.agent_id, 0) >= self._pending_kick_ready_limit
+        ):
             touch_ball, touch_progress = self._apply_guided_pre_kick_touch(updated_agent, ball, output)
+            if not touch_progress:
+                touch_ball = self._apply_kick(updated_agent, ball, output, agents)
+                touch_progress = True
             self._pending_kick_hold_frames[agent.agent_id] = 0
+            self._pending_kick_ready_frames[agent.agent_id] = 0
+            self._pre_kick_pose_cache.pop(agent.agent_id, None)
+            if touch_progress:
+                self._post_kick_release_frames[agent.agent_id] = self._post_kick_release_limit
             return updated_agent, touch_ball, False, touch_progress, False, pending_kick_hold_frames
 
         if output.motion_request == "dribble" and post_kick_release <= 0:
             dribble_ball, dribble_progress = self._apply_dribble(updated_agent, ball, output)
             self._pending_kick_hold_frames[agent.agent_id] = 0
+            self._pending_kick_ready_frames[agent.agent_id] = 0
+            self._pre_kick_pose_cache.pop(agent.agent_id, None)
             return updated_agent, dribble_ball, False, dribble_progress, False, 0
 
         return updated_agent, ball, False, False, pending_kick_hold, pending_kick_hold_frames
@@ -841,6 +871,14 @@ class RealSidecarPhysicsExecutor:
         target_pos, target_theta = self._resolve_motion_target(agent, ball, output, dt)
         return self._movement.step(agent, target_pos, target_theta, dt)
 
+    def _is_kick_intent_active(self, output: Any) -> bool:
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        macro_type = str(getattr(output, "macro_type", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+        if skill_request not in {"shoot", "pass"} and macro_type not in {"playBall_shoot", "playBall_pass"}:
+            return False
+        return motion_request in {"walkToBallAndKick", "stand", "dribble"}
+
     def _is_pending_kick_intent(self, output: Any) -> bool:
         skill_request = str(getattr(output, "skill_request", "none") or "none")
         motion_request = str(getattr(output, "motion_request", "none") or "none")
@@ -852,30 +890,65 @@ class RealSidecarPhysicsExecutor:
     def _stabilize_pre_kick_pose(self,
                                  agent: AgentState,
                                  ball: BallState,
-                                 output: Any) -> Tuple[AgentState, bool]:
+                                 output: Any,
+                                 dt: float) -> Tuple[AgentState, bool]:
         desired_pos, desired_theta = self._resolve_playball_body_target(agent, ball, output)
+        cached_pose = self._pre_kick_pose_cache.get(agent.agent_id)
+        if cached_pose is not None:
+            cached_pos, cached_theta = cached_pose
+            desired_pos = (
+                0.7 * np.asarray(cached_pos, dtype=np.float32)
+                + 0.3 * desired_pos.astype(np.float32)
+            ).astype(np.float32)
+            desired_theta = _normalize_angle(
+                float(cached_theta) + 0.3 * _normalize_angle(desired_theta - float(cached_theta))
+            )
+        self._pre_kick_pose_cache[agent.agent_id] = (desired_pos.copy(), float(desired_theta))
+
         desired_delta = desired_pos - agent.pos
         desired_dist = float(np.linalg.norm(desired_delta))
         ball_dist = float(np.linalg.norm(agent.pos - ball.pos))
         min_clearance = AGENT.radius + BALL.radius + 8.0
+        theta_error = _normalize_angle(desired_theta - agent.theta)
 
-        if ball_dist >= min_clearance and desired_dist <= 45.0:
+        if ball_dist >= min_clearance and desired_dist <= 25.0 and abs(theta_error) <= 0.15:
             return agent, False
 
-        corrected_pos = desired_pos.astype(np.float32)
-        corrected_vel = np.zeros(2, dtype=np.float32)
+        max_translation_step = max(70.0, AGENT.max_forward_speed * max(dt, 1e-3) * 8.0)
+        if desired_dist > max_translation_step and desired_dist > 1e-6:
+            corrected_pos = (
+                agent.pos + (desired_delta / desired_dist) * max_translation_step
+            ).astype(np.float32)
+        else:
+            corrected_pos = desired_pos.astype(np.float32)
+
+        corrected_ball_dist = float(np.linalg.norm(corrected_pos - ball.pos))
+        if corrected_ball_dist < min_clearance:
+            safe_dir = corrected_pos - ball.pos
+            safe_norm = float(np.linalg.norm(safe_dir))
+            if safe_norm <= 1e-6:
+                safe_dir = np.array([math.cos(desired_theta), math.sin(desired_theta)], dtype=np.float32)
+                safe_norm = 1.0
+            corrected_pos = (ball.pos + (safe_dir / safe_norm) * min_clearance).astype(np.float32)
+
+        max_theta_step = max(0.16, AGENT.max_rotation_speed * max(dt, 1e-3) * 2.0)
+        corrected_theta = _normalize_angle(
+            agent.theta + float(np.clip(theta_error, -max_theta_step, max_theta_step))
+        )
+        corrected_vel = (corrected_pos - agent.pos) / max(dt, 1e-3)
+        corrected_speed = float(np.linalg.norm(corrected_vel))
         return AgentState(
             agent_id=agent.agent_id,
             pos=corrected_pos,
-            theta=desired_theta,
+            theta=corrected_theta,
             vel=corrected_vel,
-            omega=0.0,
+            omega=float(np.clip(theta_error / max(dt, 1e-3), -AGENT.max_rotation_speed, AGENT.max_rotation_speed)),
             role=agent.role,
             is_upright=agent.is_upright,
             recovery_steps=agent.recovery_steps,
             battery=agent.battery,
-            walk_target=agent.walk_target.copy(),
-            speed_scalar=0.0,
+            walk_target=desired_pos.copy(),
+            speed_scalar=min(corrected_speed, AGENT.max_forward_speed),
             is_active=agent.is_active,
         ), True
 
@@ -884,7 +957,8 @@ class RealSidecarPhysicsExecutor:
                                      ball: BallState,
                                      output: Any) -> Tuple[BallState, bool]:
         distance = float(np.linalg.norm(agent.pos - ball.pos))
-        if distance > AGENT.ball_interaction_range * 1.05:
+        contact_window = AGENT.radius + BALL.radius + 45.0
+        if distance > contact_window:
             return ball, False
 
         contact_offset = AGENT.radius + BALL.radius + 8.0
@@ -966,6 +1040,11 @@ class RealSidecarPhysicsExecutor:
         ))
         return clipped
 
+    def _sanitize_macro_ball_target(self, raw_target: np.ndarray) -> np.ndarray:
+        # Keep BHuman's operational intent intact. Only reject impossible or
+        # out-of-bounds targets; do not reproject them into a handcrafted cone.
+        return self._clip_field_point(raw_target).astype(np.float32)
+
     def _bridge_field_target(self, value: Any) -> Optional[np.ndarray]:
         target = self._target_array(value)
         if target is None:
@@ -1020,18 +1099,19 @@ class RealSidecarPhysicsExecutor:
                                       agent: AgentState,
                                       ball: BallState,
                                       output: Any) -> Optional[np.ndarray]:
+        skill_request = str(getattr(output, "skill_request", "none") or "none")
+        motion_request = str(getattr(output, "motion_request", "none") or "none")
+
         bridge_ball_target = self._bridge_field_target(
             getattr(output, "motion_ball_target_field", None)
         )
         if bridge_ball_target is not None:
-            return bridge_ball_target
+            return self._sanitize_macro_ball_target(bridge_ball_target)
 
         shoot_target_field = self._robot_relative_target_to_field(agent, output.behavior_shooting_to)
         if shoot_target_field is not None:
-            return self._clip_field_point(shoot_target_field)
+            return self._sanitize_macro_ball_target(shoot_target_field)
 
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
         skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
         skill_target_dir = self._sanitize_angle(getattr(output, "skill_target_direction", None))
         motion_target_dir = self._sanitize_angle(getattr(output, "motion_target_direction", None))
@@ -1054,7 +1134,7 @@ class RealSidecarPhysicsExecutor:
                     dtype=np.float32,
                 ) * target_length
             ).astype(np.float32)
-            return self._clip_field_point(target)
+            return self._sanitize_macro_ball_target(target)
 
         if skill_request == "dribble" and skill_target_dir is not None:
             target_theta = float(skill_target_dir)
@@ -1065,7 +1145,7 @@ class RealSidecarPhysicsExecutor:
                     dtype=np.float32,
                 ) * 600.0
             ).astype(np.float32)
-            return self._clip_field_point(target)
+            return self._sanitize_macro_ball_target(target)
 
         return None
 
@@ -1747,9 +1827,22 @@ class NaoSoccerEnv(ParallelEnv):
                         post_kick_release_frames=post_kick_release_frames,
                         pending_kick_hold=pending_kick_hold,
                     )
+                    kick_like_macro = str(getattr(sidecar_output, "macro_type", "none") or "none") in {
+                        "playBall_shoot",
+                        "playBall_pass",
+                    }
+                    kick_like_skill = str(getattr(sidecar_output, "skill_request", "none") or "none") in {
+                        "shoot",
+                        "pass",
+                    }
                     self._ball_collision_skip_agent_id = (
                         self._active_agent_id
-                        if (pending_kick_hold or post_kick_release_frames > 0)
+                        if (
+                            pending_kick_hold
+                            or post_kick_release_frames > 0
+                            or kick_like_macro
+                            or kick_like_skill
+                        )
                         else None
                     )
                     self._update_takeover_progress(
@@ -2493,7 +2586,7 @@ class NaoSoccerEnv(ParallelEnv):
             return False
 
         ball_speed = float(np.linalg.norm(ball.vel))
-        min_speed = max(260.0, float(self._contract.kick_info.ball_velocity_max) * 0.18)
+        min_speed = max(260.0, float(CONTRACT.kick_info.ball_velocity_max) * 0.18)
         if ball_speed < min_speed:
             return False
 
@@ -2841,6 +2934,9 @@ class NaoSoccerEnv(ParallelEnv):
             ]
             base_info["sidecar_kick_type"] = sidecar_output.kick_type
             base_info["sidecar_kick_length"] = sidecar_output.kick_length
+            base_info["sidecar_kick_length_raw"] = getattr(
+                sidecar_output, "kick_length_raw", sidecar_output.kick_length
+            )
             base_info["sidecar_last_kick_type"] = sidecar_output.last_kick_type
             base_info["sidecar_last_kick_timestamp"] = sidecar_output.last_kick_timestamp
             base_info["sidecar_pass_target_player_number"] = sidecar_output.pass_target_player_number
