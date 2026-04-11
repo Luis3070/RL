@@ -54,6 +54,7 @@ class TakeoverTraceLogger:
         "stage_id",
         "stage_name",
         "env_step",
+        "control_owner",
         "active_agent_id",
         "handoff_ready",
         "takeover_active",
@@ -77,11 +78,31 @@ class TakeoverTraceLogger:
         "ball_out",
         "ball_x",
         "ball_y",
+        "ball_vx",
+        "ball_vy",
+        "ball_speed",
+        "ball_heading_deg",
+        "agent_x",
+        "agent_y",
+        "agent_theta_rad",
+        "agent_theta_deg",
+        "agent_vx",
+        "agent_vy",
+        "agent_speed",
+        "agent_omega",
+        "agent_walk_target_x",
+        "agent_walk_target_y",
+        "agent_ball_distance_mm",
+        "agent_ball_bearing_rad",
+        "agent_ball_bearing_deg",
+        "agent_ball_heading_alignment",
         "sidecar_backend",
         "sidecar_current_tactic",
         "sidecar_macro_type",
+        "sidecar_macro_type_effective",
         "sidecar_skill_request",
         "sidecar_motion_request",
+        "sidecar_motion_executed_phase",
         "sidecar_behavior_status",
         "behavior_walk_x",
         "behavior_walk_y",
@@ -112,6 +133,9 @@ class TakeoverTraceLogger:
         "ball_target_y",
         "effective_target_x",
         "effective_target_y",
+        "effective_motion_target_x",
+        "effective_motion_target_y",
+        "effective_target_theta",
         "bridge_frame_id",
     ]
 
@@ -177,9 +201,14 @@ class TakeoverTraceLogger:
         field_ball_intercept_x, field_ball_intercept_y = _xy(
             info.get("sidecar_field_ball_intercepted_position")
         )
+        ball_vx, ball_vy = _xy(info.get("ball_vel"))
+        agent_x, agent_y = _xy(info.get("active_agent_pos"))
+        agent_vx, agent_vy = _xy(info.get("active_agent_vel"))
+        agent_walk_target_x, agent_walk_target_y = _xy(info.get("active_agent_walk_target"))
         shoot_x, shoot_y = _xy(info.get("sidecar_behavior_shooting_to"))
         ball_target_x, ball_target_y = _xy(info.get("sidecar_ball_target_field"))
         effective_x, effective_y = _xy(info.get("sidecar_effective_target"))
+        effective_motion_x, effective_motion_y = _xy(info.get("sidecar_effective_motion_target"))
         ball_x, ball_y = _xy(info.get("ball_pos"))
 
         row = {
@@ -187,6 +216,7 @@ class TakeoverTraceLogger:
             "stage_id": int(stage_id),
             "stage_name": stage_name,
             "env_step": int(info.get("step", 0) or 0),
+            "control_owner": str(info.get("control_owner", "")),
             "active_agent_id": str(info.get("active_agent_id", "")),
             "handoff_ready": int(bool(info.get("handoff_ready", False))),
             "takeover_active": int(bool(info.get("takeover_active", False))),
@@ -212,11 +242,35 @@ class TakeoverTraceLogger:
             "ball_out": int(bool(info.get("ball_out", False))),
             "ball_x": ball_x,
             "ball_y": ball_y,
+            "ball_vx": ball_vx,
+            "ball_vy": ball_vy,
+            "ball_speed": info.get("ball_speed"),
+            "ball_heading_deg": info.get("ball_heading_deg"),
+            "agent_x": agent_x,
+            "agent_y": agent_y,
+            "agent_theta_rad": info.get("active_agent_theta"),
+            "agent_theta_deg": info.get("active_agent_theta_deg"),
+            "agent_vx": agent_vx,
+            "agent_vy": agent_vy,
+            "agent_speed": info.get("active_agent_speed"),
+            "agent_omega": info.get("active_agent_omega"),
+            "agent_walk_target_x": agent_walk_target_x,
+            "agent_walk_target_y": agent_walk_target_y,
+            "agent_ball_distance_mm": info.get("active_agent_ball_distance_mm"),
+            "agent_ball_bearing_rad": info.get("active_agent_ball_bearing_rad"),
+            "agent_ball_bearing_deg": info.get("active_agent_ball_bearing_deg"),
+            "agent_ball_heading_alignment": info.get("active_agent_ball_heading_alignment"),
             "sidecar_backend": str(info.get("sidecar_backend", "")),
             "sidecar_current_tactic": str(info.get("sidecar_current_tactic", "")),
             "sidecar_macro_type": str(info.get("sidecar_macro_type", "none")),
+            "sidecar_macro_type_effective": str(
+                info.get("sidecar_macro_type_effective", "none")
+            ),
             "sidecar_skill_request": str(info.get("sidecar_skill_request", "none")),
             "sidecar_motion_request": str(info.get("sidecar_motion_request", "none")),
+            "sidecar_motion_executed_phase": str(
+                info.get("sidecar_motion_executed_phase", "unavailable")
+            ),
             "sidecar_behavior_status": str(info.get("sidecar_behavior_status", "")),
             "behavior_walk_x": behavior_walk_x,
             "behavior_walk_y": behavior_walk_y,
@@ -247,6 +301,9 @@ class TakeoverTraceLogger:
             "ball_target_y": ball_target_y,
             "effective_target_x": effective_x,
             "effective_target_y": effective_y,
+            "effective_motion_target_x": effective_motion_x,
+            "effective_motion_target_y": effective_motion_y,
+            "effective_target_theta": info.get("sidecar_effective_target_theta"),
             "bridge_frame_id": int(info.get("bridge_frame_id", -1) or -1),
         }
         self._writer.writerow(row)

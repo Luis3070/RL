@@ -756,6 +756,12 @@ def load_policy(checkpoint_path: str):
         if isinstance(ckpt, dict):
             # Nivel 0: checkpoint directo
             candidates.append(ckpt)
+            # Nivel 0b: checkpoints multiagente guardados como
+            # {"agent_0": {"policy": ...}, "agent_1": ...}
+            if "agent_0" in ckpt and isinstance(ckpt["agent_0"], dict):
+                candidates.append(ckpt["agent_0"])
+                if "policy" in ckpt["agent_0"] and isinstance(ckpt["agent_0"]["policy"], dict):
+                    candidates.append(ckpt["agent_0"]["policy"])
             # Nivel 1: ckpt["policy"]
             if "policy" in ckpt and isinstance(ckpt["policy"], dict):
                 candidates.append(ckpt["policy"])
@@ -1016,7 +1022,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775785906\checkpoints\mappo_stage0_1v0_approach_800_ep000050.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775946814\checkpoints\mappo_stage0_1v0_approach_800_ep000050.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None

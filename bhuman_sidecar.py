@@ -115,24 +115,28 @@ def infer_real_macro_type(skill: str,
     """
     Derive the *current* play-ball macro from real BHuman evidence.
 
-    In the real bridge, `SkillRequest` can stay at a high-level intent
-    (`shoot` / `pass`) while the active subskill in `ActivationGraph`
-    and/or `MotionRequest` is still dribbling or in Zweikampf. For
-    semantic fidelity, we prioritize the executed sub-state first.
+    In the real bridge, `MotionRequest` can lag one sub-state behind the
+    high-level `SkillRequest` near goal. Treating any transient dribble
+    motion as `playBall_dribble` was contaminating takeover semantics:
+    BHuman was already asking to `shoot` / `pass`, but our macro label
+    kept flipping back to dribble. For contract fidelity we keep duel as
+    highest priority, then preserve the high-level intent (`shoot/pass`)
+    when it is explicitly present, and only fall back to dribble when
+    there is no stronger play-ball intent.
     """
     states = {node.state for node in activation_graph if getattr(node, "state", "")}
     options = {node.option for node in activation_graph if getattr(node, "option", "")}
 
     if states & DUEL_ACTIVATION_STATES or options & DUEL_ACTIVATION_OPTIONS:
         return "playBall_duel"
-    if (states & DRIBBLE_ACTIVATION_STATES or
-            options & DRIBBLE_ACTIVATION_OPTIONS or
-            motion_request == "dribble"):
-        return "playBall_dribble"
     if skill == "shoot":
         return "playBall_shoot"
     if skill == "pass":
         return "playBall_pass"
+    if (states & DRIBBLE_ACTIVATION_STATES or
+            options & DRIBBLE_ACTIVATION_OPTIONS or
+            motion_request == "dribble"):
+        return "playBall_dribble"
     if skill == "dribble":
         return "playBall_dribble"
     return "none"

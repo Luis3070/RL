@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
+from config import FIELD
 from takeover_trace import TRACE_FILE_NAME
 
 
@@ -35,6 +37,40 @@ def _bucket_xy(x: float | None, y: float | None, bucket_mm: int) -> str:
     bx = int(round(x / bucket_mm) * bucket_mm)
     by = int(round(y / bucket_mm) * bucket_mm)
     return f"({bx},{by})"
+
+
+def _normalize_angle_rad(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def _count_oscillation_events(rows: list[dict[str, str]]) -> tuple[int, int]:
+    bearing_flips = 0
+    heading_jumps = 0
+    prev: dict[str, float | int] | None = None
+    for row in rows:
+        episode = int(_to_float(row, "episode"))
+        env_step = int(_to_float(row, "env_step"))
+        bearing = _to_float(row, "agent_ball_bearing_deg")
+        theta = _to_float(row, "agent_theta_rad")
+        if prev is not None and episode == prev["episode"] and env_step == prev["env_step"] + 1:
+            prev_bearing = float(prev["bearing"])
+            if abs(prev_bearing) >= 12.0 and abs(bearing) >= 12.0:
+                if (prev_bearing > 0.0) != (bearing > 0.0):
+                    bearing_flips += 1
+            theta_delta = abs(_normalize_angle_rad(theta - float(prev["theta"])))
+            if theta_delta >= math.radians(35.0):
+                heading_jumps += 1
+        prev = {
+            "episode": episode,
+            "env_step": env_step,
+            "bearing": bearing,
+            "theta": theta,
+        }
+    return bearing_flips, heading_jumps
 
 
 def _best_window(rows: list[dict[str, str]], window: int, key: str) -> tuple[int, int, float]:
@@ -207,6 +243,56 @@ def summarize_trace(run_dir: Path, bucket_mm: int) -> None:
             f"mean={sum(gap_vals) / len(gap_vals):.1f} "
             f"max={max(gap_vals):.1f}"
         )
+
+    if any(row.get("agent_x") not in ("", None) for row in play_rows):
+        near_goal_rows = [
+            row for row in play_rows
+            if max(_to_float(row, "agent_x"), _to_float(row, "ball_x")) >= FIELD.x_opponent_ground - 450.0
+        ]
+        mismatch_rows = [
+            row for row in play_rows
+            if row.get("macro_type") == "playBall_dribble"
+            and row.get("sidecar_skill_request") in {"shoot", "pass"}
+        ]
+        effective_mismatch_rows = [
+            row for row in play_rows
+            if row.get("sidecar_macro_type_effective") == "playBall_dribble"
+            and row.get("sidecar_skill_request") in {"shoot", "pass"}
+        ]
+        bearing_flips, heading_jumps = _count_oscillation_events(near_goal_rows)
+        execto_ball_gaps = []
+        for row in play_rows:
+            if row.get("effective_target_x") in ("", None) or row.get("effective_target_y") in ("", None):
+                continue
+            if row.get("ball_x") in ("", None) or row.get("ball_y") in ("", None):
+                continue
+            dx = _to_float(row, "effective_target_x") - _to_float(row, "ball_x")
+            dy = _to_float(row, "effective_target_y") - _to_float(row, "ball_y")
+            execto_ball_gaps.append((dx * dx + dy * dy) ** 0.5)
+        print(
+            "kinematics="
+            f"agent_speed_mean={_avg(play_rows, 'agent_speed'):.1f} "
+            f"ball_speed_mean={_avg(play_rows, 'ball_speed'):.1f} "
+            f"agent_ball_dist_mean={_avg(play_rows, 'agent_ball_distance_mm'):.1f} "
+            f"agent_ball_bearing_abs_mean={_avg(play_rows, 'agent_ball_bearing_deg'):.1f}"
+        )
+        print(
+            "near_goal="
+            f"rows={len(near_goal_rows)} "
+            f"bearing_flips={bearing_flips} "
+            f"heading_jumps={heading_jumps}"
+        )
+        print(
+            "macro_skill_mismatch="
+            f"dribble_with_shoot_or_pass={len(mismatch_rows)} "
+            f"effective_dribble_with_shoot_or_pass={len(effective_mismatch_rows)}"
+        )
+        if execto_ball_gaps:
+            print(
+                "execto_ball_gap_mm="
+                f"mean={sum(execto_ball_gaps) / len(execto_ball_gaps):.1f} "
+                f"max={max(execto_ball_gaps):.1f}"
+            )
 
 
 def resolve_run_dir(path_str: str) -> Path:

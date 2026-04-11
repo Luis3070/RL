@@ -431,6 +431,51 @@ def _fov_bonus(agents: List[AgentRewardInfo]) -> float:
     return 0.0
 
 
+def _focus_agent_for_ball(agents: List[AgentRewardInfo],
+                          ball_pos: np.ndarray) -> Optional[AgentRewardInfo]:
+    """Return the active upright agent, or the nearest upright fallback."""
+    active = next((a for a in agents if a.is_active and a.is_upright), None)
+    if active is not None:
+        return active
+    upright = [a for a in agents if a.is_upright]
+    if not upright:
+        return None
+    return min(upright, key=lambda a: float(np.linalg.norm(a.pos - ball_pos)))
+
+
+def _is_defensive_recovery_context(agents: List[AgentRewardInfo],
+                                   ball_pos: np.ndarray) -> bool:
+    """
+    Detect when the least-bad action is recovering a ball drifting into our
+    own half or toward a sideline.
+
+    In those frames the agent may need to arc back toward its own goal before
+    it can get behind the ball again. That should not look like a strong
+    tactical regression to the learner.
+    """
+    focus = _focus_agent_for_ball(agents, ball_pos)
+    if focus is None:
+        return False
+
+    upright = [a for a in agents if a.is_upright]
+    if not upright:
+        return False
+
+    focus_dist = float(np.linalg.norm(focus.pos - ball_pos))
+    nearest_dist = min(float(np.linalg.norm(a.pos - ball_pos)) for a in upright)
+    nearest_ok = focus_dist <= nearest_dist + 120.0
+
+    ball_in_own_half = float(ball_pos[0]) < -0.10 * FIELD.x_opponent_ground
+    ball_deep_own = float(ball_pos[0]) < FIELD.x_own_penalty + 350.0
+    ball_wide = abs(float(ball_pos[1])) > 0.65 * FIELD.y_left_sideline
+    ball_behind_focus = float(ball_pos[0]) <= float(focus.pos[0]) + 120.0
+    forced_recovery = float(ball_pos[0]) <= float(focus.pos[0]) - 80.0
+
+    return nearest_ok and ball_behind_focus and (
+        ball_in_own_half or ball_deep_own or ball_wide or forced_recovery
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN REWARD FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,6 +502,7 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
 
     if shaping_weight > 0.0:
         ball_speed = float(np.linalg.norm(info.ball_vel))
+        defensive_recovery = _is_defensive_recovery_context(info.agents, info.ball_pos)
 
         # Approach to ball (for active agent)
         components.approach_ball = (
@@ -467,6 +513,8 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             components.approach_ball = 0.0
         elif info.handoff_ready:
             components.approach_ball = max(0.0, components.approach_ball) * 0.10
+        elif defensive_recovery and components.approach_ball < 0.0:
+            components.approach_ball = 0.0
 
         components.handoff_alignment = (
             _handoff_alignment_reward(
@@ -532,25 +580,28 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
         else:
             components.takeover_failure = takeover_r * takeover_weight
 
-        # Support spacing
-        components.support_spacing = (
-            _support_spacing_reward(info.agents) * support_weight
-        )
+        if not info.takeover_active:
+            # Support spacing
+            components.support_spacing = (
+                _support_spacing_reward(info.agents) * support_weight
+            )
 
-        # Anti-blocking
-        components.anti_blocking = (
-            _anti_blocking_penalty(info.agents, info.ball_pos) * support_weight
-        )
+            # Anti-blocking
+            components.anti_blocking = (
+                _anti_blocking_penalty(info.agents, info.ball_pos) * support_weight
+            )
 
-        # Standard penalties
-        components.out_of_bounds = _out_of_bounds_penalty(info.agents)
-        components.fall_penalty = _fall_penalty(info.agents)
-        components.oscillation_penalty = _oscillation_penalty(info.agents)
-        components.fov_bonus = _fov_bonus(info.agents)
+            # Standard penalties only apply while RL still owns the body.
+            components.out_of_bounds = _out_of_bounds_penalty(info.agents)
+            if defensive_recovery and components.out_of_bounds < 0.0:
+                components.out_of_bounds *= 0.25
+            components.fall_penalty = _fall_penalty(info.agents)
+            components.oscillation_penalty = _oscillation_penalty(info.agents)
+            components.fov_bonus = _fov_bonus(info.agents)
 
-        # Ball out of bounds
-        if info.ball_out_of_bounds:
-            components.ball_out_penalty = -3.0
+            # Ball out is also attributed only before real takeover.
+            if info.ball_out_of_bounds:
+                components.ball_out_penalty = -0.35 if defensive_recovery else -3.0
 
     shaped = (
         components.approach_ball
@@ -588,10 +639,13 @@ def compute_per_agent_reward(
     """
     team_reward = team_components.total
 
+    defensive_recovery = _is_defensive_recovery_context([agent_info], ball_pos)
     if shaping_weight > 0.0 and agent_info.is_upright and not handoff_ready and not takeover_active:
         curr_dist = float(np.linalg.norm(agent_info.pos - ball_pos))
         delta = (agent_info.prev_ball_dist - curr_dist) / FIELD.diagonal
         individual_bonus = 0.1 * shaping_weight * 130.0 * delta
+        if defensive_recovery and individual_bonus < 0.0:
+            individual_bonus = 0.0
     else:
         individual_bonus = 0.0
 
