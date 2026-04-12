@@ -267,6 +267,8 @@ class RealSidecarBackend:
         self._player_count = 0
         self._frame_counter = 0
         self._prewarmed_player_count = 4
+        self._team_resync_interval = 30
+        self._frames_since_team_resync = 0
         self._last_active_player_number: Optional[int] = None
         self._executor = ThreadPoolExecutor(
             max_workers=self._prewarmed_player_count,
@@ -277,7 +279,8 @@ class RealSidecarBackend:
 
     def decide(self, frame: GroundTruthFrame,
                active_agent_hint: Optional[str] = None,
-               prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
+               prefer_single_bridge_fast_path: bool = False,
+               real_agent_count: Optional[int] = None) -> SidecarOutput:
         """Run one BHuman cognition cycle across the active own-team players."""
         self._frame_counter += 1
         agent_order = self._sorted_agent_ids(frame.own_poses.keys())
@@ -314,7 +317,11 @@ class RealSidecarBackend:
         queried_players: List[int]
         fallback_reason = "none"
 
-        use_single_bridge = prefer_single_bridge_fast_path and active_agent_hint in frame.own_roles
+        use_single_bridge = (
+            prefer_single_bridge_fast_path
+            and active_agent_hint in frame.own_roles
+            and self._frames_since_team_resync < self._team_resync_interval
+        )
         if use_single_bridge:
             hinted_role = frame.own_roles.get(active_agent_hint, "")
             candidate_player = self._choose_role_mapped_player(hinted_role)
@@ -342,6 +349,14 @@ class RealSidecarBackend:
                 active_player = candidate_result.get("active_agent_number")
                 if active_player is None:
                     active_player = candidate_player
+                single_bridge_ok = self._single_bridge_result_is_usable(
+                    candidate_player,
+                    candidate_result,
+                    real_agent_count=real_agent_count,
+                )
+                if not single_bridge_ok:
+                    fallback_reason = "candidate_not_confirmed"
+                    use_single_bridge = False
         if not use_single_bridge:
             try:
                 results = self._step_team_parallel(
@@ -359,6 +374,9 @@ class RealSidecarBackend:
             queried_players = list(sorted(results.keys()))
             self._update_position_map(results)
             active_player = self._select_active_player(results)
+            self._frames_since_team_resync = 0
+        else:
+            self._frames_since_team_resync += 1
 
         canonical_player = active_player if active_player is not None else 1
         canonical = dict(results.get(canonical_player, {}))
@@ -404,6 +422,7 @@ class RealSidecarBackend:
         for bridge in self._bridges.values():
             bridge.reset()
         self._frame_counter = 0
+        self._frames_since_team_resync = 0
         self._last_active_player_number = None
 
     def shutdown(self, close_executor: bool = True):
@@ -528,6 +547,24 @@ class RealSidecarBackend:
             if position in (None, "", "none", "goalkeeper"):
                 continue
             self._bridge_player_by_position[str(position)] = player_number
+
+    def _single_bridge_result_is_usable(
+        self,
+        candidate_player: int,
+        candidate_result: dict,
+        *,
+        real_agent_count: Optional[int],
+    ) -> bool:
+        if candidate_result.get("debug_game_state") != "playing":
+            return False
+        if candidate_result.get("debug_frame_sync") != "ack":
+            return False
+        if candidate_result.get("debug_transport_mode") != "pipe_process":
+            return False
+        if real_agent_count == 1:
+            return True
+        inferred_active = self._select_active_player({candidate_player: candidate_result})
+        return inferred_active == candidate_player
 
     def _select_active_player(self, results: Dict[int, dict]) -> Optional[int]:
         candidates: List[int] = []
@@ -1211,23 +1248,27 @@ class BHumanDecisionSidecar:
                opponents: list,
                game: Any,
                active_agent_hint: Optional[str] = None,
-               prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
+               prefer_single_bridge_fast_path: bool = False,
+               real_agent_count: Optional[int] = None) -> SidecarOutput:
         frame = self._build_frame(agents, ball, opponents, game)
         return self.decide_from_frame(
             frame,
             active_agent_hint=active_agent_hint,
             prefer_single_bridge_fast_path=prefer_single_bridge_fast_path,
+            real_agent_count=real_agent_count,
         )
 
     def decide_from_frame(self, frame: GroundTruthFrame,
                           active_agent_hint: Optional[str] = None,
-                          prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
+                          prefer_single_bridge_fast_path: bool = False,
+                          real_agent_count: Optional[int] = None) -> SidecarOutput:
         if self._real_backend is not None:
             try:
                 output = self._real_backend.decide(
                     frame,
                     active_agent_hint=active_agent_hint,
                     prefer_single_bridge_fast_path=prefer_single_bridge_fast_path,
+                    real_agent_count=real_agent_count,
                 )
                 if output.current_tactic not in (None, "", "none"):
                     self._last_known_tactic = str(output.current_tactic)

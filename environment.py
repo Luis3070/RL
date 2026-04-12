@@ -2198,7 +2198,8 @@ class NaoSoccerEnv(ParallelEnv):
                 opponents=self._opponents_state,
                 game=self._game,
                 active_agent_hint=self._active_agent_id,
-                prefer_single_bridge_fast_path=(len(self.agents) == 1),
+                prefer_single_bridge_fast_path=True,
+                real_agent_count=len(self.agents),
             )
             # Sidecar decides active_agent — use it
             if sidecar_output.active_agent in self._agents_state:
