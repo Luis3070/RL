@@ -118,22 +118,22 @@ def _approach_ball_reward(agents: List[AgentRewardInfo],
     Only the nearest upright agent contributes.
     Clamped to >=0 when ball moves faster than agent can walk.
     """
-    upright = [a for a in agents if a.is_upright]
-    if not upright:
+    focus = _focus_agent_for_ball(agents, ball_pos)
+    if focus is None:
         return 0.0
 
-    curr_dists = [float(np.linalg.norm(a.pos - ball_pos)) for a in upright]
-    nearest_idx = int(np.argmin(curr_dists))
-    nearest = upright[nearest_idx]
-
-    curr_dist = curr_dists[nearest_idx]
-    prev_dist = nearest.prev_ball_dist
+    curr_dist = float(np.linalg.norm(focus.pos - ball_pos))
+    prev_dist = focus.prev_ball_dist
 
     delta = (prev_dist - curr_dist) / FIELD.diagonal
-    raw = 220.0 * delta
+    raw = 210.0 * delta
+    raw = float(np.clip(raw, -0.85, 1.15))
 
     if ball_speed > AGENT.max_forward_speed and raw < 0.0:
         return 0.0
+
+    if raw < 0.0:
+        raw *= 0.45
 
     return raw
 
@@ -152,9 +152,9 @@ def _handoff_ready_reward(handoff_ready: bool,
     if takeover_active:
         return 0.0
     if handoff_ready and not prev_handoff_ready:
-        return 0.55
+        return 0.70
     if handoff_ready:
-        return 0.005
+        return 0.003
     return 0.0
 
 
@@ -170,7 +170,7 @@ def _handoff_break_penalty(prev_handoff_ready: bool,
     if takeover_active:
         return 0.0
     if prev_handoff_ready and not handoff_ready:
-        return -0.50
+        return -0.35
     return 0.0
 
 
@@ -232,7 +232,7 @@ def _handoff_alignment_reward(agents: List[AgentRewardInfo],
     angle_score = max(0.0, 1.0 - angle_abs / angle_limit)
 
     combined = 0.40 * x_score + 0.35 * y_score + 0.25 * angle_score
-    scale = 0.12 if handoff_ready else 0.6
+    scale = 0.10 if handoff_ready else 0.72
     return scale * combined
 
 
@@ -259,23 +259,23 @@ def _takeover_result_reward(takeover_success: Optional[bool],
         return 0.0
     reward = 0.0
     if takeover_success is True:
-        reward += 7.5
+        reward += 8.25
     elif takeover_success is False:
-        reward -= 2.5
+        reward -= 1.40
         if macro_end_reason == "skill_request_cleared":
-            reward -= 1.75
+            reward -= 0.85
         elif macro_end_reason == "timeout":
-            reward -= 0.75
+            reward -= 0.45
         elif macro_end_reason == "out":
-            reward -= 1.5
+            reward -= 0.70
         elif macro_end_reason == "active_agent_changed":
-            reward -= 0.75
+            reward -= 0.40
         elif macro_end_reason not in {"none", "goal", "game_state_changed"}:
-            reward -= 0.5
+            reward -= 0.25
         if ball_out_of_bounds and macro_end_reason != "out":
-            reward -= 1.0
+            reward -= 0.45
     if takeover_kick:
-        reward += 1.25
+        reward += 1.10
     return reward
 
 
@@ -295,10 +295,10 @@ def _takeover_stability_reward(takeover_active: bool,
     frames = max(0, int(macro_duration_frames))
     if frames <= 0:
         return 0.0
-    if frames <= 6:
-        return 0.18
-    if frames <= 14:
-        return 0.07
+    if frames <= 8:
+        return 0.22
+    if frames <= 18:
+        return 0.09
     return 0.0
 
 
@@ -312,7 +312,7 @@ def _playball_entry_reward(playball_entry: bool,
     """
     if sidecar_backend != "real":
         return 0.0
-    return 1.75 if playball_entry else 0.0
+    return 2.10 if playball_entry else 0.0
 
 
 def _ready_but_walk_penalty(ready_but_walk: bool,
@@ -326,9 +326,9 @@ def _ready_but_walk_penalty(ready_but_walk: bool,
         return 0.0
     penalty = 0.0
     if ready_but_walk:
-        penalty -= 0.12
+        penalty -= 0.18
     if ready_touch_but_walk:
-        penalty -= 0.35
+        penalty -= 0.50
     return penalty
 
 
@@ -470,9 +470,20 @@ def _is_defensive_recovery_context(agents: List[AgentRewardInfo],
     ball_wide = abs(float(ball_pos[1])) > 0.65 * FIELD.y_left_sideline
     ball_behind_focus = float(ball_pos[0]) <= float(focus.pos[0]) + 120.0
     forced_recovery = float(ball_pos[0]) <= float(focus.pos[0]) - 80.0
+    hard_backtrack = float(ball_pos[0]) <= float(focus.pos[0]) - 450.0
+    center_reset = (
+        abs(float(ball_pos[0])) <= 450.0
+        and abs(float(ball_pos[1])) <= 450.0
+        and float(focus.pos[0]) >= 900.0
+    )
 
     return nearest_ok and ball_behind_focus and (
-        ball_in_own_half or ball_deep_own or ball_wide or forced_recovery
+        ball_in_own_half
+        or ball_deep_own
+        or ball_wide
+        or forced_recovery
+        or hard_backtrack
+        or center_reset
     )
 
 
@@ -594,14 +605,14 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             # Standard penalties only apply while RL still owns the body.
             components.out_of_bounds = _out_of_bounds_penalty(info.agents)
             if defensive_recovery and components.out_of_bounds < 0.0:
-                components.out_of_bounds *= 0.25
+                components.out_of_bounds = 0.0
             components.fall_penalty = _fall_penalty(info.agents)
             components.oscillation_penalty = _oscillation_penalty(info.agents)
             components.fov_bonus = _fov_bonus(info.agents)
 
             # Ball out is also attributed only before real takeover.
             if info.ball_out_of_bounds:
-                components.ball_out_penalty = -0.35 if defensive_recovery else -3.0
+                components.ball_out_penalty = 0.0 if defensive_recovery else -3.0
 
     shaped = (
         components.approach_ball
@@ -643,9 +654,12 @@ def compute_per_agent_reward(
     if shaping_weight > 0.0 and agent_info.is_upright and not handoff_ready and not takeover_active:
         curr_dist = float(np.linalg.norm(agent_info.pos - ball_pos))
         delta = (agent_info.prev_ball_dist - curr_dist) / FIELD.diagonal
-        individual_bonus = 0.1 * shaping_weight * 130.0 * delta
+        individual_bonus = 0.1 * shaping_weight * 110.0 * delta
+        individual_bonus = float(np.clip(individual_bonus, -0.08, 0.16))
         if defensive_recovery and individual_bonus < 0.0:
             individual_bonus = 0.0
+        elif individual_bonus < 0.0:
+            individual_bonus *= 0.35
     else:
         individual_bonus = 0.0
 

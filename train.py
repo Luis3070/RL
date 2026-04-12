@@ -229,7 +229,7 @@ class MetricsLogger:
 
     Columnas CSV:
         episode, stage_id, stage_name, own_score, opp_score,
-        mean_reward, steps, takeover_ready_rate, takeover_success_rate,
+        mean_reward, steps, handoff_reached_rate, takeover_ready_rate, takeover_success_rate,
         goal_rate_w50, win_rate_w50,
         policy_loss, value_loss, entropy, elapsed_s
     """
@@ -238,6 +238,7 @@ class MetricsLogger:
         "episode", "stage_id", "stage_name",
         "own_score", "opp_score",
         "mean_reward", "steps",
+        "handoff_reached_rate",
         "takeover_ready_rate", "takeover_success_rate",
         "takeover_success_rate_dribble_duel",
         "takeover_success_rate_shoot", "takeover_success_rate_pass",
@@ -280,6 +281,7 @@ class MetricsLogger:
                      steps: int,
                      stage_id: int,
                      stage_name: str,
+                     handoff_reached_rate: float = 0.0,
                      takeover_ready_rate: float = 0.0,
                      takeover_success_rate: float = 0.0,
                      takeover_success_rate_dribble_duel: float = 0.0,
@@ -326,6 +328,7 @@ class MetricsLogger:
             "opp_score":            opp_score,
             "mean_reward":          round(mean_reward, 4),
             "steps":                steps,
+            "handoff_reached_rate": round(handoff_reached_rate, 4),
             "takeover_ready_rate":  round(takeover_ready_rate, 4),
             "takeover_success_rate": round(takeover_success_rate, 4),
             "takeover_success_rate_dribble_duel": round(takeover_success_rate_dribble_duel, 4),
@@ -372,6 +375,7 @@ class MetricsLogger:
         print(f"[Ep {episode:6d}] Stage={r['stage_id']}({r['stage_name'][:10]}) | "
               f"Score={r['own_score']}-{r['opp_score']} | "
               f"Reward={r['mean_reward']:+.3f} | "
+              f"HR={r['handoff_reached_rate']:.2f} | "
               f"TkReady={r['takeover_ready_rate']:.2f} | "
               f"TkSucc={r['takeover_success_rate']:.4f} | "
               f"DD={r['takeover_success_rate_dribble_duel']:.3f} | "
@@ -469,6 +473,7 @@ class MetricsLogger:
             return
 
         episodes       = [r["episode"]               for r in self._rows]
+        handoff_rates  = [r["handoff_reached_rate"]   for r in self._rows]
         tk_ready_rates = [r["takeover_ready_rate"]    for r in self._rows]
         tk_succ_rates  = [r["takeover_success_rate"]  for r in self._rows]
         tk_dd_rates    = [r["takeover_success_rate_dribble_duel"] for r in self._rows]
@@ -481,14 +486,14 @@ class MetricsLogger:
         win_rates      = [r["win_rate_w50"]           for r in self._rows]
         stages         = [r["stage_id"]               for r in self._rows]
 
-        fig, axes = plt.subplots(5, 1, figsize=(14, 15), sharex=True)
+        fig, axes = plt.subplots(6, 1, figsize=(14, 18), sharex=True)
         fig.suptitle("MAPPO NAO Soccer — BHuman Metrics por Stage", fontsize=14)
 
         series = [
-            (axes[0], tk_ready_rates, "Takeover Ready Rate", "Tasa", "steelblue",  "Handoff ready"),
-            (axes[1], tk_succ_rates,  "Takeover Success Rate","Tasa", "darkorange", "BHuman success"),
-            (axes[2], tk_dd_rates,    "Takeover Success D+D", "Tasa", "seagreen",   "Dribble/Duel success"),
-            (axes[3], tk_sh_rates,    "Takeover Success Shoot/Pass", "Tasa", "firebrick", "Shoot success"),
+            (axes[0], handoff_rates, "Handoff Reached Rate", "Tasa", "steelblue", "Handoff reached"),
+            (axes[1], tk_ready_rates, "TkReady Rate", "Tasa", "royalblue", "BHuman accepted takeover"),
+            (axes[2], tk_succ_rates,  "Takeover Success Rate","Tasa", "darkorange", "BHuman success"),
+            (axes[3], tk_dd_rates,    "Takeover Success D+D", "Tasa", "seagreen",   "Dribble/Duel success"),
             (axes[4], goal_rates,     "Goal / Win Rate (w100)", "Tasa", "teal", "Metió gol"),
         ]
 
@@ -516,29 +521,56 @@ class MetricsLogger:
                             fontsize=7, color="gray", ha="center")
                     prev_s = s
 
-        axes[2].plot(episodes, cov_dd_rates, linestyle="--", linewidth=1.5,
+        axes[3].plot(episodes, cov_dd_rates, linestyle="--", linewidth=1.5,
                      color="darkgreen", alpha=0.9, label="D+D coverage")
-        axes[2].legend(loc="upper left", fontsize=8)
+        axes[3].legend(loc="upper left", fontsize=8)
 
-        axes[3].plot(episodes, tk_pa_rates, linewidth=0.8, alpha=0.55,
+        axes[4].cla()
+        axes[4].plot(episodes, tk_sh_rates, linewidth=0.6, alpha=0.4, color="firebrick")
+        if len(tk_sh_rates) >= 20:
+            smooth_sh = np.convolve(tk_sh_rates, np.ones(20) / 20, mode="valid")
+            axes[4].plot(episodes[19:], smooth_sh, linewidth=2.0,
+                         color="firebrick", alpha=0.95, label="Shoot success")
+        axes[4].plot(episodes, tk_pa_rates, linewidth=0.8, alpha=0.55,
                      color="purple", label="Pass success")
         if len(tk_pa_rates) >= 20:
             smooth_pa = np.convolve(tk_pa_rates, np.ones(20) / 20, mode="valid")
-            axes[3].plot(episodes[19:], smooth_pa, linewidth=2.0,
+            axes[4].plot(episodes[19:], smooth_pa, linewidth=2.0,
                          color="purple", alpha=0.95)
-        axes[3].plot(episodes, cov_sh_rates, linestyle="--", linewidth=1.5,
+        axes[4].plot(episodes, cov_sh_rates, linestyle="--", linewidth=1.5,
                      color="firebrick", alpha=0.8, label="Shoot coverage")
-        axes[3].plot(episodes, cov_pa_rates, linestyle="--", linewidth=1.5,
+        axes[4].plot(episodes, cov_pa_rates, linestyle="--", linewidth=1.5,
                      color="mediumpurple", alpha=0.8, label="Pass coverage")
-        axes[3].legend(loc="upper left", fontsize=8)
+        axes[4].set_title("Takeover Success Shoot/Pass", fontsize=11)
+        axes[4].set_ylabel("Tasa", fontsize=9)
+        axes[4].set_ylim(-0.05, 1.10)
+        axes[4].legend(loc="upper left", fontsize=8)
+        axes[4].grid(True, alpha=0.3)
 
-        axes[4].plot(episodes, win_rates, linewidth=0.8, alpha=0.5,
+        axes[5].plot(episodes, goal_rates, linewidth=0.6, alpha=0.4, color="teal")
+        if len(goal_rates) >= 20:
+            smooth_goal = np.convolve(goal_rates, np.ones(20) / 20, mode="valid")
+            axes[5].plot(episodes[19:], smooth_goal, linewidth=2.0,
+                         color="teal", alpha=0.95, label="Metio gol")
+        axes[5].plot(episodes, win_rates, linewidth=0.8, alpha=0.5,
                      color="goldenrod", label="Ganó el episodio")
         if len(win_rates) >= 20:
             smooth_win = np.convolve(win_rates, np.ones(20) / 20, mode="valid")
-            axes[4].plot(episodes[19:], smooth_win, linewidth=2.0,
+            axes[5].plot(episodes[19:], smooth_win, linewidth=2.0,
                          color="goldenrod", alpha=0.95)
-        axes[4].legend(loc="upper left", fontsize=8)
+        axes[5].set_title("Goal / Win Rate (w100)", fontsize=11)
+        axes[5].set_ylabel("Tasa", fontsize=9)
+        axes[5].set_ylim(-0.05, 1.10)
+        axes[5].legend(loc="upper left", fontsize=8)
+        axes[5].grid(True, alpha=0.3)
+        prev_s = stages[0] if stages else 0
+        for i, s in enumerate(stages):
+            if s != prev_s:
+                axes[5].axvline(x=episodes[i], color="gray",
+                                linestyle="--", alpha=0.6, linewidth=1.0)
+                axes[5].text(episodes[i], 1.05, f"S{s}",
+                             fontsize=7, color="gray", ha="center")
+                prev_s = s
 
         axes[-1].set_xlabel("Episodio", fontsize=10)
         plt.tight_layout()
@@ -1532,6 +1564,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             steps                 =ep_steps,
             stage_id              =stage.stage_id,
             stage_name            =stage.name,
+            handoff_reached_rate  =bhuman_m["handoff_reached_rate"],
             takeover_ready_rate   =bhuman_m["takeover_ready_rate"],
             takeover_success_rate =bhuman_m["takeover_success_rate"],
             takeover_success_rate_dribble_duel = bhuman_m["takeover_success_rate_dribble_duel"],
@@ -1578,6 +1611,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             print(f"         Watchdog: episode_wall={episode_wall_s:.1f}s "
                   f"mean_env_step={mean_env_step_ms:.1f}ms "
                   f"mean_bridge={mean_bridge_ms:.1f}ms "
+                  f"handoff={bhuman_m['handoff_reached_rate']:.2f} "
                   f"playball={bhuman_m['playball_entry_rate']:.2f} "
                   f"ready_walk={bhuman_m['ready_but_walk_rate']:.2f} "
                   f"to={float(sample_info.get('episode_takeover_timeout_rate', 0.0)):.2f} "

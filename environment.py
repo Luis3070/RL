@@ -2043,6 +2043,8 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_success_by_type = _new_takeover_type_counts()
         self._episode_handoff_achieved = False  # True if handoff_ready was ever True
         self._episode_handoff_ready_frames = 0
+        self._episode_tkready_achieved = False
+        self._episode_tkready_frames = 0
         self._episode_playball_entry_count = 0
         self._episode_playball_achieved = False
         self._episode_ready_but_walk_frames = 0
@@ -2051,6 +2053,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._last_macro_end_reason: str = "none"
         self._prev_playball_frame = False
         self._prev_handoff_ready = False
+        self._tkready_streak = 0
 
         self.agents: List[str] = []
 
@@ -2112,6 +2115,8 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_takeover_success_by_type = _new_takeover_type_counts()
         self._episode_handoff_achieved = False
         self._episode_handoff_ready_frames = 0
+        self._episode_tkready_achieved = False
+        self._episode_tkready_frames = 0
         self._episode_playball_entry_count = 0
         self._episode_playball_achieved = False
         self._episode_ready_but_walk_frames = 0
@@ -2120,6 +2125,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._last_macro_end_reason = "none"
         self._prev_playball_frame = False
         self._prev_handoff_ready = False
+        self._tkready_streak = 0
         self._ball_collision_skip_agent_id = None
 
         observations = self._build_observations()
@@ -2251,6 +2257,21 @@ class NaoSoccerEnv(ParallelEnv):
                 playball_entry = True
             self._prev_playball_frame = sidecar_playball
 
+            tkready_frame = bool(
+                macro.takeover_active
+                and sidecar_output is not None
+                and sidecar_playball
+                and str(sidecar_output.skill_request or "none") != "walk"
+                and bool(self._active_agent_id)
+            )
+            if tkready_frame:
+                self._tkready_streak += 1
+                self._episode_tkready_frames += 1
+                if self._tkready_streak >= 2:
+                    self._episode_tkready_achieved = True
+            else:
+                self._tkready_streak = 0
+
             ready_but_walk = (
                 macro.handoff_ready
                 and not sidecar_playball
@@ -2379,11 +2400,11 @@ class NaoSoccerEnv(ParallelEnv):
         if goal_result == "own":
             self._game.own_score += 1
             goal_scored = True
-            self._ball = self._spawn_ball()
+            self._ball = self._spawn_ball(reason="goal_reset")
         elif goal_result == "opp":
             self._game.opp_score += 1
             goal_conceded = True
-            self._ball = self._spawn_ball()
+            self._ball = self._spawn_ball(reason="goal_reset")
 
         # ═══════════════════════════════════════════════════════════════
         # 7. POST-TAKEOVER UPDATE
@@ -2558,12 +2579,29 @@ class NaoSoccerEnv(ParallelEnv):
             ))
         return opponents
 
-    def _spawn_ball(self):
+    def _spawn_ball(self, reason: str = "reset"):
         if not getattr(self, "_agents_state", None):
             return BallState(pos=np.zeros(2, dtype=np.float32), vel=np.zeros(2, dtype=np.float32))
 
-        ref_aid = self.agents[0] if self.agents else next(iter(self._agents_state.keys()))
+        ref_aid = self._active_agent_id if self._active_agent_id in self._agents_state else None
+        if ref_aid is None:
+            ref_aid = self.agents[0] if self.agents else next(iter(self._agents_state.keys()))
         ref_agent = self._agents_state[ref_aid]
+
+        if reason == "goal_reset":
+            min_goal_reset_dist = max(900.0, 0.28 * FIELD.diagonal)
+            for _ in range(200):
+                pos = np.array(
+                    [
+                        float(self._rng.uniform(-0.18 * FIELD.x_opponent_ground, 0.22 * FIELD.x_opponent_ground)),
+                        float(self._rng.uniform(-0.42 * FIELD.y_left_sideline, 0.42 * FIELD.y_left_sideline)),
+                    ],
+                    dtype=np.float32,
+                )
+                pos[0] = float(np.clip(pos[0], FIELD.x_own_ground + 350.0, FIELD.x_opponent_ground - 350.0))
+                pos[1] = float(np.clip(pos[1], FIELD.y_right_sideline + 350.0, FIELD.y_left_sideline - 350.0))
+                if float(np.linalg.norm(pos - ref_agent.pos)) >= min_goal_reset_dist:
+                    return BallState(pos=pos.astype(np.float32), vel=np.zeros(2, dtype=np.float32))
 
         max_dist = getattr(self._stage, "ball_max_dist", -1.0)
         if max_dist <= 0.0:
@@ -3352,6 +3390,8 @@ class NaoSoccerEnv(ParallelEnv):
             "episode_takeover_success_pass": self._episode_takeover_success_by_type["playBall_pass"],
             "episode_handoff_achieved": self._episode_handoff_achieved,
             "episode_handoff_ready_frames": self._episode_handoff_ready_frames,
+            "episode_tkready_achieved": self._episode_tkready_achieved,
+            "episode_tkready_frames": self._episode_tkready_frames,
             "episode_playball_entry_count": self._episode_playball_entry_count,
             "episode_playball_achieved": self._episode_playball_achieved,
             "episode_ready_but_walk_frames": self._episode_ready_but_walk_frames,

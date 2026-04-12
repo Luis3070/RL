@@ -3,7 +3,7 @@ wrapper.py — NaoSoccerEnvWrapper: adapta NaoSoccerEnv para skrl MAPPO.
 
 Alineado con contrato BHuman:
   - Curriculum advancement basado en takeover metrics, no touch/goal/win legacy
-  - Métricas BHuman-aware: takeover_ready_rate, takeover_success_rate, etc.
+  - Métricas BHuman-aware: handoff_reached_rate, takeover_ready_rate, takeover_success_rate, etc.
   - Estado global para critic centralizado (CTDE)
 """
 
@@ -30,7 +30,7 @@ class CurriculumManager:
     Manages curriculum advancement with BHuman-aware metrics.
 
     Advancement metrics:
-      - takeover_rate: fraction of episodes where handoff_ready was achieved
+      - takeover_rate: fraction of episodes where BHuman accepted takeover
       - takeover_success_rate: fraction of takeovers that succeeded
       - win_rate: fraction of episodes won
       - support_quality: fraction with good spacing metrics
@@ -68,6 +68,7 @@ class CurriculumManager:
                        takeover_count: int = 0,
                        takeover_success_count: int = 0,
                        handoff_achieved: bool = False,
+                       tkready_achieved: bool = False,
                        playball_achieved: bool = False,
                        ready_but_walk_rate: float = 0.0,
                        ready_touch_but_walk_rate: float = 0.0,
@@ -81,7 +82,7 @@ class CurriculumManager:
         metric = stage.advance_metric
 
         if metric == "takeover_rate":
-            success = float(handoff_achieved)
+            success = float(tkready_achieved)
         elif metric == "takeover_success_rate":
             if takeover_count > 0:
                 success = float(takeover_success_count / takeover_count)
@@ -202,7 +203,8 @@ class BHumanMetricsAggregator:
     Aggregates BHuman-specific metrics across episodes.
 
     Reports:
-      - takeover_ready_rate: how often handoff_ready is achieved
+      - handoff_reached_rate: how often the RL reached the handoff geometry
+      - takeover_ready_rate: how often BHuman accepted takeover for real
       - takeover_success_rate: success rate of BHuman executions
       - bhuman_exec_success_rate: = takeover_success_rate (alias)
       - support_quality_rate: spacing quality
@@ -211,6 +213,7 @@ class BHumanMetricsAggregator:
 
     def __init__(self, window_size: int = 100):
         self._window_size = window_size
+        self._handoff_reached: deque = deque(maxlen=window_size)
         self._takeover_ready: deque = deque(maxlen=window_size)
         self._takeover_success: deque = deque(maxlen=window_size)
         self._takeover_success_dribble: deque = deque(maxlen=window_size)
@@ -231,6 +234,7 @@ class BHumanMetricsAggregator:
 
     def record(self,
                handoff_achieved: bool,
+               tkready_achieved: bool,
                takeover_count: int,
                takeover_success_count: int,
                takeover_count_dribble: int,
@@ -248,7 +252,8 @@ class BHumanMetricsAggregator:
                opp_score: int,
                support_quality: float = 0.5,
                blocking_events: int = 0):
-        self._takeover_ready.append(float(handoff_achieved))
+        self._handoff_reached.append(float(handoff_achieved))
+        self._takeover_ready.append(float(tkready_achieved))
         if takeover_count > 0:
             self._takeover_success.append(float(takeover_success_count / takeover_count))
         else:
@@ -283,6 +288,7 @@ class BHumanMetricsAggregator:
 
     def get_metrics(self) -> Dict[str, float]:
         return {
+            "handoff_reached_rate": self._safe_mean(self._handoff_reached),
             "takeover_ready_rate": self._safe_mean(self._takeover_ready),
             "takeover_success_rate": self._safe_mean(self._takeover_success),
             "bhuman_exec_success_rate": self._safe_mean(self._takeover_success),
@@ -390,6 +396,7 @@ class NaoSoccerEnvWrapper:
         takeover_success = sample_info.get("episode_takeover_success", 0)
         # handoff_achieved = True if handoff_ready envelope was reached at any point
         handoff_achieved = sample_info.get("episode_handoff_achieved", False)
+        tkready_achieved = sample_info.get("episode_tkready_achieved", False)
         playball_achieved = sample_info.get("episode_playball_achieved", False)
         ready_but_walk_rate = float(sample_info.get("episode_ready_but_walk_rate", 0.0))
         ready_touch_but_walk_rate = float(
@@ -399,6 +406,7 @@ class NaoSoccerEnvWrapper:
         # Record in metrics aggregator
         self.metrics.record(
             handoff_achieved=handoff_achieved,
+            tkready_achieved=tkready_achieved,
             takeover_count=takeover_count,
             takeover_success_count=takeover_success,
             takeover_count_dribble=int(sample_info.get("episode_takeover_count_dribble", 0)),
@@ -423,6 +431,7 @@ class NaoSoccerEnvWrapper:
             takeover_count=takeover_count,
             takeover_success_count=takeover_success,
             handoff_achieved=handoff_achieved,
+            tkready_achieved=tkready_achieved,
             playball_achieved=playball_achieved,
             ready_but_walk_rate=ready_but_walk_rate,
             ready_touch_but_walk_rate=ready_touch_but_walk_rate,
