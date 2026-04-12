@@ -301,6 +301,7 @@ class BHumanBridge:
         self._reader_stop = threading.Event()
         self._reconnect_count = 0
         self._last_reset_ms = 0.0
+        self._stderr_merged_into_stdout = False
 
     @property
     def is_running(self) -> bool:
@@ -341,8 +342,17 @@ class BHumanBridge:
             "env": env,
             "bufsize": 0,
         }
-        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-            startup_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        self._stderr_merged_into_stdout = False
+        if os.name == "nt":
+            startup_kwargs["stderr"] = subprocess.STDOUT
+            self._stderr_merged_into_stdout = True
+            if hasattr(subprocess, "CREATE_NEW_CONSOLE"):
+                startup_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                startup_kwargs["startupinfo"] = startupinfo
 
         self._process = subprocess.Popen(**startup_kwargs)
         self._start_reader_threads()
@@ -541,6 +551,7 @@ class BHumanBridge:
             self._process = None
             self._started = False
             self._transport_mode = "pipe_process"
+            self._stderr_merged_into_stdout = False
             self._reset_reader_state()
             logger.info("Bridge one-shot transport terminated")
             return
@@ -565,6 +576,7 @@ class BHumanBridge:
             self._process = None
             self._started = False
             self._transport_mode = "pipe_process"
+            self._stderr_merged_into_stdout = False
             self._reset_reader_state()
             logger.info("Bridge subprocess terminated")
 
@@ -639,7 +651,7 @@ class BHumanBridge:
             stdout_thread.start()
             self._reader_threads.append(stdout_thread)
 
-        if self._process.stderr is not None:
+        if not self._stderr_merged_into_stdout and self._process.stderr is not None:
             stderr_thread = threading.Thread(
                 target=self._stderr_reader_loop,
                 args=(self._process.stderr,),
@@ -655,6 +667,10 @@ class BHumanBridge:
                 line = pipe.readline()
                 if not line:
                     break
+                if self._stderr_merged_into_stdout:
+                    text = line.decode("utf-8", errors="replace")
+                    with self._stderr_lock:
+                        self._stderr_lines.append(text)
                 out_queue.put(line)
         except Exception as exc:
             logger.warning("RLBridge stdout reader terminated with error: %s", exc)
@@ -726,7 +742,10 @@ class BHumanBridge:
     def _read_stderr(self) -> str:
         """Read available stderr output (non-blocking)."""
         with self._stderr_lock:
-            return "".join(self._stderr_lines)
+            data = "".join(self._stderr_lines)
+        if self._stderr_merged_into_stdout:
+            return "(merged into stdout)\n" + data if data else "(merged into stdout)"
+        return data
 
     def _shutdown_process_only(self) -> None:
         """Best-effort cleanup of the pipe-based subprocess after handshake failure."""
@@ -740,6 +759,7 @@ class BHumanBridge:
             pass
         finally:
             self._process = None
+            self._stderr_merged_into_stdout = False
             self._reset_reader_state()
 
     def _switch_to_oneshot_fallback(self) -> None:

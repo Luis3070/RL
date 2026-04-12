@@ -45,6 +45,7 @@
 #include <vector>
 #include <deque>
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <thread>
 #include <stdexcept>
@@ -53,6 +54,9 @@
 #include <condition_variable>
 #ifdef WINDOWS
 #include <Windows.h>
+#ifdef _MSC_VER
+#include <crtdbg.h>
+#endif
 #include <timeapi.h>
 #endif
 
@@ -105,37 +109,57 @@ SystemCall::Mode SystemCall::getMode()
     return SystemCall::simulatedRobot;
 }
 
-#ifdef WINDOWS
-static LONG WINAPI rlBridgeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo)
-{
-    if(exceptionInfo && exceptionInfo->ExceptionRecord)
-    {
-        std::cerr << "[bridge] CRASH! Exception code: 0x"
-                  << std::hex << exceptionInfo->ExceptionRecord->ExceptionCode
-                  << " at address: 0x"
-                  << reinterpret_cast<uintptr_t>(exceptionInfo->ExceptionRecord->ExceptionAddress)
-                  << std::dec << std::endl;
-    }
-    else
-        std::cerr << "[bridge] CRASH! Unknown unhandled exception" << std::endl;
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-#endif
-
 namespace
 {
 constexpr bool kVerboseBridgeLogs = false;
+std::mutex g_ioMutex;
+
+template<typename... Ts>
+void writeStdErrLine(const Ts&... parts)
+{
+    std::lock_guard<std::mutex> lock(g_ioMutex);
+    (std::cerr << ... << parts);
+    std::cerr << std::endl;
+}
+
+void writeStdOutLine(const std::string& payload)
+{
+    std::lock_guard<std::mutex> lock(g_ioMutex);
+    std::cout << payload << std::endl;
+    std::cout.flush();
+}
 
 template<typename... Ts>
 void verboseBridgeLog(const Ts&... parts)
 {
     if constexpr(kVerboseBridgeLogs)
+        writeStdErrLine(parts...);
+}
+}
+
+#ifdef WINDOWS
+static LONG WINAPI rlBridgeUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionInfo)
+{
+    if(exceptionInfo && exceptionInfo->ExceptionRecord)
     {
-        (std::cerr << ... << parts);
-        std::cerr << std::endl;
+        if(g_ioMutex.try_lock())
+        {
+            std::cerr << "[bridge] CRASH! Exception code: 0x"
+                      << std::hex << exceptionInfo->ExceptionRecord->ExceptionCode
+                      << " at address: 0x"
+                      << reinterpret_cast<uintptr_t>(exceptionInfo->ExceptionRecord->ExceptionAddress)
+                      << std::dec << std::endl;
+            g_ioMutex.unlock();
+        }
     }
+    else if(g_ioMutex.try_lock())
+    {
+        std::cerr << "[bridge] CRASH! Unknown unhandled exception" << std::endl;
+        g_ioMutex.unlock();
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
 }
-}
+#endif
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,13 +208,13 @@ struct JsonValue
     double asNumber(double def = 0.0) const { return isNumber() ? std::get<double>(data) : def; }
     int asInt(int def = 0) const { return isNumber() ? static_cast<int>(std::get<double>(data)) : def; }
     bool asBool(bool def = false) const { return isBool() ? std::get<bool>(data) : def; }
-    const std::string& asString() const { static std::string empty; return isString() ? std::get<std::string>(data) : empty; }
-    const JsonArray& asArray() const { static JsonArray empty; return isArray() ? std::get<JsonArray>(data) : empty; }
-    const JsonObject& asObject() const { static JsonObject empty; return isObject() ? std::get<JsonObject>(data) : empty; }
+    const std::string& asString() const { thread_local std::string empty; return isString() ? std::get<std::string>(data) : empty; }
+    const JsonArray& asArray() const { thread_local JsonArray empty; return isArray() ? std::get<JsonArray>(data) : empty; }
+    const JsonObject& asObject() const { thread_local JsonObject empty; return isObject() ? std::get<JsonObject>(data) : empty; }
 
     const JsonValue& operator[](const std::string& key) const
     {
-        static JsonValue null;
+        thread_local JsonValue null;
         if (!isObject()) return null;
         auto it = std::get<JsonObject>(data).find(key);
         return it != std::get<JsonObject>(data).end() ? it->second : null;
@@ -198,7 +222,7 @@ struct JsonValue
 
     const JsonValue& operator[](size_t idx) const
     {
-        static JsonValue null;
+        thread_local JsonValue null;
         if (!isArray()) return null;
         auto& arr = std::get<JsonArray>(data);
         return idx < arr.size() ? arr[idx] : null;
@@ -754,7 +778,16 @@ class BridgeRunner
 {
 public:
     BridgeRunner() = default;
-    ~BridgeRunner() { shutdown(); }
+    ~BridgeRunner() noexcept
+    {
+        try
+        {
+            shutdown();
+        }
+        catch(...)
+        {
+        }
+    }
 
     /**
      * Initialize the BHuman Robot with given settings.
@@ -812,14 +845,14 @@ public:
             // This mirrors PythonConsole/LocalConsole ownership and avoids
             // wiring Debug sender/receiver from a non-thread object.
             robot_ = std::make_unique<RLBridgeRobot>(*settings_, "RLBridge");
-            std::cerr << "[bridge] init: robot created" << std::endl;
+            writeStdErrLine("[bridge] init: robot created");
             bridgeConsole_ = robot_->getConsole();
             if(!bridgeConsole_)
                 throw std::runtime_error("RLBridgeConsole was not created");
 
             // Start all robot threads
             robot_->start();
-            std::cerr << "[bridge] init: robot started" << std::endl;
+            writeStdErrLine("[bridge] init: robot started");
 
             // Give threads time to initialize
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -827,32 +860,36 @@ public:
             cognition_ = findCognitionThread();
             if (!cognition_)
                 throw std::runtime_error("Cognition thread not found");
-            std::cerr << "[bridge] init: cognition found" << std::endl;
+            writeStdErrLine("[bridge] init: cognition found");
 
             motion_ = findMotionThread();
             if(motion_)
-                std::cerr << "[bridge] init: motion found" << std::endl;
+                writeStdErrLine("[bridge] init: motion found");
             else
-                std::cerr << "[bridge] init: motion not found, motion evidence disabled" << std::endl;
+                writeStdErrLine("[bridge] init: motion not found, motion evidence disabled");
 
             bridgeConsole_->clearSnapshots();
             sendDebugRequest("module:GameStateProvider:active");
-            std::cerr << "[bridge] init: requested GameStateProvider active" << std::endl;
-            std::cerr << "[bridge] init: using debug-channel ack plus direct blackboard fallback" << std::endl;
+            writeStdErrLine("[bridge] init: requested GameStateProvider active");
+            writeStdErrLine("[bridge] init: using debug-channel ack plus direct blackboard fallback");
 
             frameId_ = 0;
             lastInputTimestampMs_ = -1;
             initialized_ = true;
 
-            std::cerr << "[bridge] Robot initialized with scenario=" << scenario
-                      << " location=" << location
-                      << " bridge_mode=" << bridgeMode_
-                      << " player=" << playerNumber << std::endl;
+            writeStdErrLine("[bridge] Robot initialized with scenario=",
+                            scenario,
+                            " location=",
+                            location,
+                            " bridge_mode=",
+                            bridgeMode_,
+                            " player=",
+                            playerNumber);
             return true;
         }
         catch (const std::exception& e)
         {
-            std::cerr << "[bridge] Init failed: " << e.what() << std::endl;
+            writeStdErrLine("[bridge] Init failed: ", e.what());
             return false;
         }
     }
@@ -1018,11 +1055,11 @@ public:
         if(initialized_ && bridgeConsole_)
         {
             sendDebugRequest("module:GameStateProvider:active");
-            std::cerr << "[bridge] reset: requested GameStateProvider active" << std::endl;
+            writeStdErrLine("[bridge] reset: requested GameStateProvider active");
         }
         // TODO: Reset BHuman internal state for new episode
         // This may involve sending a specific game state transition
-        std::cerr << "[bridge] Reset" << std::endl;
+        writeStdErrLine("[bridge] Reset");
     }
 
     void shutdown()
@@ -1035,19 +1072,19 @@ public:
             return;
         }
 
-        std::cerr << "[bridge] shutdown: begin" << std::endl;
+        writeStdErrLine("[bridge] shutdown: begin");
         DebugSenderBaseAccess::setTerminating(true);
-        std::cerr << "[bridge] shutdown: terminating set" << std::endl;
+        writeStdErrLine("[bridge] shutdown: terminating set");
 
         if (robot_)
         {
-            std::cerr << "[bridge] shutdown: announceStop" << std::endl;
+            writeStdErrLine("[bridge] shutdown: announceStop");
             robot_->announceStop();
-            std::cerr << "[bridge] shutdown: stop" << std::endl;
+            writeStdErrLine("[bridge] shutdown: stop");
             robot_->stop();
-            std::cerr << "[bridge] shutdown: reset robot" << std::endl;
+            writeStdErrLine("[bridge] shutdown: reset robot");
             robot_.reset();
-            std::cerr << "[bridge] shutdown: robot reset done" << std::endl;
+            writeStdErrLine("[bridge] shutdown: robot reset done");
         }
         bridgeConsole_ = nullptr;
         cognition_ = nullptr;
@@ -1055,21 +1092,21 @@ public:
         initialized_ = false;
         if (timeInitialized_)
         {
-            std::cerr << "[bridge] shutdown: deinitialize time" << std::endl;
+            writeStdErrLine("[bridge] shutdown: deinitialize time");
             Time::deinitialize();
             timeInitialized_ = false;
-            std::cerr << "[bridge] shutdown: time deinitialized" << std::endl;
+            writeStdErrLine("[bridge] shutdown: time deinitialized");
         }
 #ifdef WINDOWS
         if (timerResolutionSet_)
         {
-            std::cerr << "[bridge] shutdown: timeEndPeriod" << std::endl;
+            writeStdErrLine("[bridge] shutdown: timeEndPeriod");
             VERIFY(timeEndPeriod(1) == TIMERR_NOERROR);
             timerResolutionSet_ = false;
-            std::cerr << "[bridge] shutdown: timeEndPeriod done" << std::endl;
+            writeStdErrLine("[bridge] shutdown: timeEndPeriod done");
         }
 #endif
-        std::cerr << "[bridge] Shutdown" << std::endl;
+        writeStdErrLine("[bridge] Shutdown");
     }
 
 private:
@@ -1599,6 +1636,7 @@ private:
             snapshot.hasBehaviorStatus ||
             snapshot.hasActivationGraph;
 
+        bool usedBlackboardFallback = false;
         if(!snapshotHadDecisionData && cognition_)
         {
             verboseBridgeLog("[bridge] readDecisions: direct blackboard fallback");
@@ -1621,6 +1659,7 @@ private:
                     result["debug_game_state"] = JsonValue(enumNameOr(gs.state, "unavailable"));
                     result["debug_player_state"] = JsonValue(enumNameOr(gs.playerState, "unavailable"));
                     result["debug_game_controller_active"] = JsonValue(gs.gameControllerActive);
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("SkillRequest"))
@@ -1644,6 +1683,7 @@ private:
                     {
                         selfIsActive = true;
                     }
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("MotionRequest"))
@@ -1669,6 +1709,7 @@ private:
                     result["motion_align_precisely"] = JsonValue(enumNameOr(mr.alignPrecisely, "notPrecise"));
                     result["motion_pre_step_allowed"] = JsonValue(mr.preStepAllowed);
                     result["motion_turn_kick_allowed"] = JsonValue(mr.turnKickAllowed);
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("MotionInfo"))
@@ -1685,6 +1726,7 @@ private:
                     if (mi.lastKickType != KickInfo::numOfKickTypes)
                         result["last_kick_type"] = JsonValue(enumNameOr(mi.lastKickType, "unavailable"));
                     result["last_kick_timestamp_ms"] = JsonValue(static_cast<int>(mi.lastKickTimestamp));
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("StrategyStatus"))
@@ -1702,6 +1744,7 @@ private:
 
                     if (Role::isActiveRole(ss.role))
                         selfIsActive = true;
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("BehaviorStatus"))
@@ -1730,6 +1773,7 @@ private:
                         shootingTo["y_mm"] = JsonValue(bs.shootingTo->y());
                         result["behavior_shooting_to"] = JsonValue(shootingTo);
                     }
+                    usedBlackboardFallback = true;
                 }
 
                 if(bb.exists("ActivationGraph"))
@@ -1752,6 +1796,7 @@ private:
                         activationGraph.push_back(JsonValue(graphNode));
                     }
                     result["activation_graph"] = JsonValue(activationGraph);
+                    usedBlackboardFallback = true;
                 }
             }
             catch(const std::exception& e)
@@ -1803,6 +1848,21 @@ private:
                 cognition_->setGlobals();
             else if(bridgeConsole_)
                 bridgeConsole_->setGlobals();
+        }
+
+        result["debug_snapshot_status"] = JsonValue(
+            snapshotHadDecisionData ? "ok" : (usedBlackboardFallback ? "fallback_blackboard" : "empty")
+        );
+        if(!snapshotHadDecisionData && !usedBlackboardFallback)
+        {
+            result["debug_provider_game_state"] = JsonValue("snapshot_empty");
+            result["debug_provider_skill_request"] = JsonValue("snapshot_empty");
+            result["debug_provider_motion_request"] = JsonValue("snapshot_empty");
+            result["debug_provider_motion_info"] = JsonValue("snapshot_empty");
+            result["debug_provider_activation_graph"] = JsonValue("snapshot_empty");
+            result["debug_provider_behavior_status"] = JsonValue("snapshot_empty");
+            result["debug_provider_strategy_status"] = JsonValue("snapshot_empty");
+            writeStdErrLine("[bridge] readDecisions: snapshot empty and blackboard fallback yielded no data");
         }
 
         if (selfIsActive)
@@ -1919,16 +1979,26 @@ private:
 
 int main(int argc, char* argv[])
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
 #ifdef WINDOWS
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     SetUnhandledExceptionFilter(rlBridgeUnhandledExceptionFilter);
+#ifdef _MSC_VER
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
 #endif
-    std::cerr << "[bridge] BHuman Bridge v1.0 starting" << std::endl;
+#endif
+    writeStdErrLine("[bridge] BHuman Bridge v1.0 starting");
 
     BridgeRunner bridge;
     std::string line;
 
-    while (std::getline(std::cin, line))
+    while (std::cin.good() && std::getline(std::cin, line))
     {
         if (line.empty()) continue;
 
@@ -1938,8 +2008,7 @@ int main(int argc, char* argv[])
             JsonObject err;
             err["type"] = JsonValue("error");
             err["message"] = JsonValue("Invalid JSON input");
-            std::cout << jsonSerialize(JsonValue(err)) << std::endl;
-            std::cout.flush();
+            writeStdOutLine(jsonSerialize(JsonValue(err)));
             continue;
         }
 
@@ -1975,14 +2044,12 @@ int main(int argc, char* argv[])
                 response["type"] = JsonValue("error");
                 response["message"] = JsonValue("Failed to initialize BHuman Robot");
             }
-            std::cout << jsonSerialize(JsonValue(response)) << std::endl;
-            std::cout.flush();
+            writeStdOutLine(jsonSerialize(JsonValue(response)));
         }
         else if (msgType == "frame")
         {
             JsonValue result = bridge.processFrame(msg);
-            std::cout << jsonSerialize(result) << std::endl;
-            std::cout.flush();
+            writeStdOutLine(jsonSerialize(result));
         }
         else if (msgType == "reset")
         {
@@ -1990,8 +2057,7 @@ int main(int argc, char* argv[])
             JsonObject ack;
             ack["type"] = JsonValue("ack");
             ack["command"] = JsonValue("reset");
-            std::cout << jsonSerialize(JsonValue(ack)) << std::endl;
-            std::cout.flush();
+            writeStdOutLine(jsonSerialize(JsonValue(ack)));
         }
         else if (msgType == "shutdown")
         {
@@ -2003,12 +2069,13 @@ int main(int argc, char* argv[])
             JsonObject err;
             err["type"] = JsonValue("error");
             err["message"] = JsonValue("Unknown message type: " + msgType);
-            std::cout << jsonSerialize(JsonValue(err)) << std::endl;
-            std::cout.flush();
+            writeStdOutLine(jsonSerialize(JsonValue(err)));
         }
     }
 
-    std::cerr << "[bridge] Exiting" << std::endl;
+    writeStdErrLine("[bridge] main: loop exited, starting cooperative shutdown");
+    bridge.shutdown();
+    writeStdErrLine("[bridge] Exiting");
     return 0;
 }
 

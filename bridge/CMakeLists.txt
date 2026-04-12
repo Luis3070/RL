@@ -27,6 +27,8 @@
 # When included via BHuman's main CMakeLists.txt, all targets are available.
 # This section uses BHuman's existing targets.
 
+option(RLBRIDGE_ENABLE_ASAN "Build RLBridge with AddressSanitizer diagnostics" OFF)
+
 if(DEFINED BHUMAN_PREFIX)
     # We are inside BHuman's CMake system
     set(BRIDGE_SRC "${BHUMAN_PREFIX}/Src/Apps/RLBridge/bhuman_bridge.cpp")
@@ -52,6 +54,11 @@ if(DEFINED BHUMAN_PREFIX)
 
         if(WINDOWS)
             target_link_libraries(RLBridge PRIVATE ws2_32 winmm)
+            target_link_options(RLBridge PRIVATE /STACK:4194304)
+            if(RLBRIDGE_ENABLE_ASAN AND MSVC)
+                target_compile_options(RLBridge PRIVATE /fsanitize=address)
+                target_link_options(RLBridge PRIVATE /fsanitize=address)
+            endif()
         endif()
 
         target_compile_definitions(RLBridge PRIVATE
@@ -147,12 +154,17 @@ if(WIN32)
         _CRT_SECURE_NO_DEPRECATE
     )
     target_link_libraries(bhuman_bridge PRIVATE ws2_32 winmm)
+    target_link_options(bhuman_bridge PRIVATE /STACK:4194304)
 
     if(MSVC)
         target_compile_options(bhuman_bridge PRIVATE
             /W3 /GF /GS- /EHsc /permissive- /Zc:preprocessor /Zc:__cplusplus
             /wd5105 /w34100 /w34189
         )
+        if(RLBRIDGE_ENABLE_ASAN)
+            target_compile_options(bhuman_bridge PRIVATE /fsanitize=address)
+            target_link_options(bhuman_bridge PRIVATE /fsanitize=address)
+        endif()
     endif()
 endif()
 

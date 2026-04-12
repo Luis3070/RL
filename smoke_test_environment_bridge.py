@@ -137,7 +137,9 @@ def _check_common_bridge_info(info: dict) -> None:
     _assert("idFrameFinished" in recent,
             f"bridge_debug_recent_messages contains idFrameFinished (got {recent})")
 
-    # Providers from the bridge should come from the cognition blackboard fallback.
+    # Providers must come from actual bridge data. The stable path today is the
+    # cognition blackboard fallback; if the debug snapshot wiring becomes real
+    # later, that provider is also acceptable.
     provider_keys = [
         "bridge_debug_provider_game_state",
         "bridge_debug_provider_skill_request",
@@ -146,14 +148,21 @@ def _check_common_bridge_info(info: dict) -> None:
         "bridge_debug_provider_strategy_status",
         "bridge_debug_provider_activation_graph",
     ]
+    allowed_provider_values = {"debug_channel", "cognition_blackboard"}
     for key in provider_keys:
-        _assert(info.get(key) == "cognition_blackboard",
-                f"{key} = cognition_blackboard (got {info.get(key)})")
+        _assert(
+            info.get(key) in allowed_provider_values,
+            f"{key} uses a safe provider (got {info.get(key)})",
+        )
 
     _assert(isinstance(info.get("sidecar_activation_graph"), list),
             "sidecar_activation_graph is a list")
-    _assert(len(info.get("sidecar_activation_graph", [])) >= 1,
-            "sidecar_activation_graph has at least one node")
+    if info.get("bridge_debug_provider_activation_graph") == "debug_channel":
+        _assert(len(info.get("sidecar_activation_graph", [])) >= 1,
+                "sidecar_activation_graph has at least one node when snapshot data is available")
+    else:
+        _assert(len(info.get("sidecar_activation_graph", [])) >= 1,
+                "sidecar_activation_graph has at least one node when cognition fallback is used")
 
 
 def main() -> None:

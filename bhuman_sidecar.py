@@ -263,9 +263,11 @@ class RealSidecarBackend:
         self._bridge_config_cls = BridgeConfig
         self._bridge_mode = preferred_bridge_mode()
         self._bridges: Dict[int, Any] = {}
+        self._bridge_player_by_position: Dict[str, int] = {}
         self._player_count = 0
         self._frame_counter = 0
         self._prewarmed_player_count = 4
+        self._last_active_player_number: Optional[int] = None
         self._executor = ThreadPoolExecutor(
             max_workers=self._prewarmed_player_count,
             thread_name_prefix="bhuman_sidecar",
@@ -273,7 +275,9 @@ class RealSidecarBackend:
         self._ensure_bridges(self._prewarmed_player_count)
         self.reset()
 
-    def decide(self, frame: GroundTruthFrame) -> SidecarOutput:
+    def decide(self, frame: GroundTruthFrame,
+               active_agent_hint: Optional[str] = None,
+               prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
         """Run one BHuman cognition cycle across the active own-team players."""
         self._frame_counter += 1
         agent_order = self._sorted_agent_ids(frame.own_poses.keys())
@@ -304,54 +308,94 @@ class RealSidecarBackend:
         game_state = "playing" if frame.is_playing else "initial"
         timestamp_ms = self._frame_counter * 33
         team_t0 = time.perf_counter()
-        results: Dict[int, dict] = {}
+        results: Dict[int, dict]
+        candidate_player: Optional[int] = None
+        query_mode = "team_parallel"
+        queried_players: List[int]
+        fallback_reason = "none"
 
-        try:
-            future_map = {}
-            for player_number, bridge in self._bridges.items():
-                future = self._executor.submit(
-                    bridge.step,
-                    ball_pos=frame.ball_pos,
-                    ball_vel=frame.ball_vel,
-                    own_team=own_team,
-                    opp_team=opp_team,
-                    game_state=game_state,
-                    own_score=frame.own_score,
-                    opp_score=frame.opp_score,
-                    timestamp_ms=timestamp_ms,
+        use_single_bridge = prefer_single_bridge_fast_path and active_agent_hint in frame.own_roles
+        if use_single_bridge:
+            hinted_role = frame.own_roles.get(active_agent_hint, "")
+            candidate_player = self._choose_role_mapped_player(hinted_role)
+            if candidate_player is None:
+                fallback_reason = "role_map_unavailable"
+                use_single_bridge = False
+            else:
+                query_mode = "single_bridge_role_map"
+                queried_players = [candidate_player]
+                try:
+                    candidate_result = self._step_single_bridge(
+                        candidate_player,
+                        frame,
+                        own_team,
+                        opp_team,
+                        game_state,
+                        timestamp_ms,
+                    )
+                except Exception as exc:
+                    self.shutdown()
+                    raise NotImplementedError(
+                        f"C++ bridge failed during single bridge step: {exc}"
+                    ) from exc
+                results = {candidate_player: candidate_result}
+                active_player = candidate_result.get("active_agent_number")
+                if active_player is None:
+                    active_player = candidate_player
+        if not use_single_bridge:
+            try:
+                results = self._step_team_parallel(
+                    frame,
+                    own_team,
+                    opp_team,
+                    game_state,
+                    timestamp_ms,
                 )
-                future_map[future] = player_number
+            except Exception as exc:
+                self.shutdown()
+                raise NotImplementedError(
+                    f"C++ bridge failed during team step: {exc}"
+                ) from exc
+            queried_players = list(sorted(results.keys()))
+            self._update_position_map(results)
+            active_player = self._select_active_player(results)
 
-            for future, player_number in future_map.items():
-                results[player_number] = future.result()
-        except Exception as exc:
-            self.shutdown()
-            raise NotImplementedError(
-                f"C++ bridge failed during team step: {exc}"
-            ) from exc
-
-        active_player = self._select_active_player(results)
         canonical_player = active_player if active_player is not None else 1
         canonical = dict(results.get(canonical_player, {}))
         total_time_us = int((time.perf_counter() - team_t0) * 1_000_000.0)
-        canonical["decision_time_us"] = total_time_us
+        canonical["frame_id"] = self._frame_counter
         canonical["player_number"] = canonical_player
         canonical["active_agent_number"] = active_player
         canonical["debug_team_bridge_count"] = player_count
+        canonical["debug_team_bridges_queried"] = len(queried_players)
+        canonical["debug_team_query_mode"] = query_mode
+        canonical["debug_team_query_fallback_reason"] = fallback_reason
+        canonical["debug_team_decision_time_us"] = total_time_us
         canonical["debug_team_active_candidates"] = [
             int(v["active_agent_number"])
             for v in results.values()
             if v.get("active_agent_number") is not None
         ]
-        canonical["debug_team_bridge_players"] = list(sorted(results.keys()))
+        canonical["debug_team_bridge_players"] = queried_players
         canonical["debug_active_agent_source"] = (
             "real_team_consensus" if active_player is not None else "unavailable"
         )
         if canonical_player in results:
             active_result = results[canonical_player]
+            canonical["decision_time_us"] = active_result.get(
+                "decision_time_us",
+                canonical.get("decision_time_us", 0),
+            )
             canonical["debug_active_agent_decision_time_us"] = active_result.get(
                 "decision_time_us", 0
             )
+        else:
+            canonical["decision_time_us"] = canonical.get("decision_time_us", total_time_us)
+        self._last_active_player_number = (
+            active_player
+            if active_player is not None
+            else (candidate_player if candidate_player is not None else self._last_active_player_number)
+        )
 
         return self._parse_bridge_result(canonical, agent_order)
 
@@ -360,6 +404,7 @@ class RealSidecarBackend:
         for bridge in self._bridges.values():
             bridge.reset()
         self._frame_counter = 0
+        self._last_active_player_number = None
 
     def shutdown(self, close_executor: bool = True):
         """Gracefully shut down all bridge subprocesses."""
@@ -412,6 +457,77 @@ class RealSidecarBackend:
                 return 10_000, agent_id
 
         return sorted(agent_ids, key=key)
+
+    def _step_single_bridge(
+        self,
+        player_number: int,
+        frame: GroundTruthFrame,
+        own_team: List[Dict[str, Any]],
+        opp_team: List[Dict[str, Any]],
+        game_state: str,
+        timestamp_ms: int,
+    ) -> dict:
+        return self._bridges[player_number].step(
+            ball_pos=frame.ball_pos,
+            ball_vel=frame.ball_vel,
+            own_team=own_team,
+            opp_team=opp_team,
+            game_state=game_state,
+            own_score=frame.own_score,
+            opp_score=frame.opp_score,
+            timestamp_ms=timestamp_ms,
+        )
+
+    def _step_team_parallel(
+        self,
+        frame: GroundTruthFrame,
+        own_team: List[Dict[str, Any]],
+        opp_team: List[Dict[str, Any]],
+        game_state: str,
+        timestamp_ms: int,
+    ) -> Dict[int, dict]:
+        results: Dict[int, dict] = {}
+        future_map = {}
+        for player_number, bridge in self._bridges.items():
+            future = self._executor.submit(
+                bridge.step,
+                ball_pos=frame.ball_pos,
+                ball_vel=frame.ball_vel,
+                own_team=own_team,
+                opp_team=opp_team,
+                game_state=game_state,
+                own_score=frame.own_score,
+                opp_score=frame.opp_score,
+                timestamp_ms=timestamp_ms,
+            )
+            future_map[future] = player_number
+
+        for future, player_number in future_map.items():
+            results[player_number] = future.result()
+        return results
+
+    def _choose_candidate_player(
+        self,
+        agent_order: List[str],
+        active_agent_hint: Optional[str],
+    ) -> int:
+        if active_agent_hint in agent_order:
+            return agent_order.index(active_agent_hint) + 1
+        if self._last_active_player_number is not None and 1 <= self._last_active_player_number <= len(agent_order):
+            return self._last_active_player_number
+        return 1
+
+    def _choose_role_mapped_player(self, role_name: str) -> Optional[int]:
+        if role_name in self._bridge_player_by_position:
+            return self._bridge_player_by_position[role_name]
+        return self._last_active_player_number
+
+    def _update_position_map(self, results: Dict[int, dict]) -> None:
+        for player_number, result in results.items():
+            position = result.get("strategy_position")
+            if position in (None, "", "none", "goalkeeper"):
+                continue
+            self._bridge_player_by_position[str(position)] = player_number
 
     def _select_active_player(self, results: Dict[int, dict]) -> Optional[int]:
         candidates: List[int] = []
@@ -1093,14 +1209,26 @@ class BHumanDecisionSidecar:
                agents: Dict[str, Any],
                ball: Any,
                opponents: list,
-               game: Any) -> SidecarOutput:
+               game: Any,
+               active_agent_hint: Optional[str] = None,
+               prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
         frame = self._build_frame(agents, ball, opponents, game)
-        return self.decide_from_frame(frame)
+        return self.decide_from_frame(
+            frame,
+            active_agent_hint=active_agent_hint,
+            prefer_single_bridge_fast_path=prefer_single_bridge_fast_path,
+        )
 
-    def decide_from_frame(self, frame: GroundTruthFrame) -> SidecarOutput:
+    def decide_from_frame(self, frame: GroundTruthFrame,
+                          active_agent_hint: Optional[str] = None,
+                          prefer_single_bridge_fast_path: bool = False) -> SidecarOutput:
         if self._real_backend is not None:
             try:
-                output = self._real_backend.decide(frame)
+                output = self._real_backend.decide(
+                    frame,
+                    active_agent_hint=active_agent_hint,
+                    prefer_single_bridge_fast_path=prefer_single_bridge_fast_path,
+                )
                 if output.current_tactic not in (None, "", "none"):
                     self._last_known_tactic = str(output.current_tactic)
                 return output

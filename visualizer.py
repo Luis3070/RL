@@ -1022,7 +1022,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1775946814\checkpoints\mappo_stage0_1v0_approach_800_ep000050.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\RL\runs\quickdebug_stage0_fovTrue_1775962601\checkpoints\mappo_ep000084.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None

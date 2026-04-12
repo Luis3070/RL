@@ -19,6 +19,7 @@ Uso:
 
 from __future__ import annotations
 
+import argparse
 import csv
 import ctypes
 import os
@@ -249,6 +250,7 @@ class MetricsLogger:
         "policy_loss", "value_loss", "entropy",
         "elapsed_s",
         "episode_wall_s", "mean_env_step_ms", "mean_bridge_ms",
+        "mean_bridge_team_ms",
         "process_memory_mb", "stability_score",
         "bridge_reconnect_count", "contract_validation_rate",
         "non_pipe_rate", "not_playing_rate",
@@ -299,6 +301,7 @@ class MetricsLogger:
                      episode_wall_s: float = 0.0,
                      mean_env_step_ms: float = 0.0,
                      mean_bridge_ms: float = 0.0,
+                     mean_bridge_team_ms: float = 0.0,
                      process_memory_mb: float = 0.0,
                      stability_score: float = 0.0,
                      bridge_reconnect_count: int = 0,
@@ -349,6 +352,7 @@ class MetricsLogger:
             "episode_wall_s":       round(episode_wall_s, 3),
             "mean_env_step_ms":     round(mean_env_step_ms, 3),
             "mean_bridge_ms":       round(mean_bridge_ms, 3),
+            "mean_bridge_team_ms":  round(mean_bridge_team_ms, 3),
             "process_memory_mb":    round(process_memory_mb, 2),
             "stability_score":      round(stability_score, 4),
             "bridge_reconnect_count": int(bridge_reconnect_count),
@@ -386,6 +390,8 @@ class MetricsLogger:
               f"TO={r['ep_takeover_timeout_rate']:.2f} | "
               f"CLR={r['ep_takeover_skill_cleared_rate']:.2f} | "
               f"Stable={r['stability_score']:.2f} | "
+              f"Br={r['mean_bridge_ms']:.1f}ms | "
+              f"TeamBr={r.get('mean_bridge_team_ms', r['mean_bridge_ms']):.1f}ms | "
               f"Win={r['win_rate_w50']:.2f} | "
               f"Elapsed={r['elapsed_s']:.0f}s")
 
@@ -587,6 +593,10 @@ class MetricsLogger:
         episode_wall_s = [r["episode_wall_s"] for r in self._rows]
         env_step_ms = [r["mean_env_step_ms"] for r in self._rows]
         bridge_ms = [r["mean_bridge_ms"] for r in self._rows]
+        bridge_team_ms = [
+            r.get("mean_bridge_team_ms", r["mean_bridge_ms"])
+            for r in self._rows
+        ]
         memory_mb = [r["process_memory_mb"] for r in self._rows]
         stability = [r["stability_score"] for r in self._rows]
         reconnects = [r["bridge_reconnect_count"] for r in self._rows]
@@ -596,7 +606,19 @@ class MetricsLogger:
 
         _plot_metric(axes[0, 0], episodes, episode_wall_s, "Tiempo por episodio", "Episodio", "s", stages)
         _plot_metric(axes[0, 1], episodes, env_step_ms, "Latencia media env.step", "Episodio", "ms", stages)
-        _plot_metric(axes[1, 0], episodes, bridge_ms, "Latencia media bridge", "Episodio", "ms", stages)
+        axes[1, 0].plot(episodes, bridge_ms, linewidth=0.9, alpha=0.8, label="bridge activo")
+        axes[1, 0].plot(episodes, bridge_team_ms, linewidth=0.9, alpha=0.8, label="sidecar equipo")
+        axes[1, 0].set_title("Latencia bridge / sidecar", fontsize=11)
+        axes[1, 0].set_xlabel("Episodio", fontsize=9)
+        axes[1, 0].set_ylabel("ms", fontsize=9)
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].legend(loc="upper left", fontsize=8)
+        prev_s = stages[0] if stages else 0
+        for i, s in enumerate(stages):
+            if s != prev_s:
+                axes[1, 0].axvline(x=episodes[i], color="gray",
+                                   linestyle="--", alpha=0.6, linewidth=1.0)
+                prev_s = s
         _plot_metric(axes[1, 1], episodes, memory_mb, "Memoria RSS del proceso", "Episodio", "MB", stages)
         _plot_metric(axes[2, 0], episodes, stability, "Stability Score", "Episodio", "0-1", stages)
         axes[2, 0].set_ylim(-0.05, 1.05)
@@ -1256,6 +1278,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
         ep_start_time   = time.perf_counter()
         ep_env_step_ms_sum = 0.0
         ep_bridge_us_sum = 0.0
+        ep_bridge_team_us_sum = 0.0
         ep_contract_validation_steps = 0
         ep_non_pipe_steps = 0
         ep_not_playing_steps = 0
@@ -1444,7 +1467,18 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                     )
                 ep_goal_scored += int(sample.get("goal_scored",   False))
                 ep_goal_ceded  += int(sample.get("goal_conceded", False))
-                ep_bridge_us_sum += float(sample.get("bridge_decision_time_us", 0.0))
+                ep_bridge_team_us_sum += float(
+                    sample.get(
+                        "bridge_debug_team_decision_time_us",
+                        sample.get("bridge_decision_time_us", 0.0),
+                    )
+                )
+                ep_bridge_us_sum += float(
+                    sample.get(
+                        "bridge_debug_active_agent_decision_time_us",
+                        sample.get("bridge_decision_time_us", 0.0),
+                    )
+                )
                 ep_contract_validation_steps += int(bool(sample.get("sidecar_contract_validation_mode", False)))
                 transport_mode = sample.get("bridge_debug_transport_mode", "")
                 ep_non_pipe_steps += int(transport_mode != expected_transport_mode())
@@ -1467,6 +1501,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                     elapsed_ep_s = time.perf_counter() - ep_start_time
                     mean_env_step_ms = ep_env_step_ms_sum / max(1, ep_steps + 1)
                     mean_bridge_ms = (ep_bridge_us_sum / max(1, ep_steps + 1)) / 1000.0
+                    mean_bridge_team_ms = (ep_bridge_team_us_sum / max(1, ep_steps + 1)) / 1000.0
                     memory_mb = _get_process_memory_mb()
                     stability_score = ep_stability_good_steps / max(1, ep_steps + 1)
                     print(
@@ -1474,6 +1509,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                         f"elapsed={elapsed_ep_s:.1f}s "
                         f"env_step_mean={mean_env_step_ms:.1f}ms "
                         f"bridge_mean={mean_bridge_ms:.1f}ms "
+                        f"bridge_team_mean={mean_bridge_team_ms:.1f}ms "
                         f"mem={memory_mb:.1f}MB "
                         f"stable={stability_score:.2f} "
                         f"game_state={sample.get('bridge_debug_game_state')} "
@@ -1516,6 +1552,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
         episode_wall_s = time.perf_counter() - ep_start_time
         mean_env_step_ms = ep_env_step_ms_sum / max(1, ep_steps)
         mean_bridge_ms = (ep_bridge_us_sum / max(1, ep_steps)) / 1000.0
+        mean_bridge_team_ms = (ep_bridge_team_us_sum / max(1, ep_steps)) / 1000.0
         process_memory_mb = _get_process_memory_mb()
         stability_score = ep_stability_good_steps / max(1, ep_steps)
         contract_validation_rate = ep_contract_validation_steps / max(1, ep_steps)
@@ -1582,6 +1619,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             episode_wall_s        =episode_wall_s,
             mean_env_step_ms      =mean_env_step_ms,
             mean_bridge_ms        =mean_bridge_ms,
+            mean_bridge_team_ms   =mean_bridge_team_ms,
             process_memory_mb     =process_memory_mb,
             stability_score       =stability_score,
             bridge_reconnect_count=ep_bridge_reconnect_max,
@@ -1611,6 +1649,7 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
             print(f"         Watchdog: episode_wall={episode_wall_s:.1f}s "
                   f"mean_env_step={mean_env_step_ms:.1f}ms "
                   f"mean_bridge={mean_bridge_ms:.1f}ms "
+                  f"mean_bridge_team={mean_bridge_team_ms:.1f}ms "
                   f"handoff={bhuman_m['handoff_reached_rate']:.2f} "
                   f"playball={bhuman_m['playball_entry_rate']:.2f} "
                   f"ready_walk={bhuman_m['ready_but_walk_rate']:.2f} "
@@ -1731,12 +1770,20 @@ def _debug_tracking_data_keys(agent: MAPPO) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--quick-debug",
+        action="store_true",
+        help="Run the lightweight quick-debug training profile",
+    )
+    args, _unknown_args = parser.parse_known_args()
+
     # ── Configuración centralizada — editar aquí, no en CLI ─────────────────
     # Para cambiar parámetros: modificar TRAINING en config.py o las
     # constantes de abajo directamente.
     INITIAL_STAGE: int        = 0    # stage de inicio (0-6)
-    QUICK_DEBUG_PROFILE: bool = False
-    PRACTICAL_TRAINING_PROFILE: bool = True
+    QUICK_DEBUG_PROFILE: bool = args.quick_debug
+    PRACTICAL_TRAINING_PROFILE: bool = not QUICK_DEBUG_PROFILE
     # FOV SOLO afecta a la detección de OPONENTES (cono ±27.5°, 5000mm).
     # El BALÓN es siempre omnisciente (TeamBallModel de BHuman) — ver plan .md.
     # True  = oponentes filtrados por FOV realista (modo entrenamiento normal)
