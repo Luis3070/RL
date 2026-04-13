@@ -348,7 +348,12 @@ class CurriculumStageConfig:
     num_dynamic_obstacles: int = 0
 
     # Spawn
+    ball_min_dist:         float = 150.0
     ball_max_dist:         float = -1.0
+    ball_spawn_y_max_abs:  float = 0.0
+    dynamic_ball_start_prob: float = 0.0
+    dynamic_ball_speed_min: float = 0.0
+    dynamic_ball_speed_max: float = 0.0
     spawn_ball_in_front:   bool = False
     spawn_front_angle_deg: float = 180.0
 
@@ -378,26 +383,27 @@ class CurriculumStageConfig:
 
 CURRICULUM: List[CurriculumStageConfig] = [
     # ═══════════════════════════════════════════════════════════════════
-    # STAGE 0: Ball ≤800mm, no obstacles — learn approach to takeover pose
-    # Gate: ≥95% clean takeover
+    # STAGE 0: Ball 800–1600mm, no obstacles — learn approach to takeover pose
+    # Gate: ≥80% clean takeover
     # ═══════════════════════════════════════════════════════════════════
     CurriculumStageConfig(
         stage_id=0,
-        name="1v0_approach_800",
+        name="1v0_approach_800_1600",
         num_rl_agents=1,
         num_opponents=0,
         theta_free=False,
         episode_steps=455,        # ~15s at dt=0.033
         shaping_weight=1.0,
         advance_metric="takeover_rate",
-        advance_threshold=0.95,
+        advance_threshold=0.80,
         advance_window=50,
         min_playball_entry_rate=0.25,
         min_takeover_success_rate=0.10,
         max_ready_but_walk_rate=0.80,
         max_ready_touch_but_walk_rate=0.60,
         takeover_required=True,
-        ball_max_dist=800.0,
+        ball_min_dist=800.0,
+        ball_max_dist=1600.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=60.0,
         ema_alpha=0.42,
@@ -417,40 +423,43 @@ CURRICULUM: List[CurriculumStageConfig] = [
     ),
 
     # ═══════════════════════════════════════════════════════════════════
-    # STAGE 1: Ball ≤1600mm — extended approach
-    # Gate: ≥90% takeover before timeout
+    # STAGE 1: Ball 1600–3200mm, 1 static obstacle
+    # Gate: ≥78% takeover before timeout
     # ═══════════════════════════════════════════════════════════════════
     CurriculumStageConfig(
         stage_id=1,
-        name="1v0_approach_1600",
+        name="1v0_static_1600_3200",
         num_rl_agents=1,
         num_opponents=0,
         theta_free=False,
         episode_steps=909,        # ~30s at dt=0.033
         shaping_weight=1.0,
         advance_metric="takeover_rate",
-        advance_threshold=0.90,
+        advance_threshold=0.78,
         advance_window=80,
         min_playball_entry_rate=0.40,
         min_takeover_success_rate=0.25,
         max_ready_but_walk_rate=0.65,
         max_ready_touch_but_walk_rate=0.45,
         takeover_required=True,
-        ball_max_dist=1600.0,
+        num_static_obstacles=1,
+        ball_min_dist=1600.0,
+        ball_max_dist=3200.0,
+        ball_spawn_y_max_abs=1200.0,
         spawn_ball_in_front=True,
         spawn_front_angle_deg=90.0,
         ema_alpha=0.40,
         face_theta_alpha=0.12,
         face_theta_deadband_deg=9.0,
         face_hold_dist_ratio=0.92,
-        target_pos_alpha=0.48,
+        target_pos_alpha=0.42,
         rotation_threshold_rad=0.95,
-        ball_chase_blend=0.72,
-        handoff_pose_blend=0.84,
+        ball_chase_blend=0.55,
+        handoff_pose_blend=0.78,
         handoff_target_rel_x_mm=230.0,
         ball_target_max_radius_mm=850.0,
         rollout_steps=1024,
-        local_horizon=700.0,
+        local_horizon=620.0,
         shaping_approach_w=1.1,
         shaping_takeover_w=1.2,
     ),
@@ -477,6 +486,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         takeover_required=True,
         num_static_obstacles=2,
         ball_max_dist=3200.0,
+        dynamic_ball_start_prob=0.10,
+        dynamic_ball_speed_min=180.0,
+        dynamic_ball_speed_max=340.0,
         spawn_ball_in_front=False,
         ema_alpha=0.35,
         face_theta_alpha=0.12,
@@ -506,6 +518,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         takeover_required=True,
         num_dynamic_obstacles=1,
         ball_max_dist=-1.0,
+        dynamic_ball_start_prob=0.18,
+        dynamic_ball_speed_min=200.0,
+        dynamic_ball_speed_max=380.0,
         ema_alpha=0.35,
         rollout_steps=1024,
         local_horizon=700.0,
@@ -530,6 +545,9 @@ CURRICULUM: List[CurriculumStageConfig] = [
         advance_window=200,
         takeover_required=True,
         bhuman_mode="frozen",
+        dynamic_ball_start_prob=0.26,
+        dynamic_ball_speed_min=220.0,
+        dynamic_ball_speed_max=420.0,
         shaping_approach_w=0.5,
         shaping_takeover_w=1.0,
     ),

@@ -1970,6 +1970,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._use_fov = use_fov
         self._rng = np.random.default_rng(seed)
         random.seed(seed)
+        self._ball_spawn_dynamic = False
 
         # Components
         self._ball_physics = BallPhysics()
@@ -2066,6 +2067,7 @@ class NaoSoccerEnv(ParallelEnv):
     def reset(self, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        self._ball_spawn_dynamic = False
 
         n_rl = self._stage.num_rl_agents
         self.agents = self.possible_agents[:n_rl]
@@ -2605,15 +2607,21 @@ class NaoSoccerEnv(ParallelEnv):
                 if float(np.linalg.norm(pos - ref_agent.pos)) >= min_goal_reset_dist:
                     return BallState(pos=pos.astype(np.float32), vel=np.zeros(2, dtype=np.float32))
 
+        min_dist = max(0.0, float(getattr(self._stage, "ball_min_dist", 150.0) or 0.0))
         max_dist = getattr(self._stage, "ball_max_dist", -1.0)
         if max_dist <= 0.0:
             max_dist = FIELD.diagonal * 0.5
 
         front_only = getattr(self._stage, "spawn_ball_in_front", False)
         half_angle_deg = getattr(self._stage, "spawn_front_angle_deg", 180.0)
+        y_cap = float(getattr(self._stage, "ball_spawn_y_max_abs", 0.0) or 0.0)
+        dynamic_prob = float(getattr(self._stage, "dynamic_ball_start_prob", 0.0) or 0.0)
+        dynamic_speed_min = float(getattr(self._stage, "dynamic_ball_speed_min", 0.0) or 0.0)
+        dynamic_speed_max = float(getattr(self._stage, "dynamic_ball_speed_max", 0.0) or 0.0)
+        self._ball_spawn_dynamic = False
 
         for _ in range(200):
-            r = float(self._rng.uniform(150.0, max_dist))
+            r = float(self._rng.uniform(min_dist, max_dist))
             if front_only:
                 rel = math.radians(float(self._rng.uniform(-half_angle_deg, half_angle_deg)))
                 ang = ref_agent.theta + rel
@@ -2623,9 +2631,25 @@ class NaoSoccerEnv(ParallelEnv):
             pos = ref_agent.pos + r * np.array([math.cos(ang), math.sin(ang)], dtype=np.float32)
             pos[0] = np.clip(pos[0], FIELD.x_own_ground + 200.0, FIELD.x_opponent_ground - 200.0)
             pos[1] = np.clip(pos[1], FIELD.y_right_sideline + 200.0, FIELD.y_left_sideline - 200.0)
+            if y_cap > 0.0:
+                pos[1] = np.clip(pos[1], -y_cap, y_cap)
 
             if np.linalg.norm(pos - ref_agent.pos) <= max_dist + 1e-6:
-                return BallState(pos=pos.astype(np.float32), vel=np.zeros(2, dtype=np.float32))
+                vel = np.zeros(2, dtype=np.float32)
+                if (
+                    reason == "reset"
+                    and dynamic_prob > 0.0
+                    and dynamic_speed_max > dynamic_speed_min > 0.0
+                    and float(self._rng.random()) < dynamic_prob
+                ):
+                    speed = float(self._rng.uniform(dynamic_speed_min, dynamic_speed_max))
+                    vel_theta = float(self._rng.uniform(-math.pi, math.pi))
+                    vel = np.array(
+                        [math.cos(vel_theta) * speed, math.sin(vel_theta) * speed],
+                        dtype=np.float32,
+                    )
+                    self._ball_spawn_dynamic = True
+                return BallState(pos=pos.astype(np.float32), vel=vel)
 
         return BallState(pos=np.zeros(2, dtype=np.float32), vel=np.zeros(2, dtype=np.float32))
 
@@ -3354,6 +3378,7 @@ class NaoSoccerEnv(ParallelEnv):
                 math.degrees(math.atan2(float(self._ball.vel[1]), float(self._ball.vel[0])))
                 if float(np.linalg.norm(self._ball.vel)) > 1e-6 else None
             ),
+            "ball_spawn_dynamic": bool(getattr(self, "_ball_spawn_dynamic", False)),
             # BHuman contract info
             "control_owner": control_owner,
             "handoff_ready": macro.handoff_ready,
