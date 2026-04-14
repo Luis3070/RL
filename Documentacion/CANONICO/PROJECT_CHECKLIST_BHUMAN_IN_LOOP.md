@@ -2,13 +2,10 @@
 
 Documento relacionado:
 
-- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/c:/ALEJO/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
+- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](file:///c:/ALEJO/RL/Documentacion/CANONICO/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
   Punto de entrada corto para smokes canonicos y documentacion minima.
 
-- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/c:/ALEJO/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
-  Guia operativa para implementar primero la opcion 1 estable y abrir despues la opcion 2 como modo alterno.
-
-- [DOCUMENTATION_AND_SMOKE_GOVERNANCE.md](/c:/ALEJO/RL/Documentacion/PLAN/DOCUMENTATION_AND_SMOKE_GOVERNANCE.md)
+- [DOCUMENTATION_AND_SMOKE_GOVERNANCE.md](file:///c:/ALEJO/RL/Documentacion/CANONICO/DOCUMENTATION_AND_SMOKE_GOVERNANCE.md)
   Define que documentos son canonicos, cuales son referencia y cuales son historicos.
 
 ## 1. Bridge and integration
