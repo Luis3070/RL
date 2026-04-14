@@ -2,11 +2,14 @@
 
 Documento relacionado:
 
-- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
+- [BHUMAN_IN_LOOP_COMPACT_GUIDE.md](/c:/ALEJO/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_COMPACT_GUIDE.md)
   Punto de entrada corto para smokes canonicos y documentacion minima.
 
-- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/j:/ROBOTICA/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
+- [BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md](/c:/ALEJO/RL/Documentacion/PLAN/BHUMAN_IN_LOOP_OPTION1_OPTION2_CHANGE_GUIDE.md)
   Guia operativa para implementar primero la opcion 1 estable y abrir despues la opcion 2 como modo alterno.
+
+- [DOCUMENTATION_AND_SMOKE_GOVERNANCE.md](/c:/ALEJO/RL/Documentacion/PLAN/DOCUMENTATION_AND_SMOKE_GOVERNANCE.md)
+  Define que documentos son canonicos, cuales son referencia y cuales son historicos.
 
 ## 1. Bridge and integration
 
@@ -37,7 +40,7 @@ Documento relacionado:
 - [x] Reduced-agent stages preserve 4v4 own-team context in the sidecar.
 - [x] Stage 0 still trains positioning only, not ball-control actions.
 - [x] Stage advancement still follows contract-defined metric.
-- [x] Stage 0 gate remains `takeover_rate / handoff_achieved`, not relaxed.
+- [x] Stage 0 gate remains contract-aligned and is not relaxed by convenience heuristics.
 
 ## 4. Reward and optimization
 
@@ -51,6 +54,7 @@ Documento relacionado:
 
 - [x] 50-episode practical run reaches stable `TkReady ~ 0.80`.
 - [x] Stability remains near `1.0` under real backend.
+- [x] `handoff_reached` and `TkReady` are tracked as separate signals to avoid semantic leakage.
 - [ ] Achieve `TkReady >= 0.95` over the full stage-0 window.
 - [ ] Observe non-zero `TkSucc` in practical training, not just targeted heuristic probes.
 

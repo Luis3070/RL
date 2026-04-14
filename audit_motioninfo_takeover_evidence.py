@@ -1,4 +1,12 @@
 """
+LEGACY REDIRECT
+
+Archivo legado. La version viva para diagnostico extendido esta en:
+`smoke_legacy.audit_motioninfo_takeover_evidence`.
+La superficie oficial del proyecto entra por `smoke_suite_option1.py`.
+"""
+
+"""
 audit_motioninfo_takeover_evidence.py
 
 Non-gating audit for real takeover evidence in shoot/pass fixtures.

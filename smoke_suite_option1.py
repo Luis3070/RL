@@ -1,16 +1,16 @@
-"""
+﻿"""
 smoke_suite_option1.py
 
 Canonical smoke runner for the current BHuman-in-loop Option-1 baseline.
 
 Why this exists:
   The project accumulated several focused smoke tests. They are still useful,
-  but day-to-day validation should not require remembering 8+ filenames.
+  but day-to-day validation should not require remembering many filenames.
 
-This runner groups the existing tests into a few operational suites:
+This runner groups the canonical smoke wrappers into a few operational suites:
   - quick: fastest baseline confidence
   - gating: recommended pre-training gate for Option 1
-  - extended: broader semantic/regression coverage
+  - extended: broader regression coverage
   - diagnostic: non-gating audits
   - all: extended + diagnostic
 
@@ -36,75 +36,41 @@ class SmokeEntry:
 
 
 SMOKE_CATALOG: Dict[str, SmokeEntry] = {
-    "persistent": SmokeEntry(
-        module_name="smoke_test_rlbridge_persistent_basic",
-        description="Transporte persistente RLBridge y reset básico",
+    "core": SmokeEntry(
+        module_name="smoke_core_bridge_semantics",
+        description="Transporte, env-bridge, semantica fuerte y sidecar",
     ),
-    "env_bridge": SmokeEntry(
-        module_name="smoke_test_environment_bridge",
-        description="Integración env <-> RLBridge real",
+    "takeover_real": SmokeEntry(
+        module_name="smoke_takeover_real",
+        description="Takeover real y completion canonica (sin fixtures specialist legacy)",
     ),
-    "semantic": SmokeEntry(
-        module_name="smoke_test_semantic_strong",
-        description="Contrato semántico fuerte + provenance real",
-    ),
-    "sidecar": SmokeEntry(
-        module_name="smoke_test_sidecar",
-        description="Cobertura sidecar, budget temporal e info plumbing",
-    ),
-    "takeover_completion": SmokeEntry(
-        module_name="smoke_test_real_takeover_completion",
-        description="Completion real de takeover dentro de env.step()",
-    ),
-    "playball_alignment": SmokeEntry(
-        module_name="smoke_test_real_takeover_playball",
-        description="Alineación playBall real, contexto 4v4 y no falsos takeovers",
-    ),
-    "env_semantic_variants": SmokeEntry(
-        module_name="smoke_test_real_env_semantic_variants",
-        description="Variantes reales de semántica en env.step()",
-    ),
-    "motioninfo_audit": SmokeEntry(
-        module_name="audit_motioninfo_takeover_evidence",
-        description="Auditoría diagnóstica de MotionInfo para shoot/pass",
+    "diagnostic_extended": SmokeEntry(
+        module_name="smoke_diagnostic_extended",
+        description="Diagnosticos extendidos canonicos: stress y auditoria MotionInfo",
     ),
 }
 
 
 SMOKE_SUITES: Dict[str, List[str]] = {
     "quick": [
-        "persistent",
-        "env_bridge",
-        "semantic",
+        "core",
     ],
     "gating": [
-        "persistent",
-        "env_bridge",
-        "semantic",
-        "sidecar",
-        "takeover_completion",
+        "core",
+        "takeover_real",
     ],
     "extended": [
-        "persistent",
-        "env_bridge",
-        "semantic",
-        "sidecar",
-        "takeover_completion",
-        "playball_alignment",
-        "env_semantic_variants",
+        "core",
+        "takeover_real",
+        "diagnostic_extended",
     ],
     "diagnostic": [
-        "motioninfo_audit",
+        "diagnostic_extended",
     ],
     "all": [
-        "persistent",
-        "env_bridge",
-        "semantic",
-        "sidecar",
-        "takeover_completion",
-        "playball_alignment",
-        "env_semantic_variants",
-        "motioninfo_audit",
+        "core",
+        "takeover_real",
+        "diagnostic_extended",
     ],
 }
 

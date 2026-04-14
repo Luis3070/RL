@@ -85,8 +85,8 @@ def _load_snapshot_frame() -> GroundTruthFrame:
 def _write_snapshot_replay_csv(max_steps: int = 20) -> None:
     from config import CURRICULUM
     from environment import NaoSoccerEnv
-    from smoke_test_real_env_semantic_variants import _install_frame
-    from smoke_test_real_takeover_playball import _zero_actions
+from smoke_legacy.smoke_test_real_env_semantic_variants import _install_frame
+from smoke_legacy.smoke_test_real_takeover_playball import _zero_actions
 
     frame = _load_snapshot_frame()
     contract = load_contract(cfg_root=resolve_cfg_root())

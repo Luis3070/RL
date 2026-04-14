@@ -3,3 +3,12 @@ __pycache__/
 bridge/__pycache__/
 bridge/rlbridge_oneshot_*
 bridge/tmp*/
+
+# Environment and IDE
+.env
+.vscode/
+.claude/
+*.log
+artifacts/
+checkpoints/
+runs/
