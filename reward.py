@@ -59,12 +59,14 @@ class TeamRewardInfo:
     goal_scored:       bool
     goal_conceded:     bool
     opp_positions:     List[np.ndarray]
+    static_obstacles:  Optional[List[np.ndarray]] = None
     ball_out_of_bounds: bool = False
     # BHuman contract fields
     handoff_ready:     bool = False
     prev_handoff_ready: bool = False
     takeover_active:   bool = False
     takeover_success:  Optional[bool] = None   # None = no event, True/False = result
+    takeover_event_triggered: bool = False # ONLY true on the exact frame the macro ends
     takeover_kick:     bool = False
     playball_entry:    bool = False
     ready_but_walk:    bool = False
@@ -406,6 +408,19 @@ def _fall_penalty(agents: List[AgentRewardInfo]) -> float:
     return sum(-0.1 for a in agents if not a.is_upright)
 
 
+def _collision_penalty(agents: List[AgentRewardInfo], obstacles: List[np.ndarray]) -> float:
+    """Penalty for colliding with static obstacles."""
+    penalty = 0.0
+    for a in agents:
+        if not a.is_upright:
+            continue
+        for obs_pos in obstacles:
+            dist = float(np.linalg.norm(a.pos - obs_pos))
+            if dist < 450.0: # ~ agent radius 150 + obstacle radius 300
+                penalty -= 2.0
+    return penalty
+
+
 def _oscillation_penalty(agents: List[AgentRewardInfo]) -> float:
     """Penalty for aggressive angular oscillation."""
     total = 0.0
@@ -578,18 +593,19 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             * takeover_weight
         )
 
-        # Takeover result (gated by backend provenance)
-        takeover_r = _takeover_result_reward(
-            info.takeover_success,
-            info.takeover_kick,
-            macro_end_reason=info.macro_end_reason,
-            ball_out_of_bounds=info.ball_out_of_bounds,
-            sidecar_backend=info.sidecar_backend,
-        )
-        if takeover_r >= 0:
-            components.takeover_success = takeover_r * takeover_weight
-        else:
-            components.takeover_failure = takeover_r * takeover_weight
+        # Takeover result (gated by backend provenance and 1-shot impulse)
+        if getattr(info, 'takeover_event_triggered', False):
+            takeover_r = _takeover_result_reward(
+                info.takeover_success,
+                info.takeover_kick,
+                macro_end_reason=info.macro_end_reason,
+                ball_out_of_bounds=info.ball_out_of_bounds,
+                sidecar_backend=info.sidecar_backend,
+            )
+            if takeover_r >= 0:
+                components.takeover_success = takeover_r * takeover_weight
+            else:
+                components.takeover_failure = takeover_r * takeover_weight
 
         if not info.takeover_active:
             # Support spacing
@@ -607,6 +623,9 @@ def compute_reward(info: TeamRewardInfo, shaping_weight: float,
             if defensive_recovery and components.out_of_bounds < 0.0:
                 components.out_of_bounds = 0.0
             components.fall_penalty = _fall_penalty(info.agents)
+            # Add static collision penalty
+            if hasattr(info, 'static_obstacles') and info.static_obstacles:
+                components.fall_penalty += _collision_penalty(info.agents, info.static_obstacles)
             components.oscillation_penalty = _oscillation_penalty(info.agents)
             components.fov_bonus = _fov_bonus(info.agents)
 

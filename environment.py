@@ -1129,7 +1129,7 @@ class RealSidecarPhysicsExecutor:
         if ball_dist >= min_clearance and desired_dist <= 25.0 and abs(theta_error) <= 0.15:
             return agent, False
 
-        max_translation_step = max(70.0, AGENT.max_forward_speed * max(dt, 1e-3) * 8.0)
+        max_translation_step = max(30.0, AGENT.max_forward_speed * max(dt, 1e-3) * 1.5)
         if desired_dist > max_translation_step and desired_dist > 1e-6:
             corrected_pos = (
                 agent.pos + (desired_delta / desired_dist) * max_translation_step
@@ -2123,6 +2123,7 @@ class NaoSoccerEnv(ParallelEnv):
         self._episode_playball_achieved = False
         self._episode_ready_but_walk_frames = 0
         self._episode_ready_touch_but_walk_frames = 0
+        self._consecutive_ready_touch_but_walk = 0
         self._episode_takeover_reason_counts = _new_takeover_reason_counts()
         self._last_macro_end_reason = "none"
         self._prev_playball_frame = False
@@ -2294,6 +2295,17 @@ class NaoSoccerEnv(ParallelEnv):
                         ready_touch_but_walk = True
                         self._episode_ready_touch_but_walk_frames += 1
 
+            # Abort if BHuman is stalling in walk
+            if macro.takeover_active:
+                if ready_touch_but_walk:
+                    self._consecutive_ready_touch_but_walk += 1
+                else:
+                    self._consecutive_ready_touch_but_walk = 0
+
+                if self._consecutive_ready_touch_but_walk > 25:
+                    self._handoff_mgr.force_end("skill_request_cleared", False)
+                    macro = self._handoff_mgr.macro
+
             # Takeover execution depends on mode:
             if macro.takeover_active and self._active_agent_id:
                 if self._takeover_sim is not None:
@@ -2429,12 +2441,14 @@ class NaoSoccerEnv(ParallelEnv):
                 takeover_kick=takeover_kick,
                 takeover_kick_proxy=takeover_kick_proxy,
             )
+            takeover_event_triggered = False
             # Record takeover events
             if (
                 macro.macro_end_reason != "none"
                 and macro.macro_success is not None
                 and not macro.event_recorded
             ):
+                takeover_event_triggered = True
                 self._episode_takeover_count += 1
                 if macro.macro_type in self._episode_takeover_count_by_type:
                     self._episode_takeover_count_by_type[macro.macro_type] += 1
@@ -2474,6 +2488,7 @@ class NaoSoccerEnv(ParallelEnv):
             playball_entry=playball_entry,
             ready_but_walk=ready_but_walk,
             ready_touch_but_walk=ready_touch_but_walk,
+            takeover_event_triggered=takeover_event_triggered,
         )
 
         # Update tracking
@@ -3030,7 +3045,8 @@ class NaoSoccerEnv(ParallelEnv):
                          prev_ball_dists, takeover_kick=False,
                          playball_entry=False,
                          ready_but_walk=False,
-                         ready_touch_but_walk=False):
+                         ready_touch_but_walk=False,
+                         takeover_event_triggered=False):
         from reward import (
             AgentRewardInfo, TeamRewardInfo,
             compute_reward, compute_per_agent_reward,
@@ -3064,12 +3080,14 @@ class NaoSoccerEnv(ParallelEnv):
             goal_scored=goal_scored,
             goal_conceded=goal_conceded,
             opp_positions=[opp.pos for opp in self._opponents_state],
+            static_obstacles=[obs.pos for obs in getattr(self, '_static_obstacles', [])],
             ball_out_of_bounds=self._ball_out_this_step,
             # BHuman contract fields
             handoff_ready=macro.handoff_ready,
             prev_handoff_ready=self._prev_handoff_ready,
             takeover_active=macro.takeover_active,
             takeover_success=macro.macro_success if macro.macro_end_reason != "none" else None,
+            takeover_event_triggered=takeover_event_triggered,
             takeover_kick=takeover_kick,
             playball_entry=playball_entry,
             ready_but_walk=ready_but_walk,
