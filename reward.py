@@ -326,9 +326,9 @@ def _ready_but_walk_penalty(ready_but_walk: bool,
         return 0.0
     penalty = 0.0
     if ready_but_walk:
-        penalty -= 0.18
+        penalty -= 0.09
     if ready_touch_but_walk:
-        penalty -= 0.50
+        penalty -= 0.25
     return penalty
 
 

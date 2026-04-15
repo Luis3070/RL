@@ -2136,6 +2136,10 @@ class NaoSoccerEnv(ParallelEnv):
         assert self.agents, "step() called without active agents. Call reset() first."
 
         self._ball_out_this_step = False
+        # Pulso (1 frame) del final de macro para reward/telemetría.
+        # Evita reward leak si `macro_end_reason` quedaba pegado varios frames.
+        self._macro_end_pulse_reason = "none"
+        self._macro_end_pulse_success = None
 
         # Save previous state for reward
         self._prev_ball_pos = self._ball.pos.copy()
@@ -2434,6 +2438,11 @@ class NaoSoccerEnv(ParallelEnv):
                 and macro.macro_success is not None
                 and not macro.event_recorded
             ):
+                # Capturamos el evento para 1 frame de reward y trace,
+                # y luego limpiamos el estado para evitar "sticky completion".
+                self._macro_end_pulse_reason = macro.macro_end_reason
+                self._macro_end_pulse_success = bool(macro.macro_success)
+
                 self._episode_takeover_count += 1
                 if macro.macro_type in self._episode_takeover_count_by_type:
                     self._episode_takeover_count_by_type[macro.macro_type] += 1
@@ -2455,6 +2464,8 @@ class NaoSoccerEnv(ParallelEnv):
                 self._episode_takeover_reason_counts[reason_key] += 1
                 self._last_macro_end_reason = macro.macro_end_reason
                 macro.event_recorded = True
+                macro.macro_end_reason = "none"
+                macro.macro_success = None
 
         # ═══════════════════════════════════════════════════════════════
         # 8. UPDATE GAME STATE
@@ -2470,6 +2481,8 @@ class NaoSoccerEnv(ParallelEnv):
             goal_conceded=goal_conceded,
             prev_ball_dists=prev_ball_dists,
             takeover_kick=(takeover_kick or takeover_kick_proxy),
+            takeover_success_pulse=self._macro_end_pulse_success,
+            macro_end_reason_pulse=self._macro_end_pulse_reason,
             playball_entry=playball_entry,
             ready_but_walk=ready_but_walk,
             ready_touch_but_walk=ready_touch_but_walk,
@@ -3005,6 +3018,8 @@ class NaoSoccerEnv(ParallelEnv):
 
     def _compute_rewards(self, goal_scored, goal_conceded,
                          prev_ball_dists, takeover_kick=False,
+                         takeover_success_pulse=None,
+                         macro_end_reason_pulse="none",
                          playball_entry=False,
                          ready_but_walk=False,
                          ready_touch_but_walk=False):
@@ -3046,13 +3061,13 @@ class NaoSoccerEnv(ParallelEnv):
             handoff_ready=macro.handoff_ready,
             prev_handoff_ready=self._prev_handoff_ready,
             takeover_active=macro.takeover_active,
-            takeover_success=macro.macro_success if macro.macro_end_reason != "none" else None,
+            takeover_success=takeover_success_pulse,
             takeover_kick=takeover_kick,
             playball_entry=playball_entry,
             ready_but_walk=ready_but_walk,
             ready_touch_but_walk=ready_touch_but_walk,
             macro_duration_frames=macro.macro_duration_frames,
-            macro_end_reason=macro.macro_end_reason,
+            macro_end_reason=str(macro_end_reason_pulse or "none"),
             # Backend provenance for reward gating
             sidecar_backend=(
                 self._sidecar.backend_label if self._sidecar is not None
@@ -3366,6 +3381,12 @@ class NaoSoccerEnv(ParallelEnv):
             "macro_end_reason": macro.macro_end_reason,
             "macro_success": macro.macro_success,
             "last_macro_end_reason": self._last_macro_end_reason,
+            "diag_macro_end_pulse_reason": str(getattr(self, "_macro_end_pulse_reason", "none") or "none"),
+            "diag_macro_end_pulse_success": (
+                int(bool(getattr(self, "_macro_end_pulse_success", False)))
+                if getattr(self, "_macro_end_pulse_success", None) is not None
+                else None
+            ),
             "playball_entry": playball_entry,
             "ready_but_walk": ready_but_walk,
             "ready_touch_but_walk": ready_touch_but_walk,
