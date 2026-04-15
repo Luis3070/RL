@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-04-14 19:53:54",
-  "stage": 0,
+  "timestamp": "2026-04-14 20:46:48",
+  "stage": 12,
   "seed": 42,
-  "steps_run": 200,
+  "steps_run": 600,
   "backend": "real",
   "bridge_alive": true,
   "alerts": [],
   "teleport_count": 0,
-  "max_pose_delta_mm": 38.25000001165257,
+  "max_pose_delta_mm": 0.0,
   "handoff": {
     "approach_frames": 299,
     "handoff_ready_frame": null,
@@ -31,12 +31,12 @@
     {
       "condition": "dribble",
       "mode": "forced",
-      "detected": false,
-      "frames_to_detect": null,
+      "detected": true,
+      "frames_to_detect": 105,
       "takeover_reached": false,
       "macro_end_reason": "none",
       "macro_success": null,
-      "notes": "macro playBall_dribble no detectada en 120 frames"
+      "notes": ""
     },
     {
       "condition": "duel",
@@ -72,9 +72,9 @@
       "condition": "shoot",
       "mode": "forced",
       "detected": true,
-      "frames_to_detect": 0,
-      "takeover_reached": true,
-      "macro_end_reason": "completed",
+      "frames_to_detect": 60,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
       "macro_success": null,
       "notes": ""
     },
@@ -110,6 +110,138 @@
       "macro_completed": true,
       "steps_run": 50,
       "error": ""
+    },
+    {
+      "stage_id": 1,
+      "stage_name": "1v0_static_1600_3200",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 2,
+      "stage_name": "1v0_obstacles_3200",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 3,
+      "stage_name": "1v1_dynamic",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 4,
+      "stage_name": "1v1_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 5,
+      "stage_name": "2v0_cooperation",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 6,
+      "stage_name": "2v2_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 7,
+      "stage_name": "3v0_cooperation",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 8,
+      "stage_name": "3v2_scripted",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 9,
+      "stage_name": "3v3_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 10,
+      "stage_name": "4v0_full_team",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 11,
+      "stage_name": "4v3_scripted",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 12,
+      "stage_name": "4v4_full",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
     }
   ],
   "reward_impulses": [],
@@ -117,32 +249,11 @@
   "ball_physics": [
     {
       "test_name": "T1_ball_velocity_clamping",
-      "passed": false,
+      "passed": true,
       "details": {
-        "max_speed_mm_s": 9867.0,
+        "max_speed_mm_s": 5000.0,
         "limit_mm_s": 5000.0,
-        "overshoots": [
-          {
-            "frame": 0,
-            "speed_mm_s": 9867.0
-          },
-          {
-            "frame": 1,
-            "speed_mm_s": 9735.8
-          },
-          {
-            "frame": 2,
-            "speed_mm_s": 9606.3
-          },
-          {
-            "frame": 3,
-            "speed_mm_s": 9478.5
-          },
-          {
-            "frame": 4,
-            "speed_mm_s": 9352.5
-          }
-        ]
+        "overshoots": []
       },
       "warnings": []
     },
@@ -267,11 +378,11 @@
       "passed": true,
       "details": {
         "steps": 1000,
-        "avg_latency_ms": 4.05,
-        "max_latency_ms": 43.94,
+        "avg_latency_ms": 4.11,
+        "max_latency_ms": 46.05,
         "latency_degradation": false,
         "exception_count": 0,
-        "memory_growth_mb": -0.2
+        "memory_growth_mb": -0.8
       },
       "warnings": []
     },
@@ -446,8 +557,8 @@
       "test_name": "TG_extreme_pressure",
       "passed": true,
       "details": {
-        "avg_latency_ms": 44.07,
-        "max_latency_ms": 59.04,
+        "avg_latency_ms": 44.04,
+        "max_latency_ms": 59.1,
         "latency_degradation": false
       },
       "warnings": []
@@ -460,57 +571,57 @@
       "details": {
         "violations": [
           {
-            "config": "back_to_ball",
-            "frame": 25,
+            "config": "stale_ball",
+            "frame": 0,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 27,
+            "config": "fallen_agent",
+            "frame": 1,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 29,
+            "config": "fallen_agent",
+            "frame": 2,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 32,
+            "config": "fallen_agent",
+            "frame": 3,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 34,
+            "config": "fallen_agent",
+            "frame": 4,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 39,
+            "config": "fallen_agent",
+            "frame": 6,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 40,
+            "config": "fallen_agent",
+            "frame": 7,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 41,
+            "config": "fallen_agent",
+            "frame": 8,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 42,
+            "config": "fallen_agent",
+            "frame": 9,
             "macro_type": "playBall_shoot"
           },
           {
-            "config": "back_to_ball",
-            "frame": 43,
+            "config": "fallen_agent",
+            "frame": 11,
             "macro_type": "playBall_shoot"
           }
         ],
-        "total_violations": 66,
+        "total_violations": 49,
         "configs_tested": 6,
         "contract_ref": "\u00a72.2 BHUMAN_RL_CURRICULUM_CONTRACT.md"
       },

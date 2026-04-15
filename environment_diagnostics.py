@@ -203,6 +203,7 @@ class DiagnosticsReport:
     ball_edge_cases: List[Dict[str, Any]] = field(default_factory=list)
     physical_stress: List[Dict[str, Any]] = field(default_factory=list)
     contract_guardrails: List[Dict[str, Any]] = field(default_factory=list)
+    execution_quality: List[Dict[str, Any]] = field(default_factory=list)
     verdict: str = "UNKNOWN"
     notes: List[str] = field(default_factory=list)
 
@@ -222,6 +223,8 @@ def _install_state(
     agent_pos: np.ndarray,          # posición del agente activo (agent_0 o agent_1)
     ball_vel: Optional[np.ndarray] = None,
     is_playing: bool = True,
+    agent_theta: Optional[float] = None,   # si None, apunta automáticamente al balón
+    teammate_pos: Optional[np.ndarray] = None,  # posición compañero (agent_1, para pass)
 ) -> None:
     """Inyecta estado mínimo sin depender de GroundTruthFrame."""
     env._ball.pos[:] = ball_pos.astype(np.float32)
@@ -231,12 +234,24 @@ def _install_state(
 
     agents = list(env.agents)
     if agents:
-        env._agents_state[agents[0]].pos = agent_pos.astype(np.float32)
+        pos0 = agent_pos.astype(np.float32)
+        env._agents_state[agents[0]].pos = pos0
         env._agents_state[agents[0]].is_upright = True
-        for aid in agents[1:]:
-            idx = int(aid.split("_")[1])
-            env._agents_state[aid].pos = np.array(
-                [-800.0 * idx, 600.0], dtype=np.float32)
+        # Theta: si se especifica, usarlo; si no, apuntar automáticamente al balón
+        if agent_theta is not None:
+            env._agents_state[agents[0]].theta = float(agent_theta)
+        else:
+            direction = ball_pos.astype(np.float32) - pos0
+            env._agents_state[agents[0]].theta = float(
+                math.atan2(float(direction[1]), float(direction[0]))
+            )
+        for i, aid in enumerate(agents[1:], start=1):
+            if i == 1 and teammate_pos is not None:
+                env._agents_state[aid].pos = teammate_pos.astype(np.float32)
+            else:
+                idx = int(aid.split("_")[1])
+                env._agents_state[aid].pos = np.array(
+                    [-800.0 * idx, 600.0], dtype=np.float32)
             env._agents_state[aid].is_upright = True
     env._game.is_playing = is_playing
 
@@ -584,11 +599,15 @@ _FORCED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "ball_pos": np.array([0.0, 0.0],    dtype=np.float32),
         "offset":   np.array([-280.0, 0.0], dtype=np.float32),
         "ball_vel": np.zeros(2, dtype=np.float32),
+        # theta=None → _install_state calcula automáticamente (apunta al balón)
     },
     "duel": {
         "ball_pos": np.array([200.0, 0.0],  dtype=np.float32),
         "offset":   np.array([-290.0, 0.0], dtype=np.float32),
         "ball_vel": np.zeros(2, dtype=np.float32),
+        # Oponente enfrente del balón para que BHuman active zweikampf
+        "opp_pos":  np.array([500.0, 0.0],  dtype=np.float32),
+        "stage_id": 3,  # 1v1_dynamic tiene num_opponents=1
     },
     "shoot": {
         "ball_pos": np.array([FIELD.x_opp_penalty + 200.0, 0.0], dtype=np.float32),
@@ -596,9 +615,12 @@ _FORCED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "ball_vel": np.zeros(2, dtype=np.float32),
     },
     "pass": {
-        "ball_pos": np.array([0.0, 400.0],    dtype=np.float32),
-        "offset":   np.array([-400.0, -50.0], dtype=np.float32),
-        "ball_vel": np.zeros(2, dtype=np.float32),
+        "ball_pos":     np.array([0.0, 400.0],    dtype=np.float32),
+        "offset":       np.array([-400.0, -50.0], dtype=np.float32),
+        "ball_vel":     np.zeros(2, dtype=np.float32),
+        # Compañero libre en posición favorable para recibir el pase
+        "teammate_pos": np.array([600.0, 400.0],  dtype=np.float32),
+        "stage_id":     5,  # 2v0_cooperation tiene num_rl_agents=2
     },
 }
 
@@ -615,20 +637,43 @@ def _probe_condition(
     mode = "forced" if forced else "natural"
     res = BHumanConditionResult(condition=condition, mode=mode)
 
-    env.reset(seed=seed)
-    actions = _zero_actions(env)
+    # Para forced: si cfg pide stage_id diferente, crear env propio con ese stage
+    cfg = _FORCED_CONFIGS.get(condition, {}) if forced else {}
+    stage_id = cfg.get("stage_id", None)
+    own_env: Optional[NaoSoccerEnv] = None
+    active_env = env
+
+    if forced and stage_id is not None:
+        own_env = _make_env(stage_id, seed)
+        active_env = own_env
+
+    active_env.reset(seed=seed)
+    actions = _zero_actions(active_env)
+
+    ball_pos = np.zeros(2, dtype=np.float32)
+    agent_offset = np.array([-300.0, 0.0], dtype=np.float32)
+    ball_vel = np.zeros(2, dtype=np.float32)
+    teammate_pos = None
 
     if forced:
-        cfg = _FORCED_CONFIGS.get(condition, {})
-        ball_pos = cfg.get("ball_pos", np.zeros(2, dtype=np.float32))
-        offset   = cfg.get("offset",   np.array([-300.0, 0.0], dtype=np.float32))
-        ball_vel = cfg.get("ball_vel",  np.zeros(2, dtype=np.float32))
-        _install_state(env, ball_pos, ball_pos + offset, ball_vel)
+        ball_pos     = cfg.get("ball_pos",  np.zeros(2, dtype=np.float32))
+        agent_offset = cfg.get("offset",    np.array([-300.0, 0.0], dtype=np.float32))
+        ball_vel     = cfg.get("ball_vel",  np.zeros(2, dtype=np.float32))
+        teammate_pos = cfg.get("teammate_pos", None)
+        opp_pos      = cfg.get("opp_pos",   None)
+
+        _install_state(active_env, ball_pos, ball_pos + agent_offset, ball_vel,
+                       teammate_pos=teammate_pos)
+
+        # Inyectar oponente si la config lo requiere (para duel)
+        if opp_pos is not None and active_env._opponents_state:
+            active_env._opponents_state[0].pos = opp_pos.astype(np.float32)
+            active_env._opponents_state[0].is_upright = True
 
     target_macro = f"playBall_{condition}"
 
     for fi in range(max_frames):
-        result = _safe_step(env, actions)
+        result = _safe_step(active_env, actions)
         if result is None:
             res.notes = "step() error"
             break
@@ -658,7 +703,7 @@ def _probe_condition(
             res.macro_success    = info.get("macro_success")
             print(f"    [{condition}/{mode}] end={end}  success={res.macro_success}")
             if visual and infos:
-                _render_ascii(env, info, fi, f"{condition.upper()} {mode}",
+                _render_ascii(active_env, info, fi, f"{condition.upper()} {mode}",
                               [f"macro_end: {end}",
                                f"success: {res.macro_success}"], delay_s=0.5)
             break
@@ -667,13 +712,21 @@ def _probe_condition(
             extra = [f"detected: {res.detected}",
                      f"macro: {macro}",
                      f"takeover: {info.get('takeover_active', False)}"]
-            _render_ascii(env, info, fi, f"{condition.upper()} {mode}", extra, delay_s=delay)
+            _render_ascii(active_env, info, fi, f"{condition.upper()} {mode}",
+                          extra, delay_s=delay)
 
         if _is_done(term, trunc):
-            env.reset(seed=seed + fi)
-            actions = _zero_actions(env)
+            active_env.reset(seed=seed + fi)
+            actions = _zero_actions(active_env)
             if forced:
-                _install_state(env, ball_pos, ball_pos + offset, ball_vel)
+                _install_state(active_env, ball_pos, ball_pos + agent_offset, ball_vel,
+                                teammate_pos=teammate_pos)
+                if cfg.get("opp_pos") is not None and active_env._opponents_state:
+                    active_env._opponents_state[0].pos = cfg["opp_pos"].astype(np.float32)
+                    active_env._opponents_state[0].is_upright = True
+
+    if own_env is not None:
+        own_env.close()
 
     if not res.detected:
         res.notes = f"macro {target_macro} no detectada en {max_frames} frames"
@@ -1459,14 +1512,19 @@ def _t16_handoff_timing_variance(seed: int) -> PreTrainingResult:
             env = _make_env(0, seed)
             env.reset(seed=seed)
             actions = _zero_actions(env)
+            # _install_state ya apunta theta al balón automáticamente
             _install_state(env, ball, ball + np.array([-dist, 0], dtype=np.float32))
             hr_frame = None
             active = list(env.agents)[0] if env.agents else "agent_0"
             for fi in range(200):
                 approach_dist = max(260.0, dist - fi * 18.0)
                 if active in env._agents_state:
-                    env._agents_state[active].pos = (
-                        ball + np.array([-approach_dist, 0], dtype=np.float32)
+                    agent_pos = ball + np.array([-approach_dist, 0], dtype=np.float32)
+                    env._agents_state[active].pos = agent_pos
+                    # Mantener theta apuntando al balón durante todo el approach
+                    direction = ball - agent_pos
+                    env._agents_state[active].theta = float(
+                        math.atan2(float(direction[1]), float(direction[0]))
                     )
                 res = _safe_step(env, actions)
                 if res is None:
@@ -2152,52 +2210,52 @@ def _extra1_handoff_envelope_validation(seed: int) -> ContractGuardrailResult:
         except Exception as exc:
             r.warnings.append(f"{cfg_name}: {exc}")
 
-    # 1. Agente DE ESPALDAS: x+ del balón, orientado hacia afuera
-    def _back(env):
+    def _set_agent(env, pos_offset, theta, upright=True):
+        """Helper: setea posición+theta explícitos para evitar drift entre frames."""
         if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([300.0, 0.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = True
+            ag = env._agents_state[list(env.agents)[0]]
+            ag.pos = (ball + np.asarray(pos_offset, dtype=np.float32))
+            ag.theta = float(theta)
+            ag.is_upright = upright
+
+    # 1. Agente DE ESPALDAS: a la derecha del balón, theta=0 → mira lejos del balón
+    #    ball_rel_x = (ball - agent) · (cos0, sin0) = (-300, 0)·(1,0) = -300 < 0 → fuera
+    def _back(env):
+        _set_agent(env, [300.0, 0.0], theta=0.0)
         env._ball.pos[:] = ball; env._ball.seen_age_ms = 0.0
     _probe("back_to_ball", _back)
 
-    # 2. Agente LATERAL (90°)
+    # 2. Agente LATERAL (90°): arriba del balón, theta=math.pi/2 → mira hacia +Y
+    #    ball_rel_x = (ball - agent) · (cos(π/2), sin(π/2)) = (0,-600)·(0,1) = -600 < 0 → fuera
     def _side(env):
-        if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([0.0, 600.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = True
+        _set_agent(env, [0.0, 600.0], theta=math.pi / 2)
         env._ball.pos[:] = ball; env._ball.seen_age_ms = 0.0
     _probe("side_to_ball", _side)
 
-    # 3. Agente DEMASIADO LEJOS (> 700 mm)
+    # 3. Agente DEMASIADO LEJOS (1200mm, inequívocamente fuera de cualquier rango BHuman)
+    #    theta=0 → mira al balón; distancia garantiza que sea fuera del envelope
     def _far(env):
-        if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([-700.0, 0.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = True
+        _set_agent(env, [-1200.0, 0.0], theta=0.0)
         env._ball.pos[:] = ball; env._ball.seen_age_ms = 0.0
     _probe("too_far", _far)
 
-    # 4. Balón DETRÁS del robot (ball_rel_x < 0)
+    # 4. Balón DETRÁS del robot: agente a la derecha, theta=0 → mira lejos del balón
+    #    Igual que _back pero más lejos para separar el caso
     def _behind(env):
-        if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([400.0, 0.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = True
+        _set_agent(env, [400.0, 0.0], theta=0.0)
         env._ball.pos[:] = ball; env._ball.seen_age_ms = 0.0
     _probe("ball_behind_robot", _behind)
 
-    # 5. BALÓN VISTO HACE MUCHO (seen_age > 3× contrato)
+    # 5. BALÓN VISTO HACE MUCHO (seen_age > 3× contrato): theta correcto, solo seen_age falla
     def _stale(env):
-        if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([-300.0, 0.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = True
+        _set_agent(env, [-300.0, 0.0], theta=0.0)
         env._ball.pos[:] = ball
         env._ball.seen_age_ms = _CONTRACT_BALL_SEEN_AGE_LIMIT_MS * 3.0
     _probe("stale_ball", _stale)
 
-    # 6. Agente CAÍDO
+    # 6. Agente CAÍDO: theta correcto, posición correcta, solo is_upright=False
     def _fallen(env):
-        if env.agents:
-            env._agents_state[list(env.agents)[0]].pos = ball + np.array([-260.0, 0.0], np.float32)
-            env._agents_state[list(env.agents)[0]].is_upright = False
+        _set_agent(env, [-260.0, 0.0], theta=0.0, upright=False)
         env._ball.pos[:] = ball; env._ball.seen_age_ms = 0.0
     _probe("fallen_agent", _fallen)
 
@@ -2402,6 +2460,233 @@ def run_contract_guardrails_suite(seed: int) -> List[ContractGuardrailResult]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MÓDULO 15: EXECUTION QUALITY — shoot direction + kinematic continuity
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _t33_shoot_ball_direction(seed: int) -> ContractGuardrailResult:
+    """
+    T33: Después de takeover con playBall_shoot, el balón debe moverse hacia
+    el arco rival (vel_x > 0 en campo estándar).
+
+    Captura el bug "BHuman dispara hacia atrás": verifica que el vector de
+    velocidad del balón al finalizar el shoot apunte en la dirección correcta.
+    También registra robot_pose_field.theta vs agent.theta en ese momento para
+    diagnosticar si la raíz es un theta stale del bridge.
+    """
+    r = ContractGuardrailResult("T33_shoot_ball_direction")
+    backward_shots: List[Dict[str, Any]] = []
+    pose_deltas: List[Dict[str, Any]] = []
+
+    try:
+        env = _make_env(3, seed)   # stage 3: 1v1, hay oponente
+        env.reset(seed=seed)
+        # Posicionar agente frente al arco rival para que BHuman elija shoot
+        ball_pos = np.array([FIELD.x_opp_penalty + 200.0, 0.0], dtype=np.float32)
+        agent_pos = ball_pos + np.array([-300.0, 0.0], dtype=np.float32)
+        _install_state(env, ball_pos, agent_pos)
+        actions = _zero_actions(env)
+        prev_takeover = False
+        prev_ball_pos = env._ball.pos.copy()
+
+        for fi in range(250):
+            res = _safe_step(env, actions)
+            if res is None:
+                break
+            _, _, term, trunc, infos = res
+            info = next(iter(infos.values()), {}) if infos else {}
+            takeover = bool(info.get("takeover_active", False))
+            macro = str(info.get("macro_type", "none"))
+
+            # Capturar theta del agente vs robot_pose_field para diagnóstico
+            if takeover and macro == "playBall_shoot":
+                agents_list = list(env._agents_state.values())
+                if agents_list:
+                    agent_theta = float(agents_list[0].theta)
+                    bridge_pose = info.get("sidecar_robot_pose_field", None)
+                    bridge_theta = float(bridge_pose[2]) if (
+                        isinstance(bridge_pose, (list, tuple)) and len(bridge_pose) >= 3
+                    ) else None
+                    if bridge_theta is not None:
+                        delta_theta = abs(_normalize_angle_val(agent_theta - bridge_theta))
+                        if delta_theta > math.pi / 4:
+                            pose_deltas.append({
+                                "frame": fi,
+                                "agent_theta_deg": round(math.degrees(agent_theta), 1),
+                                "bridge_theta_deg": round(math.degrees(bridge_theta), 1),
+                                "delta_deg": round(math.degrees(delta_theta), 1),
+                            })
+
+            # Al finalizar takeover de shoot, verificar dirección del balón
+            end_reason = str(info.get("last_macro_end_reason", "none"))
+            if prev_takeover and not takeover and end_reason in {"completed", "goal", "out"}:
+                ball_vel_x = float(env._ball.vel[0])
+                ball_speed = float(np.linalg.norm(env._ball.vel))
+                if ball_speed > 50.0 and ball_vel_x < 0.0:
+                    agents_list = list(env._agents_state.values())
+                    agent_theta_now = float(agents_list[0].theta) if agents_list else 0.0
+                    backward_shots.append({
+                        "frame": fi,
+                        "ball_vel_x": round(ball_vel_x, 1),
+                        "ball_vel_y": round(float(env._ball.vel[1]), 1),
+                        "ball_speed": round(ball_speed, 1),
+                        "agent_theta_deg": round(math.degrees(agent_theta_now), 1),
+                        "end_reason": end_reason,
+                    })
+
+            prev_takeover = takeover
+            prev_ball_pos = env._ball.pos.copy()
+
+            if _is_done(term, trunc):
+                env.reset(seed=seed + fi)
+                actions = _zero_actions(env)
+                ball_pos = np.array([FIELD.x_opp_penalty + 200.0, 0.0], dtype=np.float32)
+                _install_state(env, ball_pos, ball_pos + np.array([-300.0, 0.0], dtype=np.float32))
+        env.close()
+    except Exception as exc:
+        r.warnings.append(f"exception: {exc}")
+
+    r.passed = len(backward_shots) == 0
+    r.details = {
+        "backward_shots": backward_shots[:5],
+        "total_backward_shots": len(backward_shots),
+        "pose_theta_mismatches": pose_deltas[:5],
+        "total_theta_mismatches": len(pose_deltas),
+        "note": "backward_shots=0 es correcto; pose_theta_mismatches indica robot_pose_field stale",
+    }
+    status = "OK" if r.passed else f"FAIL ({len(backward_shots)} backward shots)"
+    print(f"  T33 shoot direction   → {status}  theta_mismatches={len(pose_deltas)}")
+    for bs in backward_shots[:2]:
+        print(f"       ⚠ frame={bs['frame']}  vel_x={bs['ball_vel_x']}  "
+              f"agent_theta={bs['agent_theta_deg']}°")
+    for pd in pose_deltas[:2]:
+        print(f"       ⚠ theta mismatch @ frame={pd['frame']}  "
+              f"agent={pd['agent_theta_deg']}°  bridge={pd['bridge_theta_deg']}°  "
+              f"Δ={pd['delta_deg']}°")
+    return r
+
+
+def _normalize_angle_val(angle: float) -> float:
+    """Normaliza ángulo a [-π, π]."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
+def _t34_takeover_kinematic_continuity(seed: int) -> ContractGuardrailResult:
+    """
+    T34: Durante takeover activo, la posición del agente no debe saltar más de
+    max_locomotion_delta_mm por frame (locomotion física plausible).
+    Captura el bug "cinemáticas bruscas" de BHuman.
+
+    También mide max |delta_theta| por frame para detectar si el giro es el
+    problema, ya que una orientación incorrecta provoca correcciones abruptas.
+    """
+    r = ContractGuardrailResult("T34_takeover_kinematic_continuity")
+    # Límite: Nao anda ~300mm/s, a 30fps = 10mm/frame. Ser generoso: 80mm/frame
+    MAX_POS_DELTA_MM   = 80.0
+    MAX_THETA_DELTA_RAD = 0.5   # ~28.6°/frame
+
+    pos_jumps:   List[Dict[str, Any]] = []
+    theta_jumps: List[Dict[str, Any]] = []
+
+    try:
+        env = _make_env(0, seed)
+        env.reset(seed=seed)
+        ball_pos = np.array([0.0, 0.0], dtype=np.float32)
+        _install_state(env, ball_pos, ball_pos + np.array([-400.0, 0.0], dtype=np.float32))
+        actions = _zero_actions(env)
+
+        agents_list = list(env.agents)
+        active_id = agents_list[0] if agents_list else None
+        if active_id is None:
+            r.warnings.append("no agents in env")
+            r.passed = True
+            return r
+
+        prev_pos   = env._agents_state[active_id].pos.copy()
+        prev_theta = float(env._agents_state[active_id].theta)
+
+        for fi in range(500):
+            res = _safe_step(env, actions)
+            if res is None:
+                break
+            _, _, term, trunc, infos = res
+            info = next(iter(infos.values()), {}) if infos else {}
+            takeover = bool(info.get("takeover_active", False))
+
+            if takeover and active_id in env._agents_state:
+                curr_pos   = env._agents_state[active_id].pos.copy()
+                curr_theta = float(env._agents_state[active_id].theta)
+
+                delta_pos = float(np.linalg.norm(curr_pos - prev_pos))
+                delta_theta = abs(_normalize_angle_val(curr_theta - prev_theta))
+
+                if delta_pos > MAX_POS_DELTA_MM:
+                    pos_jumps.append({
+                        "frame": fi,
+                        "delta_mm": round(delta_pos, 1),
+                        "pos_before": [round(float(prev_pos[0]), 1), round(float(prev_pos[1]), 1)],
+                        "pos_after":  [round(float(curr_pos[0]), 1), round(float(curr_pos[1]), 1)],
+                    })
+                if delta_theta > MAX_THETA_DELTA_RAD:
+                    theta_jumps.append({
+                        "frame": fi,
+                        "delta_deg": round(math.degrees(delta_theta), 1),
+                        "theta_before_deg": round(math.degrees(prev_theta), 1),
+                        "theta_after_deg":  round(math.degrees(curr_theta), 1),
+                    })
+
+                prev_pos   = curr_pos.copy()
+                prev_theta = curr_theta
+
+            if _is_done(term, trunc):
+                env.reset(seed=seed + fi)
+                actions = _zero_actions(env)
+                if active_id in env._agents_state:
+                    prev_pos   = env._agents_state[active_id].pos.copy()
+                    prev_theta = float(env._agents_state[active_id].theta)
+        env.close()
+    except Exception as exc:
+        r.warnings.append(f"exception: {exc}")
+
+    r.passed = len(pos_jumps) == 0 and len(theta_jumps) == 0
+    r.details = {
+        "pos_jumps":           pos_jumps[:5],
+        "total_pos_jumps":     len(pos_jumps),
+        "theta_jumps":         theta_jumps[:5],
+        "total_theta_jumps":   len(theta_jumps),
+        "limits": {
+            "max_pos_delta_mm":    MAX_POS_DELTA_MM,
+            "max_theta_delta_deg": round(math.degrees(MAX_THETA_DELTA_RAD), 1),
+        },
+    }
+    status = "OK" if r.passed else (
+        f"FAIL  pos_jumps={len(pos_jumps)}  theta_jumps={len(theta_jumps)}"
+    )
+    print(f"  T34 kinematic cont.   → {status}")
+    for pj in pos_jumps[:2]:
+        print(f"       ⚠ pos jump @ frame={pj['frame']}  delta={pj['delta_mm']}mm")
+    for tj in theta_jumps[:2]:
+        print(f"       ⚠ theta jump @ frame={tj['frame']}  delta={tj['delta_deg']}°")
+    return r
+
+
+def run_execution_quality_suite(seed: int) -> List[ContractGuardrailResult]:
+    """Módulo 15: Execution Quality — verifica dirección de shoot y continuidad cinemática."""
+    print("\n[15] EXECUTION QUALITY")
+    results = [
+        _t33_shoot_ball_direction(seed),
+        _t34_takeover_kinematic_continuity(seed),
+    ]
+    passed = sum(1 for r in results if r.passed)
+    badge  = "✅ ALL PASS" if passed == len(results) else f"❌ {len(results) - passed} FAIL"
+    print(f"  Resultado: {passed}/{len(results)} tests pasaron  → {badge}")
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MÓDULO 14: REPORTER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2419,6 +2704,7 @@ def _verdict(report: DiagnosticsReport) -> str:
         ("pretraining_audit",  "pretraining_audit"),
         ("ball_edge_cases",    "ball_edge_cases"),
         ("physical_stress",    "physical_stress"),
+        ("execution_quality",  "execution_quality"),
     ]:
         suite = getattr(report, suite_key, [])
         n_fail = sum(1 for t in suite if not t.get("passed", True))
@@ -2587,6 +2873,8 @@ def _print_menu():
     print("  13. Physical Stress        (módulo 12, TA-TG)")
     print("  ── CONTRACT GUARDRAILS ────────────────────────────────")
     print("  14. Contract Guardrails    (§1.2 · §2.2 · §2.4)")
+    print("  ── EXECUTION QUALITY ──────────────────────────────────")
+    print("  15. Execution Quality      (T33 shoot dir · T34 kinematic)")
     print("  ─────────────────────────────────────────────────────")
     print("  0. Salir")
     print("-" * 62)
@@ -2700,6 +2988,9 @@ def main() -> None:
             cg = run_contract_guardrails_suite(seed)
             report.contract_guardrails = [asdict(r) for r in cg]
 
+            eq = run_execution_quality_suite(seed)
+            report.execution_quality = [asdict(r) for r in eq]
+
             # Para el veredicto del bridge en suite nueva
             if not report.bridge_alive:
                 # Intenta inferir del pre-training audit
@@ -2779,6 +3070,11 @@ def main() -> None:
             report.contract_guardrails = [asdict(r) for r in cg]
             report.bridge_alive = True
 
+        elif choice == 15:
+            eq = run_execution_quality_suite(seed)
+            report.execution_quality = [asdict(r) for r in eq]
+            report.bridge_alive = True
+
         # ── VEREDICTO FINAL ───────────────────────────────────────────────────
         report.verdict = _verdict(report)
 
@@ -2790,6 +3086,7 @@ def main() -> None:
             ("ball_edge_cases",      "Ball Edge Cases"),
             ("physical_stress",      "Physical Stress"),
             ("contract_guardrails",  "Contract Guardrails"),
+            ("execution_quality",    "Execution Quality"),
         ]:
             suite = getattr(report, suite_attr, [])
             if suite:

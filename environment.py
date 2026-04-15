@@ -18,9 +18,10 @@ Flujo de step():
 
 from __future__ import annotations
 
+import json
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -53,6 +54,37 @@ TAKEOVER_END_REASONS = (
     "game_state_changed",
     "other",
 )
+
+# Instrumentación: saltos de balón / agente y disparos vs target semántico del bridge
+# (sin imponer geometría de juego; solo transporte de métricas para análisis).
+_DIAG_BALL_TELEPORT_JUMP_MM = 520.0
+_DIAG_AGENT_TELEPORT_JUMP_MM = 400.0
+_DIAG_SHOOT_BACKWARD_DOT_THRESH = 0.18
+_DIAG_SHOOT_MIN_VEL_MM_S = 80.0
+_DIAG_SHOOT_MIN_TARGET_DIST_MM = 80.0
+# Rotación brusca del activo durante PREP_SHOOT (walkToBallAndKick + shoot)
+_DIAG_THETA_SNAP_PREP_DEG = 18.0
+# Instrumentación extendida (CSV / offline): saltos suaves, solapes, histeresis control,
+# alineación motion vs cuerpo, bursts de kick, vel. X retrograda (ataque +x).
+_DIAG_BALL_SOFT_JUMP_MM = 120.0
+_DIAG_OVERLAP_SEP_EPS_MM = 6.0
+_DIAG_PENETRATION_EPS_MM = 1.0
+_DIAG_MOTION_VS_BODY_DEG = 22.0
+_DIAG_THETA_SNAP_MOTION_PREP_DEG = 18.0
+_DIAG_RAPID_KICK_PROXY_FRAMES = 12
+_DIAG_POST_KICK_ALIGN_DOT_THRESH = 0.14
+_DIAG_RETROGRADE_VEL_X_MM_S = -95.0
+_DIAG_OPP_PRESSURE_MM = 520.0
+
+
+def _control_owner_from_macro(macro: Any) -> str:
+    if macro is None:
+        return "RL"
+    return "BHUMAN" if macro.takeover_active else ("HANDOFF" if macro.handoff_ready else "RL")
+
+
+def _diag_deg_diff(a_rad: float, b_rad: float) -> float:
+    return float(math.degrees(abs(_normalize_angle(float(a_rad) - float(b_rad)))))
 
 
 def _new_takeover_reason_counts() -> Dict[str, int]:
@@ -181,6 +213,11 @@ class BallPhysics:
     def step(self, ball: BallState, dt: float) -> Tuple[BallState, bool]:
         new_pos = ball.pos + ball.vel * dt
         new_vel = ball.vel * BALL.friction
+
+        # Clamp defensivo: ningún estado inyectado o corrupto debe superar max_speed
+        speed = float(np.linalg.norm(new_vel))
+        if speed > BALL.max_speed:
+            new_vel = new_vel * (BALL.max_speed / speed)
 
         new_pos, new_vel, ball_out = self._handle_boundaries(new_pos, new_vel)
 
@@ -1041,9 +1078,14 @@ class RealSidecarPhysicsExecutor:
         prev_theta = self._smoothed_motion_thetas.get(agent_id)
 
         if prev_target is None or prev_theta is None:
+            # Seedear suavizado usando el estado actual del agente para evitar snaps
+            # cuando el bridge toma control por primera vez.
+            theta_err = _normalize_angle(raw_theta - float(agent.theta))
+            max_seed_step = 0.52  # ~30° por frame (hotfix compatible con plan)
+            seeded_theta = _normalize_angle(float(agent.theta) + float(np.clip(theta_err, -max_seed_step, max_seed_step)))
             self._smoothed_motion_targets[agent_id] = raw_target.copy()
-            self._smoothed_motion_thetas[agent_id] = raw_theta
-            return raw_target, raw_theta
+            self._smoothed_motion_thetas[agent_id] = seeded_theta
+            return raw_target, seeded_theta
 
         target_delta = raw_target - prev_target
         target_delta_norm = float(np.linalg.norm(target_delta))
@@ -2056,6 +2098,44 @@ class NaoSoccerEnv(ParallelEnv):
         self._prev_handoff_ready = False
         self._tkready_streak = 0
 
+        # Por-step: diagnósticos de teletransporte / shoot vs semántica bridge
+        self._diag_step_start_active_id: Optional[str] = None
+        self._diag_step_start_active_pos: Optional[np.ndarray] = None
+        self._diag_ball_step_jump_mm: float = 0.0
+        self._diag_ball_teleport_flag: int = 0
+        self._diag_active_agent_step_jump_mm: float = 0.0
+        self._diag_agent_teleport_flag: int = 0
+        self._diag_shoot_semantic_dot: Optional[float] = None
+        self._diag_shoot_semantic_error: Optional[float] = None
+        self._diag_shoot_backward_flag: int = 0
+        self._diag_step_start_active_theta: Optional[float] = None
+        self._diag_active_agent_theta_step_delta_deg: Optional[float] = None
+        self._diag_theta_snap_prep_flag: int = 0
+        self._diag_ball_agent_center_dist_mm: float = 0.0
+        self._episode_diag_ball_teleport_frames: int = 0
+        self._episode_diag_agent_teleport_frames: int = 0
+        self._episode_diag_shoot_backward_frames: int = 0
+        self._episode_diag_theta_snap_prep_frames: int = 0
+        # Traza extendida (control / geometría / kicks)
+        self._trace_prev_control_owner: str = ""
+        self._diag_frames_since_kick_proxy: int = 999
+        self._diag_post_kick_pending_u: Optional[np.ndarray] = None
+        self._episode_diag_control_owner_changes: int = 0
+        self._episode_diag_ball_overlap_frames: int = 0
+        self._episode_diag_ball_penetration_frames: int = 0
+        self._episode_diag_soft_ball_jump_frames: int = 0
+        self._episode_diag_motion_vs_body_mismatch_frames: int = 0
+        self._episode_diag_theta_snap_motion_prep_frames: int = 0
+        self._episode_diag_rapid_kick_proxy_frames: int = 0
+        self._episode_diag_post_kick_inversion_frames: int = 0
+        self._episode_diag_shoot_vel_retrograde_frames: int = 0
+        self._episode_diag_opp_pressure_frames: int = 0
+        self._episode_diag_post_kick_inversion_frames: int = 0
+        # Desglose reward (último step) + colisión balón + inactivos / activation graph
+        self._last_reward_components_dict: Optional[Dict[str, float]] = None
+        self._diag_ball_collision_tags: str = "none"
+        self._diag_inactive_ball_dists_json: str = "{}"
+
         self.agents: List[str] = []
 
     def observation_space(self, agent):
@@ -2130,6 +2210,27 @@ class NaoSoccerEnv(ParallelEnv):
         self._prev_handoff_ready = False
         self._tkready_streak = 0
         self._ball_collision_skip_agent_id = None
+        self._episode_diag_ball_teleport_frames = 0
+        self._episode_diag_agent_teleport_frames = 0
+        self._episode_diag_shoot_backward_frames = 0
+        self._episode_diag_theta_snap_prep_frames = 0
+        self._trace_prev_control_owner = ""
+        self._diag_frames_since_kick_proxy = 999
+        self._diag_post_kick_pending_u = None
+        self._episode_diag_control_owner_changes = 0
+        self._episode_diag_ball_overlap_frames = 0
+        self._episode_diag_ball_penetration_frames = 0
+        self._episode_diag_soft_ball_jump_frames = 0
+        self._episode_diag_motion_vs_body_mismatch_frames = 0
+        self._episode_diag_theta_snap_motion_prep_frames = 0
+        self._episode_diag_rapid_kick_proxy_frames = 0
+        self._episode_diag_post_kick_inversion_frames = 0
+        self._episode_diag_shoot_vel_retrograde_frames = 0
+        self._episode_diag_opp_pressure_frames = 0
+        self._episode_diag_post_kick_inversion_frames = 0
+        self._last_reward_components_dict = None
+        self._diag_ball_collision_tags = "none"
+        self._diag_inactive_ball_dists_json = "{}"
 
         observations = self._build_observations()
         infos = {aid: {} for aid in self.agents}
@@ -2147,6 +2248,14 @@ class NaoSoccerEnv(ParallelEnv):
             aid: float(np.linalg.norm(self._agents_state[aid].pos - self._ball.pos))
             for aid in self.agents
         }
+        self._diag_step_start_active_id = self._active_agent_id
+        if self._active_agent_id in self._agents_state:
+            ag0 = self._agents_state[self._active_agent_id]
+            self._diag_step_start_active_pos = ag0.pos.copy()
+            self._diag_step_start_active_theta = float(ag0.theta)
+        else:
+            self._diag_step_start_active_pos = None
+            self._diag_step_start_active_theta = None
 
         # ═══════════════════════════════════════════════════════════════
         # 1. RL CONTROL STEP — agents move according to actions
@@ -2304,6 +2413,11 @@ class NaoSoccerEnv(ParallelEnv):
 
                 if self._consecutive_ready_touch_but_walk > 25:
                     self._handoff_mgr.force_end("skill_request_cleared", False)
+                    macro = self._handoff_mgr.macro
+
+                # [HOTFIX 2-DAYS PROD] Si el agente activo cae durante takeover, abortar macro.
+                if self._active_agent_id in self._agents_state and not self._agents_state[self._active_agent_id].is_upright:
+                    self._handoff_mgr.force_end("other", False)
                     macro = self._handoff_mgr.macro
 
             # Takeover execution depends on mode:
@@ -2470,6 +2584,9 @@ class NaoSoccerEnv(ParallelEnv):
                 self._episode_takeover_reason_counts[reason_key] += 1
                 self._last_macro_end_reason = macro.macro_end_reason
                 macro.event_recorded = True
+                # [HOTFIX 2-DAYS PROD] Pulso único: evitar que macro_end_reason/éxito queden “pegados”
+                macro.macro_end_reason = "none"
+                macro.macro_success = None
 
         # ═══════════════════════════════════════════════════════════════
         # 8. UPDATE GAME STATE
@@ -2513,6 +2630,14 @@ class NaoSoccerEnv(ParallelEnv):
         truncateds = {aid: truncated for aid in self.agents}
         terminateds["__all__"] = terminated
         truncateds["__all__"] = truncated
+
+        self._compute_step_diagnostics(
+            goal_scored=goal_scored,
+            goal_conceded=goal_conceded,
+            takeover_kick=takeover_kick,
+            takeover_kick_proxy=takeover_kick_proxy,
+            sidecar_output=sidecar_output,
+        )
 
         observations = self._build_observations(agent_ids=live_agent_ids)
         infos = self._build_infos(
@@ -2943,15 +3068,23 @@ class NaoSoccerEnv(ParallelEnv):
     def _resolve_ball_collisions(self):
         ball = self._ball
         min_sep = AGENT.radius + BALL.radius  # 200 + 100 = 300mm
+        collision_tags: list[str] = []
+        # Si el agente activo está en modo “skip” (kick-like), igual corregimos
+        # penetraciones fuertes para evitar estados físicamente imposibles
+        # (el balón dentro del cuerpo) que bloquean el takeover.
+        strong_pen_override_mm = 20.0
 
         for aid, agent in self._agents_state.items():
             if not agent.is_upright:
                 continue
-            if aid == self._ball_collision_skip_agent_id:
-                continue
             diff = ball.pos - agent.pos
             dist = float(np.linalg.norm(diff))
+            sep = dist - float(min_sep)
+            is_skip = (aid == self._ball_collision_skip_agent_id)
+            if is_skip and not (sep < -strong_pen_override_mm or dist <= 1e-6):
+                continue
             if dist < min_sep and dist > 1e-6:
+                collision_tags.append(f"rl_agent_sep:{aid}" + ("[skip_override]" if is_skip else ""))
                 push_dir = diff / dist
                 ball = BallState(
                     pos=ball.pos + push_dir * (min_sep - dist + 5.0),
@@ -2959,6 +3092,7 @@ class NaoSoccerEnv(ParallelEnv):
                     last_touched_by=ball.last_touched_by,
                 )
             elif dist <= 1e-6:
+                collision_tags.append(f"rl_agent_coincident:{aid}" + ("[skip_override]" if is_skip else ""))
                 push_dir = np.array([math.cos(agent.theta), math.sin(agent.theta)])
                 ball = BallState(
                     pos=agent.pos + push_dir * (min_sep + 5.0),
@@ -2966,12 +3100,13 @@ class NaoSoccerEnv(ParallelEnv):
                     last_touched_by=ball.last_touched_by,
                 )
 
-        for opp in self._opponents_state:
+        for oi, opp in enumerate(self._opponents_state):
             if not opp.is_upright:
                 continue
             diff = ball.pos - opp.pos
             dist = float(np.linalg.norm(diff))
             if dist < min_sep and dist > 1e-6:
+                collision_tags.append(f"opp_sep:{getattr(opp, 'opp_id', oi)}")
                 push_dir = diff / dist
                 ball = BallState(
                     pos=ball.pos + push_dir * (min_sep - dist + 5.0),
@@ -2982,20 +3117,24 @@ class NaoSoccerEnv(ParallelEnv):
         for obstacle in self._static_obstacles:
             diff = ball.pos - obstacle.pos
             dist = float(np.linalg.norm(diff))
-            min_sep = obstacle.radius + BALL.radius
-            if dist < min_sep:
+            osep = obstacle.radius + BALL.radius
+            if dist < osep:
+                oid = getattr(obstacle, "obstacle_id", "obs")
                 if dist <= 1e-6:
+                    collision_tags.append(f"static_obs_coincident:{oid}")
                     push_dir = np.array([1.0, 0.0], dtype=np.float32)
                 else:
+                    collision_tags.append(f"static_obs_sep:{oid}")
                     push_dir = diff / dist
                 reflected = ball.vel - 2.0 * np.dot(ball.vel, push_dir) * push_dir
                 ball = BallState(
-                    pos=obstacle.pos + push_dir * (min_sep + 5.0),
+                    pos=obstacle.pos + push_dir * (osep + 5.0),
                     vel=0.35 * reflected,
                     last_touched_by=ball.last_touched_by,
                     seen_age_ms=ball.seen_age_ms,
                 )
 
+        self._diag_ball_collision_tags = "|".join(collision_tags) if collision_tags else "none"
         return ball
 
     def _nearest_to_ball_opponent(self):
@@ -3048,8 +3187,10 @@ class NaoSoccerEnv(ParallelEnv):
                          ready_touch_but_walk=False,
                          takeover_event_triggered=False):
         from reward import (
-            AgentRewardInfo, TeamRewardInfo,
-            compute_reward, compute_per_agent_reward,
+            AgentRewardInfo,
+            TeamRewardInfo,
+            compute_per_agent_reward,
+            compute_reward,
         )
 
         agents_list = [
@@ -3108,6 +3249,10 @@ class NaoSoccerEnv(ParallelEnv):
             takeover_weight=self._stage.shaping_takeover_w,
             support_weight=self._stage.shaping_support_w,
         )
+        self._last_reward_components_dict = {
+            f"rw_{k}": float(v)
+            for k, v in asdict(team_components).items()
+        }
 
         rewards = {}
         for i, aid in enumerate(self.agents):
@@ -3367,6 +3512,314 @@ class NaoSoccerEnv(ParallelEnv):
             return False
         return self._fov_filter._is_in_fov(agent.pos, agent.theta, self._ball.pos)
 
+    def _compute_step_diagnostics(
+        self,
+        *,
+        goal_scored: bool,
+        goal_conceded: bool,
+        takeover_kick: bool,
+        takeover_kick_proxy: bool,
+        sidecar_output: Any,
+    ) -> None:
+        """
+        Métricas offline (CSV trace / visualizer): teletransportes, shoot semántico,
+        Δθ cuerpo, histeresis RL/HANDOFF/BHUMAN, solape balón–agente, motion vs cuerpo,
+        bursts de kick, alineación post-kick, presión rival.
+        """
+        # Defaults por step (evita valores obsoletos si una rama no corre)
+        self._diag_post_kick_vel_align_dot = None
+        self._diag_post_kick_inversion_flag = 0
+        self._diag_prev_control_owner = self._trace_prev_control_owner or ""
+        self._diag_control_owner_changed = 0
+        self._diag_control_transition = ""
+        self._diag_current_control_owner = "RL"
+        self._diag_active_agent_changed_step = 0
+        self._diag_ball_speed_step_delta = 0.0
+        self._diag_ball_large_jump_flag = 0
+        self._diag_ball_jump_when_kick_proxy_mm = 0.0
+        self._diag_ball_agent_sep_mm = 0.0
+        self._diag_ball_agent_overlap_flag = 0
+        self._diag_ball_agent_penetration_flag = 0
+        self._diag_min_opp_dist_mm = 0.0
+        self._diag_opp_pressure_flag = 0
+        self._diag_motion_walk_theta_deg = None
+        self._diag_motion_walk_theta_vs_body_deg = None
+        self._diag_effective_target_theta_vs_body_deg = None
+        self._diag_skill_target_dir_vs_body_deg = None
+        self._diag_motion_target_dir_vs_body_deg = None
+        self._diag_theta_snap_motion_prep_flag = 0
+        self._diag_rapid_kick_proxy_flag = 0
+        self._diag_sidecar_macro_neq_takeover_macro = 0
+        self._diag_handoff_ready_rl_control_flag = 0
+        self._diag_ball_vel_x_mm_s = float(self._ball.vel[0])
+        self._diag_shoot_vel_retrograde_x_flag = 0
+        self._diag_macro_active_without_takeover_flag = 0
+
+        macro = self._handoff_mgr.macro
+        cur_owner = _control_owner_from_macro(macro)
+        self._diag_current_control_owner = cur_owner
+        prev_owner = self._trace_prev_control_owner
+        if prev_owner:
+            self._diag_control_transition = f"{prev_owner}->{cur_owner}"
+            if prev_owner != cur_owner:
+                self._diag_control_owner_changed = 1
+                self._episode_diag_control_owner_changes += 1
+        else:
+            self._diag_control_transition = f"INIT->{cur_owner}"
+
+        # Alineación semántica en el primer frame **después** de un kick (vel ya integrada)
+        pending_u = self._diag_post_kick_pending_u
+        if pending_u is not None:
+            vs = float(np.linalg.norm(self._ball.vel))
+            if vs >= 25.0:
+                u_vel = (self._ball.vel / vs).astype(np.float64)
+                dot_pk = float(np.dot(u_vel, pending_u.astype(np.float64)))
+                self._diag_post_kick_vel_align_dot = dot_pk
+                if dot_pk < _DIAG_POST_KICK_ALIGN_DOT_THRESH:
+                    self._diag_post_kick_inversion_flag = 1
+                    self._episode_diag_post_kick_inversion_frames += 1
+            self._diag_post_kick_pending_u = None
+
+        p0 = self._prev_ball_pos.astype(np.float64)
+        p1 = self._ball.pos.astype(np.float64)
+        ball_jump = float(np.linalg.norm(p1 - p0))
+        self._diag_ball_step_jump_mm = ball_jump
+        kick_like = bool(takeover_kick or takeover_kick_proxy)
+        ball_teleport = 0
+        if (
+            not goal_scored
+            and not goal_conceded
+            and not self._ball_out_this_step
+            and not kick_like
+            and ball_jump >= _DIAG_BALL_TELEPORT_JUMP_MM
+        ):
+            ball_teleport = 1
+        self._diag_ball_teleport_flag = ball_teleport
+        if ball_teleport:
+            self._episode_diag_ball_teleport_frames += 1
+
+        if (
+            not goal_scored
+            and not goal_conceded
+            and not self._ball_out_this_step
+            and not kick_like
+            and ball_jump >= _DIAG_BALL_SOFT_JUMP_MM
+        ):
+            self._diag_ball_large_jump_flag = 1
+            self._episode_diag_soft_ball_jump_frames += 1
+
+        if kick_like:
+            self._diag_ball_jump_when_kick_proxy_mm = ball_jump
+
+        fsk_prev = int(self._diag_frames_since_kick_proxy)
+        self._diag_fsk_at_step_start = fsk_prev
+        if kick_like:
+            if fsk_prev < _DIAG_RAPID_KICK_PROXY_FRAMES:
+                self._diag_rapid_kick_proxy_flag = 1
+                self._episode_diag_rapid_kick_proxy_frames += 1
+            self._diag_frames_since_kick_proxy = 0
+        else:
+            self._diag_frames_since_kick_proxy = min(fsk_prev + 1, 99999)
+
+        speed_end = float(np.linalg.norm(self._ball.vel))
+        self._diag_ball_speed_step_delta = speed_end - float(self._prev_ball_speed)
+
+        self._diag_active_agent_step_jump_mm = 0.0
+        self._diag_agent_teleport_flag = 0
+        aid0 = self._diag_step_start_active_id
+        pos0 = self._diag_step_start_active_pos
+        if (
+            aid0
+            and pos0 is not None
+            and aid0 in self._agents_state
+        ):
+            pos1 = self._agents_state[aid0].pos.astype(np.float64)
+            aj = float(np.linalg.norm(pos1 - pos0.astype(np.float64)))
+            self._diag_active_agent_step_jump_mm = aj
+            if aj >= _DIAG_AGENT_TELEPORT_JUMP_MM:
+                self._diag_agent_teleport_flag = 1
+                self._episode_diag_agent_teleport_frames += 1
+
+        if aid0 and self._active_agent_id and aid0 != self._active_agent_id:
+            self._diag_active_agent_changed_step = 1
+
+        self._diag_active_agent_theta_step_delta_deg = None
+        self._diag_theta_snap_prep_flag = 0
+        prep_shoot = False
+        th0 = self._diag_step_start_active_theta
+        th1_body: Optional[float] = None
+        if aid0 and aid0 in self._agents_state and th0 is not None:
+            th1_body = float(self._agents_state[aid0].theta)
+            dtheta = abs(_normalize_angle(th1_body - float(th0)))
+            deg = math.degrees(dtheta)
+            self._diag_active_agent_theta_step_delta_deg = deg
+            if sidecar_output is not None:
+                sk = str(getattr(sidecar_output, "skill_request", "none") or "none")
+                mo = str(getattr(sidecar_output, "motion_request", "none") or "none")
+                prep_shoot = sk == "shoot" and mo == "walkToBallAndKick"
+            if prep_shoot and deg >= _DIAG_THETA_SNAP_PREP_DEG:
+                self._diag_theta_snap_prep_flag = 1
+                self._episode_diag_theta_snap_prep_frames += 1
+
+        self._diag_ball_agent_center_dist_mm = 0.0
+        if self._active_agent_id in self._agents_state:
+            self._diag_ball_agent_center_dist_mm = float(
+                np.linalg.norm(
+                    self._ball.pos - self._agents_state[self._active_agent_id].pos
+                )
+            )
+            sep = float(
+                self._diag_ball_agent_center_dist_mm - (AGENT.radius + BALL.radius)
+            )
+            self._diag_ball_agent_sep_mm = sep
+            if sep < _DIAG_OVERLAP_SEP_EPS_MM:
+                self._diag_ball_agent_overlap_flag = 1
+                self._episode_diag_ball_overlap_frames += 1
+            if sep < -_DIAG_PENETRATION_EPS_MM:
+                self._diag_ball_agent_penetration_flag = 1
+                self._episode_diag_ball_penetration_frames += 1
+
+        # Presión rival sobre el activo
+        if self._active_agent_id in self._agents_state:
+            ap = self._agents_state[self._active_agent_id].pos
+            mind = float("inf")
+            for opp in self._opponents_state:
+                d = float(np.linalg.norm(opp.pos - ap))
+                mind = min(mind, d)
+            if mind < float("inf"):
+                self._diag_min_opp_dist_mm = mind
+                if mind <= _DIAG_OPP_PRESSURE_MM:
+                    self._diag_opp_pressure_flag = 1
+                    self._episode_diag_opp_pressure_frames += 1
+            else:
+                self._diag_min_opp_dist_mm = -1.0
+
+        # Tensión contrato: listo para handoff pero la física del step sigue en RL
+        if macro.handoff_ready and not macro.takeover_active and cur_owner == "RL":
+            self._diag_handoff_ready_rl_control_flag = 1
+
+        if macro.macro_active and not macro.takeover_active:
+            self._diag_macro_active_without_takeover_flag = 1
+
+        if sidecar_output is not None:
+            sm = str(getattr(sidecar_output, "macro_type", "none") or "none")
+            tm = str(macro.macro_type or "none")
+            if macro.takeover_active and sm != "none" and tm != "none" and sm != tm:
+                self._diag_sidecar_macro_neq_takeover_macro = 1
+
+        # Motion / skill direcciones vs cuerpo (activo al **fin** del step)
+        if sidecar_output is not None and self._active_agent_id in self._agents_state:
+            agent = self._agents_state[self._active_agent_id]
+            body_th = float(agent.theta)
+            mwt = getattr(sidecar_output, "motion_walk_target", None)
+            if isinstance(mwt, (list, tuple)) and len(mwt) >= 3:
+                try:
+                    mw_rad = float(mwt[2])
+                    self._diag_motion_walk_theta_deg = math.degrees(mw_rad)
+                    dmw = _diag_deg_diff(mw_rad, body_th)
+                    self._diag_motion_walk_theta_vs_body_deg = dmw
+                    if prep_shoot and dmw >= _DIAG_THETA_SNAP_MOTION_PREP_DEG:
+                        self._diag_theta_snap_motion_prep_flag = 1
+                        self._episode_diag_theta_snap_motion_prep_frames += 1
+                    elif dmw >= _DIAG_MOTION_VS_BODY_DEG:
+                        self._episode_diag_motion_vs_body_mismatch_frames += 1
+                except (TypeError, ValueError):
+                    pass
+
+            if self._sidecar_physics is not None:
+                try:
+                    _, eff_th = self._sidecar_physics._resolve_motion_target(
+                        agent, self._ball, sidecar_output, SIM.dt
+                    )
+                    self._diag_effective_target_theta_vs_body_deg = _diag_deg_diff(
+                        float(eff_th), body_th
+                    )
+                except Exception:
+                    pass
+
+            mtd = getattr(sidecar_output, "motion_target_direction", None)
+            if mtd is not None and self._sidecar_physics is not None:
+                try:
+                    _, op_th = self._sidecar_physics._operational_robot_pose(
+                        agent, sidecar_output
+                    )
+                    abs_m = float(mtd)
+                    th_m = _normalize_angle(float(op_th) + abs_m)
+                    self._diag_motion_target_dir_vs_body_deg = _diag_deg_diff(
+                        th_m, body_th
+                    )
+                except Exception:
+                    pass
+
+            std = getattr(sidecar_output, "skill_target_direction", None)
+            if std is not None:
+                try:
+                    self._diag_skill_target_dir_vs_body_deg = _diag_deg_diff(
+                        float(std), body_th
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        self._diag_shoot_semantic_dot = None
+        self._diag_shoot_semantic_error = None
+        self._diag_shoot_backward_flag = 0
+        u_tgt_for_pending: Optional[np.ndarray] = None
+        if (
+            sidecar_output is not None
+            and self._sidecar_physics is not None
+            and self._active_agent_id in self._agents_state
+            and kick_like
+        ):
+            skill = str(getattr(sidecar_output, "skill_request", "none") or "none")
+            eff_macro = _effective_sidecar_macro_type(
+                skill,
+                getattr(sidecar_output, "macro_type", "none"),
+                getattr(sidecar_output, "motion_request", "none"),
+            )
+            if skill == "shoot" or eff_macro == "playBall_shoot":
+                agent = self._agents_state[self._active_agent_id]
+                tgt = self._sidecar_physics._resolve_playball_ball_target(
+                    agent, self._ball, sidecar_output
+                )
+                vel = self._ball.vel
+                vs = float(np.linalg.norm(vel))
+                if tgt is not None and vs >= _DIAG_SHOOT_MIN_VEL_MM_S:
+                    u_vel = (vel / vs).astype(np.float64)
+                    delta = tgt.astype(np.float64) - self._ball.pos.astype(np.float64)
+                    nd = float(np.linalg.norm(delta))
+                    if nd >= _DIAG_SHOOT_MIN_TARGET_DIST_MM:
+                        u_tgt = (delta / nd).astype(np.float64)
+                        u_tgt_for_pending = u_tgt.copy()
+                        dot = float(np.dot(u_vel, u_tgt))
+                        self._diag_shoot_semantic_dot = dot
+                        self._diag_shoot_semantic_error = max(0.0, 1.0 - dot)
+                        if dot < _DIAG_SHOOT_BACKWARD_DOT_THRESH:
+                            self._diag_shoot_backward_flag = 1
+                            self._episode_diag_shoot_backward_frames += 1
+                if float(self._ball.vel[0]) <= _DIAG_RETROGRADE_VEL_X_MM_S:
+                    self._diag_shoot_vel_retrograde_x_flag = 1
+                    self._episode_diag_shoot_vel_retrograde_frames += 1
+
+        if kick_like and u_tgt_for_pending is not None:
+            self._diag_post_kick_pending_u = u_tgt_for_pending.astype(np.float64)
+
+        # Distancias balón → agentes RL **no** activos (multi-agente / relevos)
+        inactive: Dict[str, float] = {}
+        for aid in self.agents:
+            if aid == self._active_agent_id:
+                continue
+            ag_other = self._agents_state.get(aid)
+            if ag_other is None or not ag_other.is_upright:
+                continue
+            inactive[aid] = float(
+                round(float(np.linalg.norm(self._ball.pos - ag_other.pos)), 1)
+            )
+        self._diag_inactive_ball_dists_json = json.dumps(
+            inactive, separators=(",", ":")
+        )[:500]
+
+        self._trace_prev_control_owner = cur_owner
+
     def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None,
                      playball_entry=False, ready_but_walk=False,
                      ready_touch_but_walk=False, pending_kick_hold=False,
@@ -3499,7 +3952,167 @@ class NaoSoccerEnv(ParallelEnv):
             ),
             "execution_mode": self._execution_mode,
             "sidecar_active": self._sidecar is not None,
+            # Diagnósticos geometry / bridge (ver takeover_trace + docs)
+            "diag_ball_step_jump_mm": float(self._diag_ball_step_jump_mm),
+            "diag_ball_teleport_flag": int(self._diag_ball_teleport_flag),
+            "diag_active_agent_step_jump_mm": float(self._diag_active_agent_step_jump_mm),
+            "diag_agent_teleport_flag": int(self._diag_agent_teleport_flag),
+            "diag_shoot_semantic_dot": self._diag_shoot_semantic_dot,
+            "diag_shoot_semantic_error": self._diag_shoot_semantic_error,
+            "diag_shoot_backward_flag": int(self._diag_shoot_backward_flag),
+            "episode_diag_ball_teleport_frames": self._episode_diag_ball_teleport_frames,
+            "episode_diag_agent_teleport_frames": self._episode_diag_agent_teleport_frames,
+            "episode_diag_shoot_backward_frames": self._episode_diag_shoot_backward_frames,
+            "episode_diag_ball_teleport_rate": (
+                self._episode_diag_ball_teleport_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_agent_teleport_rate": (
+                self._episode_diag_agent_teleport_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_shoot_backward_rate": (
+                self._episode_diag_shoot_backward_frames / max(1, self._game.step_count)
+            ),
+            "diag_active_agent_theta_step_delta_deg": self._diag_active_agent_theta_step_delta_deg,
+            "diag_theta_snap_prep_flag": int(self._diag_theta_snap_prep_flag),
+            "diag_ball_agent_center_dist_mm": float(self._diag_ball_agent_center_dist_mm),
+            "episode_diag_theta_snap_prep_frames": self._episode_diag_theta_snap_prep_frames,
+            "episode_diag_theta_snap_prep_rate": (
+                self._episode_diag_theta_snap_prep_frames / max(1, self._game.step_count)
+            ),
+            # --- Diagnósticos extendidos (traza CSV / análisis sin visualizer) ---
+            "diag_prev_control_owner": str(getattr(self, "_diag_prev_control_owner", "") or ""),
+            "diag_current_control_owner": str(getattr(self, "_diag_current_control_owner", "RL") or "RL"),
+            "diag_control_owner_changed": int(getattr(self, "_diag_control_owner_changed", 0) or 0),
+            "diag_control_transition": str(getattr(self, "_diag_control_transition", "") or ""),
+            "episode_diag_control_owner_changes": int(
+                getattr(self, "_episode_diag_control_owner_changes", 0) or 0
+            ),
+            "diag_active_agent_changed_step": int(
+                getattr(self, "_diag_active_agent_changed_step", 0) or 0
+            ),
+            "diag_ball_speed_step_delta": float(getattr(self, "_diag_ball_speed_step_delta", 0.0) or 0.0),
+            "diag_ball_large_jump_flag": int(getattr(self, "_diag_ball_large_jump_flag", 0) or 0),
+            "diag_ball_jump_when_kick_proxy_mm": float(
+                getattr(self, "_diag_ball_jump_when_kick_proxy_mm", 0.0) or 0.0
+            ),
+            "diag_ball_agent_sep_mm": float(getattr(self, "_diag_ball_agent_sep_mm", 0.0) or 0.0),
+            "diag_ball_agent_overlap_flag": int(getattr(self, "_diag_ball_agent_overlap_flag", 0) or 0),
+            "diag_ball_agent_penetration_flag": int(
+                getattr(self, "_diag_ball_agent_penetration_flag", 0) or 0
+            ),
+            "diag_min_opp_dist_mm": float(getattr(self, "_diag_min_opp_dist_mm", 0.0) or 0.0),
+            "diag_opp_pressure_flag": int(getattr(self, "_diag_opp_pressure_flag", 0) or 0),
+            "diag_motion_walk_theta_deg": getattr(self, "_diag_motion_walk_theta_deg", None),
+            "diag_motion_walk_theta_vs_body_deg": getattr(
+                self, "_diag_motion_walk_theta_vs_body_deg", None
+            ),
+            "diag_effective_target_theta_vs_body_deg": getattr(
+                self, "_diag_effective_target_theta_vs_body_deg", None
+            ),
+            "diag_skill_target_dir_vs_body_deg": getattr(
+                self, "_diag_skill_target_dir_vs_body_deg", None
+            ),
+            "diag_motion_target_dir_vs_body_deg": getattr(
+                self, "_diag_motion_target_dir_vs_body_deg", None
+            ),
+            "diag_theta_snap_motion_prep_flag": int(
+                getattr(self, "_diag_theta_snap_motion_prep_flag", 0) or 0
+            ),
+            "diag_frames_since_kick_proxy": int(getattr(self, "_diag_fsk_at_step_start", 999) or 999),
+            "diag_rapid_kick_proxy_flag": int(getattr(self, "_diag_rapid_kick_proxy_flag", 0) or 0),
+            "diag_sidecar_macro_neq_takeover_macro": int(
+                getattr(self, "_diag_sidecar_macro_neq_takeover_macro", 0) or 0
+            ),
+            "diag_handoff_ready_rl_control_flag": int(
+                getattr(self, "_diag_handoff_ready_rl_control_flag", 0) or 0
+            ),
+            "diag_macro_active_without_takeover_flag": int(
+                getattr(self, "_diag_macro_active_without_takeover_flag", 0) or 0
+            ),
+            "diag_ball_vel_x_mm_s": float(getattr(self, "_diag_ball_vel_x_mm_s", 0.0) or 0.0),
+            "diag_shoot_vel_retrograde_x_flag": int(
+                getattr(self, "_diag_shoot_vel_retrograde_x_flag", 0) or 0
+            ),
+            "diag_post_kick_vel_align_dot": getattr(self, "_diag_post_kick_vel_align_dot", None),
+            "diag_post_kick_inversion_flag": int(
+                getattr(self, "_diag_post_kick_inversion_flag", 0) or 0
+            ),
+            "episode_diag_ball_overlap_frames": int(
+                getattr(self, "_episode_diag_ball_overlap_frames", 0) or 0
+            ),
+            "episode_diag_ball_penetration_frames": int(
+                getattr(self, "_episode_diag_ball_penetration_frames", 0) or 0
+            ),
+            "episode_diag_soft_ball_jump_frames": int(
+                getattr(self, "_episode_diag_soft_ball_jump_frames", 0) or 0
+            ),
+            "episode_diag_motion_vs_body_mismatch_frames": int(
+                getattr(self, "_episode_diag_motion_vs_body_mismatch_frames", 0) or 0
+            ),
+            "episode_diag_theta_snap_motion_prep_frames": int(
+                getattr(self, "_episode_diag_theta_snap_motion_prep_frames", 0) or 0
+            ),
+            "episode_diag_rapid_kick_proxy_frames": int(
+                getattr(self, "_episode_diag_rapid_kick_proxy_frames", 0) or 0
+            ),
+            "episode_diag_post_kick_inversion_frames": int(
+                getattr(self, "_episode_diag_post_kick_inversion_frames", 0) or 0
+            ),
+            "episode_diag_shoot_vel_retrograde_frames": int(
+                getattr(self, "_episode_diag_shoot_vel_retrograde_frames", 0) or 0
+            ),
+            "episode_diag_opp_pressure_frames": int(
+                getattr(self, "_episode_diag_opp_pressure_frames", 0) or 0
+            ),
+            "episode_diag_ball_overlap_rate": (
+                self._episode_diag_ball_overlap_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_ball_penetration_rate": (
+                self._episode_diag_ball_penetration_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_soft_ball_jump_rate": (
+                self._episode_diag_soft_ball_jump_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_motion_vs_body_mismatch_rate": (
+                self._episode_diag_motion_vs_body_mismatch_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_theta_snap_motion_prep_rate": (
+                self._episode_diag_theta_snap_motion_prep_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_rapid_kick_proxy_rate": (
+                self._episode_diag_rapid_kick_proxy_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_post_kick_inversion_rate": (
+                self._episode_diag_post_kick_inversion_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_shoot_vel_retrograde_rate": (
+                self._episode_diag_shoot_vel_retrograde_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_opp_pressure_rate": (
+                self._episode_diag_opp_pressure_frames / max(1, self._game.step_count)
+            ),
+            "episode_diag_control_owner_change_rate": (
+                self._episode_diag_control_owner_changes / max(1, self._game.step_count)
+            ),
+            "diag_ball_collision_tags": str(
+                getattr(self, "_diag_ball_collision_tags", "none") or "none"
+            ),
+            "diag_inactive_ball_dists_json": str(
+                getattr(self, "_diag_inactive_ball_dists_json", "{}") or "{}"
+            ),
+            "diag_activation_graph_len": 0,
+            "diag_activation_states": "",
+            "diag_activation_options": "",
+            "diag_activation_zweikampf_flag": 0,
+            "diag_macro_from_activation_graph": "none",
+            "diag_macro_bridge_vs_activation_flag": 0,
         }
+        from reward import RewardComponents
+
+        _rwd = self._last_reward_components_dict or {}
+        for _fname in RewardComponents.__dataclass_fields__:
+            _k = f"rw_{_fname}"
+            base_info[_k] = float(_rwd.get(_k, 0.0) or 0.0)
         if self._active_agent_id in self._agents_state:
             active_agent = self._agents_state[self._active_agent_id]
             ball_delta = self._ball.pos - active_agent.pos
@@ -3560,6 +4173,29 @@ class NaoSoccerEnv(ParallelEnv):
                 n.to_dict() if hasattr(n, "to_dict") else str(n)
                 for n in sidecar_output.activation_graph
             ]
+            _ag_nodes = list(sidecar_output.activation_graph or [])
+            base_info["diag_activation_graph_len"] = len(_ag_nodes)
+            _states = sorted({n.state for n in _ag_nodes if getattr(n, "state", "")})
+            _options = sorted({n.option for n in _ag_nodes if getattr(n, "option", "")})
+            base_info["diag_activation_states"] = "|".join(_states)[:320]
+            base_info["diag_activation_options"] = "|".join(_options)[:320]
+            base_info["diag_activation_zweikampf_flag"] = int(
+                any("zweikampf" in (s or "").lower() for s in _states)
+            )
+            from bhuman_sidecar import infer_real_macro_type
+
+            _inf_macro = infer_real_macro_type(
+                str(sidecar_output.skill_request or "none"),
+                str(sidecar_output.motion_request or "none"),
+                list(sidecar_output.activation_graph or []),
+            )
+            base_info["diag_macro_from_activation_graph"] = str(_inf_macro)
+            _br_macro = str(sidecar_output.macro_type or "none")
+            base_info["diag_macro_bridge_vs_activation_flag"] = int(
+                _br_macro not in ("none", "")
+                and _inf_macro not in ("none", "")
+                and _br_macro != _inf_macro
+            )
             base_info["sidecar_kick_type"] = sidecar_output.kick_type
             base_info["sidecar_kick_length"] = sidecar_output.kick_length
             base_info["sidecar_kick_length_raw"] = getattr(

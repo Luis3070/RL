@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
@@ -17,6 +17,14 @@ def _to_float(row: dict[str, str], key: str) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _to_int(row: dict[str, str], key: str) -> int:
+    raw = row.get(key, "")
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _load_csv(path: Path) -> list[dict[str, str]]:
@@ -71,6 +79,246 @@ def _count_oscillation_events(rows: list[dict[str, str]]) -> tuple[int, int]:
             "theta": theta,
         }
     return bearing_flips, heading_jumps
+
+
+# Columnas de flags por step (sumar por episodio) — instrumentación extendida
+_TRACE_DIAG_FLAG_SUM_KEYS: tuple[str, ...] = (
+    "diag_ball_teleport_flag",
+    "diag_agent_teleport_flag",
+    "diag_shoot_backward_flag",
+    "diag_theta_snap_prep_flag",
+    "diag_control_owner_changed",
+    "diag_active_agent_changed_step",
+    "diag_ball_large_jump_flag",
+    "diag_ball_agent_overlap_flag",
+    "diag_ball_agent_penetration_flag",
+    "diag_opp_pressure_flag",
+    "diag_theta_snap_motion_prep_flag",
+    "diag_rapid_kick_proxy_flag",
+    "diag_sidecar_macro_neq_takeover_macro",
+    "diag_handoff_ready_rl_control_flag",
+    "diag_macro_active_without_takeover_flag",
+    "diag_shoot_vel_retrograde_x_flag",
+    "diag_post_kick_inversion_flag",
+)
+
+# Tasas / contadores episódicos (tomar última fila del episodio en la traza)
+_TRACE_DIAG_LAST_ROW_KEYS: tuple[str, ...] = (
+    "episode_diag_control_owner_changes",
+    "episode_diag_ball_teleport_frames",
+    "episode_diag_agent_teleport_frames",
+    "episode_diag_shoot_backward_frames",
+    "episode_diag_theta_snap_prep_frames",
+    "episode_diag_ball_overlap_frames",
+    "episode_diag_ball_penetration_frames",
+    "episode_diag_soft_ball_jump_frames",
+    "episode_diag_motion_vs_body_mismatch_frames",
+    "episode_diag_theta_snap_motion_prep_frames",
+    "episode_diag_rapid_kick_proxy_frames",
+    "episode_diag_post_kick_inversion_frames",
+    "episode_diag_shoot_vel_retrograde_frames",
+    "episode_diag_opp_pressure_frames",
+    "episode_diag_ball_overlap_rate",
+    "episode_diag_ball_penetration_rate",
+    "episode_diag_soft_ball_jump_rate",
+    "episode_diag_motion_vs_body_mismatch_rate",
+    "episode_diag_theta_snap_motion_prep_rate",
+    "episode_diag_rapid_kick_proxy_rate",
+    "episode_diag_post_kick_inversion_rate",
+    "episode_diag_shoot_vel_retrograde_rate",
+    "episode_diag_opp_pressure_rate",
+    "episode_diag_control_owner_change_rate",
+)
+
+
+def _trace_has_extended_diagnostics(rows: list[dict[str, str]]) -> bool:
+    if not rows:
+        return False
+    keys = rows[0].keys()
+    return "diag_control_transition" in keys and "diag_ball_agent_sep_mm" in keys
+
+
+def _trace_has_reward_physics_columns(rows: list[dict[str, str]]) -> bool:
+    if not rows:
+        return False
+    keys = rows[0].keys()
+    return "rw_total" in keys and "diag_ball_collision_tags" in keys
+
+
+def summarize_trace_reward_physics(rows: list[dict[str, str]]) -> None:
+    """Reward por componente + resolución de colisión balón (nuevo env)."""
+    if not _trace_has_reward_physics_columns(rows):
+        return
+    print("\n--- trace_reward_physics ---")
+    n = len(rows)
+    coll = Counter()
+    for row in rows:
+        tag = (row.get("diag_ball_collision_tags") or "none").strip()
+        if tag and tag != "none":
+            for part in tag.split("|"):
+                coll[part] += 1
+    if coll:
+        print(f"ball_collision_tag_steps={sum(coll.values())} unique_tags={len(coll)}")
+        print("  top=" + ", ".join(f"{k}:{v}" for k, v in coll.most_common(10)))
+    else:
+        print("ball_collision_tags=(none in trace sample)")
+
+    zweik = sum(1 for row in rows if _to_int(row, "diag_activation_zweikampf_flag"))
+    print(f"activation_zweikampf_steps={zweik} ({zweik / max(1, n):.4%} of rows)")
+
+    rw_keys = (
+        "rw_ready_but_walk_penalty",
+        "rw_takeover_success",
+        "rw_takeover_failure",
+        "rw_handoff_alignment",
+        "rw_approach_ball",
+    )
+    for key in rw_keys:
+        vals = [abs(_to_float(row, key)) for row in rows]
+        nz = sum(1 for v in vals if v > 1e-9)
+        if nz:
+            print(
+                f"{key} non_zero={nz} mean_abs={sum(vals) / len(vals):.5f} "
+                f"max_abs={max(vals):.5f}"
+            )
+
+
+def summarize_trace_extended_diagnostics(
+    rows: list[dict[str, str]],
+    *,
+    top_episodes: int,
+) -> None:
+    """Resumen de la telemetría extendida (CSV post-instrumentación)."""
+    if not _trace_has_extended_diagnostics(rows):
+        print(
+            "\ntrace_diagnostics=skipped "
+            "(no hay columnas extendidas; re-ejecuta entrenamiento con el env actual)"
+        )
+        return
+
+    print("\n--- trace_diagnostics (instrumentación extendida) ---")
+    n = len(rows)
+    print(f"diag_rows={n}")
+
+    # Totales globales (conteo de steps con flag)
+    print("global_flag_steps:")
+    for key in _TRACE_DIAG_FLAG_SUM_KEYS:
+        c = sum(1 for row in rows if _to_int(row, key) != 0)
+        if c:
+            print(f"  {key}={c} ({c / max(1, n):.4%} of rows)")
+
+    # Distribución de transiciones de control (muestra)
+    trans = Counter(
+        (row.get("diag_control_transition") or "").strip()
+        for row in rows
+        if (row.get("diag_control_transition") or "").strip()
+        and (row.get("diag_control_transition") or "")[:4] != "INIT"
+    )
+    if trans:
+        print("control_transition_top=" + ", ".join(f"{k}:{v}" for k, v in trans.most_common(12)))
+
+    # Agregados continuos
+    seps = [_to_float(r, "diag_ball_agent_sep_mm") for r in rows if r.get("diag_ball_agent_sep_mm", "") != ""]
+    if seps:
+        ss = sorted(seps)
+        p05_i = max(0, min(len(ss) - 1, int(0.05 * max(len(ss) - 1, 1))))
+        med_i = len(ss) // 2
+        print(
+            "ball_agent_sep_mm="
+            f"min={min(ss):.1f} p05={ss[p05_i]:.1f} "
+            f"median={ss[med_i]:.1f} "
+            f"mean={sum(ss) / len(ss):.1f}"
+        )
+    mvb = []
+    for r in rows:
+        raw = r.get("diag_motion_walk_theta_vs_body_deg", "")
+        if raw not in ("", None):
+            try:
+                mvb.append(abs(float(raw)))
+            except (TypeError, ValueError):
+                pass
+    if mvb:
+        sm = sorted(mvb)
+        p95_i = max(0, min(len(sm) - 1, int(0.95 * max(len(sm) - 1, 1))))
+        print(
+            "motion_walk_theta_vs_body_abs_deg="
+            f"max={max(sm):.1f} p95={sm[p95_i]:.1f} "
+            f"mean={sum(sm) / len(sm):.1f}"
+        )
+    post_dots = []
+    for r in rows:
+        raw = r.get("diag_post_kick_vel_align_dot", "")
+        if raw not in ("", None):
+            try:
+                post_dots.append(float(raw))
+            except (TypeError, ValueError):
+                pass
+    if post_dots:
+        bad = sum(1 for d in post_dots if d < 0.2)
+        print(
+            f"post_kick_vel_align_dot n={len(post_dots)} "
+            f"mean={sum(post_dots) / len(post_dots):.3f} "
+            f"lt0.2={bad} ({bad / len(post_dots):.2%})"
+        )
+
+    # Por episodio
+    by_ep: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        by_ep[str(row.get("episode", ""))].append(row)
+
+    ep_scores: list[tuple[float, str, dict[str, float | int]]] = []
+    for ep, ep_rows in by_ep.items():
+        if not ep or ep_rows is None:
+            continue
+        ep_rows = sorted(ep_rows, key=lambda r: _to_int(r, "env_step"))
+        last = ep_rows[-1]
+        sums: dict[str, int] = {k: sum(_to_int(r, k) for r in ep_rows) for k in _TRACE_DIAG_FLAG_SUM_KEYS}
+        last_snap = {k: _to_float(last, k) for k in _TRACE_DIAG_LAST_ROW_KEYS if k in last}
+        steps = len(ep_rows)
+        # Puntuación heurística para ordenar episodios “dolorosos”
+        score = float(
+            sums["diag_ball_agent_penetration_flag"] * 5.0
+            + sums["diag_post_kick_inversion_flag"] * 4.0
+            + sums["diag_rapid_kick_proxy_flag"] * 3.0
+            + sums["diag_ball_teleport_flag"] * 3.0
+            + sums["diag_control_owner_changed"] * 1.5
+            + sums["diag_theta_snap_motion_prep_flag"] * 1.2
+            + sums["diag_shoot_vel_retrograde_x_flag"] * 2.0
+            + sums["diag_ball_agent_overlap_flag"] * 0.5
+            + _to_float(last, "episode_diag_control_owner_change_rate") * 50.0
+        )
+        ep_scores.append(
+            (
+                score,
+                ep,
+                {
+                    "steps": steps,
+                    "sums": sums,
+                    "last": last_snap,
+                },
+            )
+        )
+
+    ep_scores.sort(key=lambda t: -t[0])
+    print(f"\nepisode_diag_ranking (top {top_episodes} by heuristic pain_score):")
+    print(
+        "  columns: ep | score | steps | ctlChg | penetr | overlap | rapidKick | "
+        "postInv | retroX | motSnap | ctlChgRate(last)"
+    )
+    for score, ep, pack in ep_scores[: max(1, top_episodes)]:
+        s: dict[str, int] = pack["sums"]
+        lr: dict[str, float] = pack["last"]
+        print(
+            f"  ep{ep} score={score:.1f} steps={pack['steps']} "
+            f"ctlChg={s['diag_control_owner_changed']} "
+            f"penetr={s['diag_ball_agent_penetration_flag']} "
+            f"overlap={s['diag_ball_agent_overlap_flag']} "
+            f"rapidKick={s['diag_rapid_kick_proxy_flag']} "
+            f"postInv={s['diag_post_kick_inversion_flag']} "
+            f"retroX={s['diag_shoot_vel_retrograde_x_flag']} "
+            f"motSnap={s['diag_theta_snap_motion_prep_flag']} "
+            f"ctlChgRate={lr.get('episode_diag_control_owner_change_rate', 0.0):.4f}"
+        )
 
 
 def _best_window(rows: list[dict[str, str]], window: int, key: str) -> tuple[int, int, float]:
@@ -156,7 +404,7 @@ def summarize_metrics(run_dir: Path, window: int) -> None:
     )
 
 
-def summarize_trace(run_dir: Path, bucket_mm: int) -> None:
+def summarize_trace(run_dir: Path, bucket_mm: int, top_episodes: int) -> None:
     trace_path = run_dir / TRACE_FILE_NAME
     if not trace_path.exists():
         print(f"\ntrace={trace_path} (missing)")
@@ -294,6 +542,9 @@ def summarize_trace(run_dir: Path, bucket_mm: int) -> None:
                 f"max={max(execto_ball_gaps):.1f}"
             )
 
+    summarize_trace_extended_diagnostics(rows, top_episodes=top_episodes)
+    summarize_trace_reward_physics(rows)
+
 
 def resolve_run_dir(path_str: str) -> Path:
     path = Path(path_str).resolve()
@@ -307,11 +558,17 @@ def main() -> None:
     parser.add_argument("run_path", help="Run directory or metrics.csv path")
     parser.add_argument("--window", type=int, default=50, help="Window size for first/middle/last summary")
     parser.add_argument("--bucket-mm", type=int, default=100, help="Bucket size for WalkTo/ShootTo target clustering")
+    parser.add_argument(
+        "--top-episodes",
+        type=int,
+        default=20,
+        help="Cuántos episodios listar en el ranking de diagnósticos extendidos",
+    )
     args = parser.parse_args()
 
     run_dir = resolve_run_dir(args.run_path)
     summarize_metrics(run_dir, max(1, args.window))
-    summarize_trace(run_dir, max(1, args.bucket_mm))
+    summarize_trace(run_dir, max(1, args.bucket_mm), max(1, args.top_episodes))
 
 
 if __name__ == "__main__":

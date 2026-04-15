@@ -1227,6 +1227,15 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
     if initial_stage > 0:
         env_wrapper.set_curriculum_stage(initial_stage)
 
+    # Incident dumper (JSON) — captura ring-buffer ante anomalías.
+    incident_dumper = None
+    try:
+        from incident_dumper import IncidentDumper
+
+        incident_dumper = IncidentDumper.maybe_create(str(getattr(logger, "_dir", "")))
+    except Exception:
+        incident_dumper = None
+
     total_env_steps    = 0
     episode            = 0
     steps_since_update  = 0
@@ -1460,6 +1469,13 @@ def training_loop(env_wrapper: NaoSoccerEnvWrapper,
                 sample          = next(iter(infos.values()))
                 if trace_logger is not None:
                     trace_logger.log_step(
+                        episode=episode + 1,
+                        stage_id=env_wrapper.curriculum_manager.current_stage.stage_id,
+                        stage_name=env_wrapper.curriculum_manager.current_stage.name,
+                        info=sample,
+                    )
+                if incident_dumper is not None:
+                    incident_dumper.observe(
                         episode=episode + 1,
                         stage_id=env_wrapper.curriculum_manager.current_stage.stage_id,
                         stage_name=env_wrapper.curriculum_manager.current_stage.name,

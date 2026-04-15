@@ -140,6 +140,7 @@ class BallConfig:
     radius:        float = 100.0    # mm
     friction:      float = 0.9867   # factor de fricción por paso (dt=0.033s)
     min_speed:     float = 10.0     # mm/s — por debajo se considera quieto
+    max_speed:     float = 5000.0   # mm/s — clamp defensivo (~3× kick máx 1800 mm/s)
 
 
 BALL = BallConfig()

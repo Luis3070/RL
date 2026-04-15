@@ -1,0 +1,715 @@
+{
+  "timestamp": "2026-04-14 20:42:28",
+  "stage": 0,
+  "seed": 42,
+  "steps_run": 300,
+  "backend": "real",
+  "bridge_alive": true,
+  "alerts": [],
+  "teleport_count": 0,
+  "max_pose_delta_mm": 38.25000001165257,
+  "handoff": {
+    "approach_frames": 299,
+    "handoff_ready_frame": null,
+    "takeover_start_frame": null,
+    "takeover_end_frame": null,
+    "macro_end_reason": "none",
+    "macro_success": null,
+    "transition_latency_ms": 0.0
+  },
+  "bhuman_conditions": [
+    {
+      "condition": "dribble",
+      "mode": "natural",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_dribble no detectada en 120 frames"
+    },
+    {
+      "condition": "dribble",
+      "mode": "forced",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_dribble no detectada en 120 frames"
+    },
+    {
+      "condition": "duel",
+      "mode": "natural",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_duel no detectada en 120 frames"
+    },
+    {
+      "condition": "duel",
+      "mode": "forced",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_duel no detectada en 120 frames"
+    },
+    {
+      "condition": "shoot",
+      "mode": "natural",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_shoot no detectada en 120 frames"
+    },
+    {
+      "condition": "shoot",
+      "mode": "forced",
+      "detected": true,
+      "frames_to_detect": 0,
+      "takeover_reached": true,
+      "macro_end_reason": "completed",
+      "macro_success": null,
+      "notes": ""
+    },
+    {
+      "condition": "pass",
+      "mode": "natural",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_pass no detectada en 120 frames"
+    },
+    {
+      "condition": "pass",
+      "mode": "forced",
+      "detected": false,
+      "frames_to_detect": null,
+      "takeover_reached": false,
+      "macro_end_reason": "none",
+      "macro_success": null,
+      "notes": "macro playBall_pass no detectada en 120 frames"
+    }
+  ],
+  "stage_sweep": [
+    {
+      "stage_id": 0,
+      "stage_name": "1v0_approach_800_1600",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 1,
+      "stage_name": "1v0_static_1600_3200",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 2,
+      "stage_name": "1v0_obstacles_3200",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 3,
+      "stage_name": "1v1_dynamic",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 4,
+      "stage_name": "1v1_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": true,
+      "takeover_active_detected": true,
+      "macro_completed": true,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 5,
+      "stage_name": "2v0_cooperation",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 6,
+      "stage_name": "2v2_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 7,
+      "stage_name": "3v0_cooperation",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 8,
+      "stage_name": "3v2_scripted",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 9,
+      "stage_name": "3v3_selfplay",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 10,
+      "stage_name": "4v0_full_team",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 11,
+      "stage_name": "4v3_scripted",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    },
+    {
+      "stage_id": 12,
+      "stage_name": "4v4_full",
+      "bridge_alive": true,
+      "first_info_backend": "real",
+      "handoff_ready_detected": false,
+      "takeover_active_detected": false,
+      "macro_completed": false,
+      "steps_run": 50,
+      "error": ""
+    }
+  ],
+  "reward_impulses": [],
+  "reward_multi_frame_violations": 0,
+  "ball_physics": [
+    {
+      "test_name": "T1_ball_velocity_clamping",
+      "passed": true,
+      "details": {
+        "max_speed_mm_s": 5000.0,
+        "limit_mm_s": 5000.0,
+        "overshoots": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T2_ball_friction",
+      "passed": true,
+      "details": {
+        "friction_works": true,
+        "energy_explosion": false,
+        "initial_speed_mm_s": 2960.1,
+        "speed_at_frame_100": 0.0
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T3_ball_wall_collision",
+      "passed": true,
+      "details": {
+        "ball_phased_through_wall": false,
+        "wall_y_mm": -1875.0
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T4_ball_goal_detection",
+      "passed": true,
+      "details": {
+        "goal_detected": true,
+        "frame_scored": 0
+      },
+      "warnings": []
+    }
+  ],
+  "bhuman_semantic": [
+    {
+      "test_name": "T5_macro_transition_stability",
+      "passed": true,
+      "details": {
+        "total_transitions": 4,
+        "flickering_detected": false,
+        "inconsistencies": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T6_skill_request_semantic",
+      "passed": false,
+      "details": {
+        "semantic_violations": [
+          {
+            "frame": 0,
+            "skill": "shoot",
+            "issue": "dist_gol=4192mm"
+          },
+          {
+            "frame": 321,
+            "skill": "shoot",
+            "issue": "dist_gol=1753mm"
+          },
+          {
+            "frame": 322,
+            "skill": "shoot",
+            "issue": "dist_gol=1737mm"
+          },
+          {
+            "frame": 323,
+            "skill": "shoot",
+            "issue": "dist_gol=1721mm"
+          },
+          {
+            "frame": 324,
+            "skill": "shoot",
+            "issue": "dist_gol=1705mm"
+          }
+        ],
+        "total_violations": 10
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T8_handoff_readiness_jitter",
+      "passed": true,
+      "details": {
+        "total_changes": 4,
+        "jitter_detected": false
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T9_pose_field_accuracy",
+      "passed": true,
+      "details": {
+        "mismatches": [],
+        "total_mismatches": 0,
+        "frame_lag_suspected": false
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T10_game_state_semantic",
+      "passed": true,
+      "details": {
+        "game_state_errors": [],
+        "total_errors": 0
+      },
+      "warnings": []
+    }
+  ],
+  "pretraining_audit": [
+    {
+      "test_name": "T11_seed_determinism",
+      "passed": true,
+      "details": {
+        "steps_compared": 100,
+        "max_reward_diff": 0.0,
+        "deterministic": true
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T12_stress_1000_steps",
+      "passed": true,
+      "details": {
+        "steps": 1000,
+        "avg_latency_ms": 4.03,
+        "max_latency_ms": 43.1,
+        "latency_degradation": false,
+        "exception_count": 0,
+        "memory_growth_mb": -0.3
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T13_reward_consistency",
+      "passed": true,
+      "details": {
+        "total_rewards": 1000,
+        "nan_count": 0,
+        "inf_count": 0,
+        "pct_zero": 0.0,
+        "std": 1.9491,
+        "max_abs": 14.5545
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T14_policy_reproducibility",
+      "passed": true,
+      "details": {
+        "steps_compared": 80,
+        "max_diff": 0.0
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T16_handoff_timing_variance",
+      "passed": false,
+      "details": {
+        "geometries": [
+          {
+            "geometry": "close_center",
+            "handoff_frame": 2
+          },
+          {
+            "geometry": "medium_center",
+            "handoff_frame": 6
+          },
+          {
+            "geometry": "far_center",
+            "handoff_frame": 22
+          },
+          {
+            "geometry": "angle_right",
+            "handoff_frame": 0
+          },
+          {
+            "geometry": "angle_left",
+            "handoff_frame": 0
+          }
+        ],
+        "handoff_frames": [
+          2,
+          6,
+          22,
+          0,
+          0
+        ],
+        "std_frames": 8.29,
+        "detected_in": "5/5"
+      },
+      "warnings": []
+    }
+  ],
+  "ball_edge_cases": [
+    {
+      "test_name": "T26_ball_backward_bounce_at_goal",
+      "passed": true,
+      "details": {
+        "backward_rebounds": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T27_ball_goal_post_clipping",
+      "passed": true,
+      "details": {
+        "post_clips": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T28_ball_corner_trap",
+      "passed": true,
+      "details": {
+        "vibrating_corners": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T29_ball_out_persistence",
+      "passed": true,
+      "details": {
+        "macro_while_out": [],
+        "total": 0
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T30_ball_high_speed_goal",
+      "passed": true,
+      "details": {
+        "anomalies": [],
+        "total_anomalies": 0
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T31_ball_multiple_bounces",
+      "passed": true,
+      "details": {
+        "phased_events": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "T32_ball_pos_vel_consistency",
+      "passed": true,
+      "details": {
+        "inconsistencies": [],
+        "total": 0
+      },
+      "warnings": []
+    }
+  ],
+  "physical_stress": [
+    {
+      "test_name": "TA_fallen_agent",
+      "passed": true,
+      "details": {
+        "agent_fell": true,
+        "recovered": true,
+        "env_crashed": false,
+        "handoff_after_recovery": true
+      },
+      "warnings": [
+        "recovered @ frame 20 (fallen for 0f)"
+      ]
+    },
+    {
+      "test_name": "TB_agent_collision",
+      "passed": true,
+      "details": {
+        "collision_detected": false,
+        "phasing": false,
+        "min_dist_mm": Infinity
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "TC_movement_limitation",
+      "passed": true,
+      "details": {
+        "max_speed_mm_s": 250.0,
+        "limit_mm_s": 250.0,
+        "exceeds_limit": false,
+        "velocity_jumps": []
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "TF_macro_interruption",
+      "passed": true,
+      "details": {
+        "macro_was_active": true,
+        "macro_aborted_gracefully": true,
+        "env_crashed": false
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "TG_extreme_pressure",
+      "passed": true,
+      "details": {
+        "avg_latency_ms": 44.37,
+        "max_latency_ms": 58.25,
+        "latency_degradation": false
+      },
+      "warnings": []
+    }
+  ],
+  "contract_guardrails": [
+    {
+      "test_name": "EXTRA1_handoff_envelope_validation",
+      "passed": false,
+      "details": {
+        "violations": [
+          {
+            "config": "stale_ball",
+            "frame": 0,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 1,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 2,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 3,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 4,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 6,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 7,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 8,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 9,
+            "macro_type": "playBall_shoot"
+          },
+          {
+            "config": "fallen_agent",
+            "frame": 11,
+            "macro_type": "playBall_shoot"
+          }
+        ],
+        "total_violations": 49,
+        "configs_tested": 6,
+        "contract_ref": "\u00a72.2 BHUMAN_RL_CURRICULUM_CONTRACT.md"
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "EXTRA2_action_space_safety_gate",
+      "passed": true,
+      "details": {
+        "variants_tested": 6,
+        "crash_count": 0,
+        "nan_inf_in_info": [],
+        "illegal_injections": [],
+        "contract_ref": "\u00a71.2 BHUMAN_RL_CURRICULUM_CONTRACT.md"
+      },
+      "warnings": []
+    },
+    {
+      "test_name": "EXTRA3_false_positive_reward",
+      "passed": true,
+      "details": {
+        "false_positives": [
+          {
+            "frame": 0,
+            "reward": 17.3457,
+            "macro": "playBall_shoot",
+            "issue": "reward spike without takeover (\u00a72.4 violation)"
+          },
+          {
+            "frame": 6,
+            "reward": 13.7617,
+            "macro": "playBall_shoot",
+            "issue": "reward spike without takeover (\u00a72.4 violation)"
+          },
+          {
+            "frame": 12,
+            "reward": 13.7563,
+            "macro": "playBall_shoot",
+            "issue": "reward spike without takeover (\u00a72.4 violation)"
+          },
+          {
+            "frame": 18,
+            "reward": 13.7563,
+            "macro": "playBall_shoot",
+            "issue": "reward spike without takeover (\u00a72.4 violation)"
+          },
+          {
+            "frame": 24,
+            "reward": 13.7563,
+            "macro": "playBall_shoot",
+            "issue": "reward spike without takeover (\u00a72.4 violation)"
+          }
+        ],
+        "total_false_positives": 25,
+        "threshold": 0.05,
+        "severity": "WARN",
+        "note": "Hay situaciones pre-takeover (approach shaped, dribble de soporte) donde reward != 0 es esperado.",
+        "contract_ref": "\u00a72.4 BHUMAN_RL_CURRICULUM_CONTRACT.md"
+      },
+      "warnings": [
+        "frame=0  r=17.3457  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=6  r=13.7617  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=12  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=18  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=24  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=30  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=36  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=42  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=48  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=54  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=60  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=66  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=72  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=78  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=84  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=90  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=96  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=102  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=108  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=114  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=120  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=126  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=132  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=138  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido",
+        "frame=144  r=13.7563  macro=playBall_shoot  | reward sin takeover activo \u2014 revisar si es shaped-approach o kick prohibido"
+      ]
+    }
+  ],
+  "verdict": "FAIL \u2014 1 contract guardrail violations (E1/E2)",
+  "notes": []
+}

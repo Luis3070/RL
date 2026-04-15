@@ -40,7 +40,37 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from bhuman_cfg_parser import AllConfigs, get_home_poses
+from config import FIELD
 from runtime_paths import preferred_bridge_mode
+
+
+def _sanitize_bridge_angle_rad(value: Any) -> Optional[float]:
+    """Reject NaN/inf and absurd radians from the C++ bridge (prevents 2D kick bugs)."""
+    if value is None:
+        return None
+    try:
+        angle = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(angle):
+        return None
+    if abs(angle) > math.pi + 0.35:
+        return None
+    return angle
+
+
+def _sanitize_bridge_kick_length_mm(value: Any, *, raw: bool = False) -> float:
+    """Clamp kick length to a plausible field scale; NaN/inf → 0."""
+    try:
+        v = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v):
+        return 0.0
+    upper = max(float(FIELD.length) * 1.25, 8000.0)
+    if raw:
+        return float(np.clip(v, 0.0, upper * 2.0))
+    return float(np.clip(v, 0.0, upper))
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +657,10 @@ class RealSidecarBackend:
             if key.startswith("debug_") or key == "decision_time_us"
         }
 
+        kl = _sanitize_bridge_kick_length_mm(result.get("kick_length_mm", 0.0))
+        kl_raw = result.get("kick_length_mm_raw", result.get("kick_length_mm", 0.0))
+        kl_raw = _sanitize_bridge_kick_length_mm(kl_raw, raw=True)
+
         return SidecarOutput(
             active_agent=active_agent,
             macro_type=macro_type,
@@ -636,7 +670,9 @@ class RealSidecarBackend:
             ),
             skill_request=skill,
             skill_target=self._parse_xy(result.get("skill_target_pose")),
-            skill_target_direction=result.get("skill_target_direction_rad"),
+            skill_target_direction=_sanitize_bridge_angle_rad(
+                result.get("skill_target_direction_rad")
+            ),
             behavior_status=result.get("behavior_status", "playing"),
             behavior_speed=float(result.get("behavior_speed_mm_s", 0.0)),
             behavior_walking_to=self._parse_xy(result.get("behavior_walking_to")),
@@ -646,7 +682,9 @@ class RealSidecarBackend:
             motion_request=motion_request,
             motion_speed=motion_speed,
             motion_walk_target=self._parse_pose(result.get("motion_walk_target")),
-            motion_target_direction=result.get("motion_target_direction_rad"),
+            motion_target_direction=_sanitize_bridge_angle_rad(
+                result.get("motion_target_direction_rad")
+            ),
             motion_executed_phase=result.get("motion_executed_phase", "unavailable"),
             motion_executed_speed=motion_executed_speed,
             motion_ball_target_field=self._parse_xy(result.get("motion_ball_target_field")),
@@ -655,8 +693,8 @@ class RealSidecarBackend:
             field_ball_position=self._parse_xy(result.get("field_ball_position")),
             field_ball_intercepted_position=self._parse_xy(result.get("field_ball_intercepted_position")),
             kick_type=result.get("kick_type", "none"),
-            kick_length=result.get("kick_length_mm", 0.0),
-            kick_length_raw=result.get("kick_length_mm_raw", result.get("kick_length_mm", 0.0)),
+            kick_length=kl,
+            kick_length_raw=kl_raw,
             last_kick_type=result.get("last_kick_type", "unavailable"),
             last_kick_timestamp=result.get("last_kick_timestamp_ms", 0),
             activation_graph=activation_graph,

@@ -392,6 +392,7 @@ class Renderer:
                 ("", Color.TXT_WHITE),
                 (f"Control:   {control_debug.get('owner', 'RL')}", owner_color),
                 (f"Actor:     {control_debug.get('active_agent', '-')}", Color.TXT_WHITE),
+                (f"BridgeID:  {control_debug.get('bridge_frame_id', '-')}", Color.TXT_WHITE),
                 (f"Macro:     {control_debug.get('macro_type', 'none')}", Color.TXT_WHITE),
                 (f"End:       {control_debug.get('macro_end_reason', 'none')}", Color.TXT_WHITE),
                 (f"BHuman:    {control_debug.get('skill_request', 'none')}", Color.TXT_WHITE),
@@ -432,6 +433,14 @@ class Renderer:
                 (f"ShootTo:   {control_debug.get('shoot_target_text', '-')}", Color.TXT_ORANGE),
                 (f"BallTo:    {control_debug.get('ball_target_text', '-')}", Color.TXT_ORANGE),
                 (f"ExecTo:    {control_debug.get('effective_target_text', '-')}", Color.SIDECAR_EXEC),
+                (
+                    f"Ctrl edge: {control_debug.get('diag_control_transition', '-')}",
+                    Color.TXT_YELLOW,
+                ),
+                (f"dθ step:   {control_debug.get('diag_theta_step', '-')}", Color.TXT_YELLOW),
+                (f"Ball–ag:   {control_debug.get('diag_ball_ag_dist', '-')} mm", Color.TXT_YELLOW),
+                (f"Shoot·tgt: {control_debug.get('diag_sem_dot', '-')}", Color.TXT_YELLOW),
+                (f"DiagFlags: {control_debug.get('diag_compact', '-')}", Color.TXT_YELLOW),
             ])
         self._panel(left, x=8, y=8, font=f_md)
 
@@ -556,10 +565,47 @@ class EnvStateReader:
         def _safe_rate(success: int, total: int) -> float:
             return float(success) / float(total) if total > 0 else 0.0
 
+        def _diag_compact_line() -> str:
+            parts: list[str] = []
+            if int(info.get("diag_ball_teleport_flag", 0) or 0):
+                parts.append("TELball")
+            if int(info.get("diag_agent_teleport_flag", 0) or 0):
+                parts.append("TELag")
+            if int(info.get("diag_ball_large_jump_flag", 0) or 0):
+                parts.append("BigJump")
+            if int(info.get("diag_ball_agent_penetration_flag", 0) or 0):
+                parts.append("Penetr")
+            elif int(info.get("diag_ball_agent_overlap_flag", 0) or 0):
+                parts.append("Overlap")
+            if int(info.get("diag_shoot_backward_flag", 0) or 0):
+                parts.append("BkShoot")
+            if int(info.get("diag_theta_snap_prep_flag", 0) or 0):
+                parts.append("ThSnap")
+            if int(info.get("diag_theta_snap_motion_prep_flag", 0) or 0):
+                parts.append("MotSnap")
+            if int(info.get("diag_control_owner_changed", 0) or 0):
+                parts.append("CtlChg")
+            if int(info.get("diag_rapid_kick_proxy_flag", 0) or 0):
+                parts.append("RapidKick")
+            if int(info.get("diag_post_kick_inversion_flag", 0) or 0):
+                parts.append("PostInv")
+            if int(info.get("diag_shoot_vel_retrograde_x_flag", 0) or 0):
+                parts.append("RetroX")
+            if int(info.get("diag_opp_pressure_flag", 0) or 0):
+                parts.append("OppPress")
+            return " ".join(parts) if parts else "-"
+
+        dtheta = info.get("diag_active_agent_theta_step_delta_deg")
+        dtheta_txt = f"{float(dtheta):.1f}°" if dtheta is not None else "-"
+        sem = info.get("diag_shoot_semantic_dot")
+        sem_txt = f"{float(sem):.2f}" if sem is not None else "-"
+        ball_ag = float(info.get("diag_ball_agent_center_dist_mm", 0.0) or 0.0)
+
         return {
             "owner": owner,
             "color": color,
             "active_agent": str(info.get("active_agent_id", "-")),
+            "bridge_frame_id": int(info.get("bridge_frame_id", -1) or -1),
             "macro_type": str(info.get("macro_type", "none")),
             "macro_end_reason": str(info.get("last_macro_end_reason", "none")),
             "skill_request": str(info.get("sidecar_skill_request", "none")),
@@ -634,6 +680,11 @@ class EnvStateReader:
             "effective_target_text": self._fmt_target(
                 info.get("sidecar_effective_target")
             ),
+            "diag_theta_step": dtheta_txt,
+            "diag_ball_ag_dist": f"{ball_ag:.0f}",
+            "diag_sem_dot": sem_txt,
+            "diag_control_transition": str(info.get("diag_control_transition", "-")),
+            "diag_compact": _diag_compact_line(),
         }
 
     def _ball_action_label(self, info: Dict[str, object]) -> str:
@@ -1022,7 +1073,7 @@ def main() -> None:
     STAGE_IDX  = 0
     USE_FOV    = True
     SEED       = 42
-    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:\ALEJO\runs\practical_stage0_fovTrue_1776186458\checkpoints\mappo_stage0_1v0_approach_800_1600_ep000050.pt").strip()
+    MODEL_PATH = os.environ.get("RL_MODEL_PATH", "C:/ALEJO/runs/practical_stage0_fovTrue_1776262981/checkpoints/mappo_stage0_1v0_approach_800_1600_ep000054.pt").strip()
     USE_POLICY = bool(MODEL_PATH)
 
     checkpoint = MODEL_PATH if USE_POLICY else None
