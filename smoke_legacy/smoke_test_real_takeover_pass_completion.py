@@ -5,9 +5,9 @@ Archivo legado y fixture especializada.
 La version viva esta en:
 `smoke_legacy.smoke_test_real_takeover_pass_completion`.
 No forma parte del gate canonico de takeover.
-"""
 
-"""
+
+
 Strict real-backend smoke for the pass telemetry fixture.
 
 Purpose:
@@ -38,8 +38,8 @@ from bhuman_cfg_parser import load_contract
 from bhuman_sidecar import BHumanDecisionSidecar
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
-from smoke_test_real_env_semantic_variants import _install_frame
-from smoke_test_real_takeover_playball import PASS_SNAPSHOT_JSON, _make_real_pass_frame, _zero_actions
+from smoke_legacy.smoke_test_real_env_semantic_variants import _install_frame
+from smoke_legacy.smoke_test_real_takeover_playball import PASS_SNAPSHOT_JSON, _make_real_pass_frame, _zero_actions
 
 
 def _assert(condition: bool, msg: str) -> None:

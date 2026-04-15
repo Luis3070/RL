@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_real_takeover_completion`.
 Usar la superficie oficial: `smoke_takeover_real.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+smoke_test_real_takeover_completion.py
 smoke_test_real_takeover_completion.py
 
 Strict real-backend smoke for takeover completion.
@@ -34,7 +34,7 @@ from bridge.bridge_protocol import BridgeConfig
 from bhuman_sidecar import normalize_tactic_name
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
-from smoke_test_real_env_semantic_variants import (
+from smoke_legacy.smoke_test_real_env_semantic_variants import (
     DRIBBLE_REPLAY_SEED,
     _build_dribble_replay_frames,
     _install_frame,

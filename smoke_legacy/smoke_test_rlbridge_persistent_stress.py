@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_rlbridge_persistent_stress`.
 Usar la superficie oficial: `smoke_diagnostic_extended.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+
 smoke_test_rlbridge_persistent_stress.py -- stress test for persistent transport.
 
 Validates that pipe_process survives:

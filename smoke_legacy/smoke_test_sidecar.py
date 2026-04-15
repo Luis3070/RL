@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_sidecar`.
 Usar la superficie oficial: `smoke_core_bridge_semantics.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+
 smoke_test_sidecar.py -- Hardened integration smoke tests for BHuman Decision Sidecar.
 
 Separated into:

@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_real_env_semantic_variants`.
 Usar la superficie oficial: `smoke_diagnostic_extended.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+smoke_test_real_env_semantic_variants.py -- Real env.step semantic variants.
 smoke_test_real_env_semantic_variants.py -- Real env.step semantic variants.
 
 Purpose:
@@ -41,7 +41,7 @@ from bridge.bridge_protocol import BridgeConfig
 from bhuman_sidecar import GroundTruthFrame, normalize_tactic_name
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
-from smoke_test_real_takeover_playball import _make_real_pass_frame
+from smoke_legacy.smoke_test_real_takeover_playball import _make_real_pass_frame
 
 
 ROLES = {

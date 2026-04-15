@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_real_takeover_shoot_completion`.
 Usar la superficie oficial: `smoke_takeover_real.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+
 Strict real-backend smoke for shoot takeover completion.
 
 Purpose:
@@ -29,8 +29,8 @@ os.environ["RL_EXECUTION_MODE"] = "bhuman_sidecar"
 from bridge.bridge_protocol import BridgeConfig
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
-from smoke_test_real_takeover_env_positive import _install_positive_fixture
-from smoke_test_real_takeover_playball import _zero_actions
+from smoke_legacy.smoke_test_real_takeover_env_positive import _install_positive_fixture
+from smoke_legacy.smoke_test_real_takeover_playball import _zero_actions
 
 
 def _assert(condition: bool, msg: str) -> None:

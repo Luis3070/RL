@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_real_takeover_env_positive`.
 Usar la superficie oficial: `smoke_takeover_real.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+
 smoke_test_real_takeover_env_positive.py -- Positive end-to-end takeover smoke.
 
 Purpose:

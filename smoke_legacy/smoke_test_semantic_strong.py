@@ -4,9 +4,9 @@ LEGACY REDIRECT
 Archivo legado. La version viva esta en:
 `smoke_legacy.smoke_test_semantic_strong`.
 Usar la superficie oficial: `smoke_core_bridge_semantics.py` o `smoke_suite_option1.py`.
-"""
 
-"""
+
+
 smoke_test_semantic_strong.py -- Strong semantic validation for BHuman-in-loop.
 
 Purpose:
