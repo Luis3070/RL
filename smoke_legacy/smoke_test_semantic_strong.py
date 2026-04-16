@@ -44,7 +44,7 @@ from bridge.bridge_protocol import BridgeConfig, expected_transport_mode
 from bhuman_sidecar import VALID_SKILL_REQUESTS
 from config import CURRICULUM, resolve_cfg_root
 from environment import NaoSoccerEnv
-from smoke_test_sidecar import (
+from smoke_legacy.smoke_test_sidecar import (
     test_activation_graph_structured,
     test_active_agent_output,
     test_is_playing_gating,

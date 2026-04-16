@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +10,18 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 _VALID_TRANSPORTS = {"pipe_process", "oneshot_file_fallback"}
 _VALID_BRIDGE_MODES = {"persistent_2d_cognition", "embedded_2d_motion"}
+
+
+def _platform_build_dir() -> str:
+    if os.name == "nt":
+        return "Windows"
+    if sys.platform == "darwin":
+        return "macOS"
+    return "Linux"
+
+
+def _exe_suffix() -> str:
+    return ".exe" if os.name == "nt" else ""
 
 
 @lru_cache(maxsize=1)
@@ -102,6 +115,8 @@ def preferred_bridge_transport() -> str:
         if any(candidate.exists() for candidate in built_bridge_candidates):
             return "pipe_process"
         return "oneshot_file_fallback"
+    # Linux/macOS only support the persistent pipe transport. The one-shot
+    # fallback is a Windows-specific workaround that relies on cmd.exe.
     return "pipe_process"
 
 
@@ -110,7 +125,9 @@ def stable_bridge_transports() -> tuple[str, ...]:
     if os.name == "nt":
         ordered = [preferred, "oneshot_file_fallback", "pipe_process"]
     else:
-        ordered = [preferred, "pipe_process", "oneshot_file_fallback"]
+        # Non-Windows platforms do not support the cmd.exe-based one-shot
+        # fallback, so we advertise only the persistent pipe transport.
+        ordered = [preferred, "pipe_process"]
 
     stable: list[str] = []
     for mode in ordered:
@@ -127,20 +144,23 @@ def resolve_bridge_executable() -> Path:
             return override_path
 
     bhuman_root = resolve_bhuman_root()
+    platform_dir = _platform_build_dir()
+    suffix = _exe_suffix()
+
     candidates = [
-        bhuman_root / "Build" / "Windows" / "RLBridge" / "Release" / "RLBridge.exe",
-        bhuman_root / "Build" / "Windows" / "RLBridge" / "Release" / "bhuman_bridge.exe",
-        bhuman_root / "Build" / "Windows" / "RLBridge" / "Develop" / "RLBridge.exe",
-        bhuman_root / "Build" / "Windows" / "RLBridge" / "Develop" / "bhuman_bridge.exe",
+        bhuman_root / "Build" / platform_dir / "RLBridge" / "Release" / f"RLBridge{suffix}",
+        bhuman_root / "Build" / platform_dir / "RLBridge" / "Release" / f"bhuman_bridge{suffix}",
+        bhuman_root / "Build" / platform_dir / "RLBridge" / "Develop" / f"RLBridge{suffix}",
+        bhuman_root / "Build" / platform_dir / "RLBridge" / "Develop" / f"bhuman_bridge{suffix}",
     ]
     for candidate in candidates:
         if candidate.exists():
             return candidate
 
     local_candidates = [
-        REPO_ROOT / "bridge" / "bhuman_bridge.exe",
-        REPO_ROOT / "bridge" / "build" / "Release" / "bhuman_bridge.exe",
-        REPO_ROOT / "bridge" / "build" / "Release" / "RLBridge.exe",
+        REPO_ROOT / "bridge" / f"bhuman_bridge{suffix}",
+        REPO_ROOT / "bridge" / "build" / "Release" / f"bhuman_bridge{suffix}",
+        REPO_ROOT / "bridge" / "build" / "Release" / f"RLBridge{suffix}",
     ]
     allow_local = _setting("BHUMAN_ALLOW_LOCAL_BRIDGE_EXE").lower() in {"1", "true", "yes"}
     if allow_local:

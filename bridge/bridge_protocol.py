@@ -68,6 +68,7 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -75,6 +76,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import resource  # POSIX-only; used to cap the subprocess virtual memory.
+except ImportError:  # pragma: no cover - Windows has no 'resource' module
+    resource = None  # type: ignore[assignment]
 
 import numpy as np
 from runtime_paths import (
@@ -229,6 +235,12 @@ class BridgeConfig:
     frame_timeout: float = _FRAME_TIMEOUT
     preferred_transport: str = field(default_factory=preferred_bridge_transport)
     allow_oneshot_fallback: bool = True
+    # Hard cap on the subprocess virtual address space, in bytes. BHuman's
+    # Cognition thread can enter a pathological allocation loop on POSIX under
+    # certain module configurations; without a cap the host machine risks OOM.
+    # Default: 4 GiB — enough for legitimate BHuman use, below typical desktop
+    # RAM. Set to 0 to disable the cap.
+    memory_limit_bytes: int = 4 * 1024 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +346,27 @@ class BHumanBridge:
             return
 
         logger.info("Starting BHuman bridge with persistent pipe transport: %s", exe)
+        # BHuman's File::getBHDir() on POSIX starts from CWD and walks up
+        # looking for a `Config/` directory one level above the current path.
+        # That means CWD must be a *descendant* of the BHuman root, not the
+        # root itself. On Windows it parses the command line that launched
+        # the process, so CWD does not matter. Anchor the subprocess to the
+        # directory containing the bridge executable — which is naturally
+        # deep inside Build/<Platform>/RLBridge/<Config>/ — so the walk-up
+        # resolves to <bhuman_root>/Config on every platform.
+        bhuman_root = self._config.bhuman_root
+        exe_parent = Path(exe).resolve().parent
+        subprocess_cwd: Optional[str] = None
+        if bhuman_root and (bhuman_root / "Config").is_dir():
+            try:
+                exe_parent.relative_to(Path(bhuman_root).resolve())
+                subprocess_cwd = str(exe_parent)
+            except ValueError:
+                # Executable lives outside the BHuman tree (e.g. custom build
+                # path). Fall back to a known descendant of BHuman root.
+                build_dir = Path(bhuman_root) / "Build"
+                subprocess_cwd = str(build_dir if build_dir.is_dir() else bhuman_root)
+
         startup_kwargs: Dict[str, Any] = {
             "args": [str(exe)],
             "stdin": subprocess.PIPE,
@@ -342,6 +375,36 @@ class BHumanBridge:
             "env": env,
             "bufsize": 0,
         }
+        if subprocess_cwd is not None:
+            startup_kwargs["cwd"] = subprocess_cwd
+
+        # Clamp the subprocess virtual memory on POSIX so a runaway allocation
+        # inside BHuman's Cognition thread can never take down the host. The
+        # cap is enforced via RLIMIT_AS in a preexec_fn (Windows has no such
+        # hook, but the original author only tested there anyway).
+        memory_limit = self._config.memory_limit_bytes
+        if (
+            resource is not None
+            and sys.platform != "win32"
+            and memory_limit
+            and memory_limit > 0
+        ):
+            def _apply_memory_limit() -> None:
+                try:
+                    resource.setrlimit(
+                        resource.RLIMIT_AS,
+                        (memory_limit, memory_limit),
+                    )
+                except (ValueError, OSError) as exc:  # pragma: no cover
+                    # Best effort: log and continue without the cap rather
+                    # than crash the bridge startup.
+                    print(
+                        f"[bridge] warning: could not apply memory cap: {exc}",
+                        file=sys.stderr,
+                    )
+
+            startup_kwargs["preexec_fn"] = _apply_memory_limit
+
         self._stderr_merged_into_stdout = False
         if os.name == "nt":
             startup_kwargs["stderr"] = subprocess.STDOUT

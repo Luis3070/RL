@@ -4,6 +4,9 @@ bridge/__pycache__/
 bridge/rlbridge_oneshot_*
 bridge/tmp*/
 
+# Virtual environment
+.venv/
+
 # Environment and IDE
 .env
 .vscode/
