@@ -3,3 +3,8 @@ __pycache__/
 bridge/__pycache__/
 bridge/rlbridge_oneshot_*
 bridge/tmp*/
+# Environment variables
+.env
+
+# Local editor/runtime settings
+settings.local.json
