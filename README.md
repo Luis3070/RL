@@ -11,7 +11,6 @@ lo superado quedó en la rama `rlsimrobot` y en `main`.
 | `heuristic_agent_experiment.py`      | Experimento activo: agente heurístico ↔ pybh     |
 | `heuristic_experiment_results.csv`   | Output del experimento                           |
 | `environment.yml`                    | Spec del env conda                               |
-| `trajectory_guidance_project/`       | Subproyecto paralelo (guía de trayectorias)      |
 
 El resto del código vive en `SabanaHerons2026/` (C++). Lo que tocamos:
 
