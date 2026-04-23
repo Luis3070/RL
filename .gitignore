@@ -8,3 +8,8 @@ bridge/tmp*/
 
 # Local editor/runtime settings
 settings.local.json
+
+# Local agent/tooling metadata
+.codex
+.codex/
+AGENTS.md

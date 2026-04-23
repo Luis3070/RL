@@ -1,4 +1,11 @@
-episode,seed,steps,handoff_achieved,takeover_count,takeover_success,goals_scored,handoff_ready_frames,first_handoff_step,mean_dist_mm
-1,200,455,1,5,0,0,450,1,304.3
-2,201,455,1,5,0,0,450,1,307.7
-3,202,455,1,4,0,0,430,21,323.2
+episode,seed,steps,handoff_ready,shoot_issued,goal_scored,first_shoot_step
+1,200,168,True,True,False,47
+2,201,124,True,True,True,42
+3,202,204,True,True,True,44
+4,203,151,True,True,True,46
+5,204,172,True,True,True,42
+6,205,136,True,True,False,45
+7,206,150,True,True,False,48
+8,207,500,True,True,False,45
+9,208,130,True,True,True,44
+10,209,206,True,True,True,43
