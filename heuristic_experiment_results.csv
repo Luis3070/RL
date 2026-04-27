@@ -1,11 +1,4 @@
 episode,seed,steps,handoff_ready,shoot_issued,goal_scored,first_shoot_step
-1,200,168,True,True,False,47
-2,201,124,True,True,True,42
-3,202,204,True,True,True,44
-4,203,151,True,True,True,46
-5,204,172,True,True,True,42
-6,205,136,True,True,False,45
-7,206,150,True,True,False,48
-8,207,500,True,True,False,45
-9,208,130,True,True,True,44
-10,209,206,True,True,True,43
+1,200,500,True,True,False,1
+2,201,500,True,True,False,94
+3,202,500,True,True,False,215
