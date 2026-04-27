@@ -36,6 +36,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from action import SkillType, StructuredSkillAction
+
 # pybh resolves Config and related assets from the process CWD.
 # Keep the process rooted in SabanaHerons2026 for the full controller lifetime.
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -101,20 +103,25 @@ def _world_to_robot(robot_pos: np.ndarray, robot_theta: float,
 
 
 def _heuristic_action(robot_pos: np.ndarray, ball_pos: np.ndarray,
-                      robot_theta: float) -> Dict:
+                      robot_theta: float) -> StructuredSkillAction:
     target = ball_pos + HANDOFF_OFFSET_MM
     delta  = target - robot_pos
     dist   = float(np.linalg.norm(delta))
 
     if dist <= SHOOT_THRESHOLD_MM:
         # En posición de handoff → shoot
-        return {"skill": "shoot", "x": 0.0, "y": 0.0, "theta": 0.0}
+        return StructuredSkillAction(skill_type=SkillType.shoot)
 
     divisor = 550.0 if dist > APPROACH_THRESHOLD_MM else FINE_DIVISOR_MM
     tx = float(np.clip(delta[0] / divisor, -1.0, 1.0)) * divisor + robot_pos[0]
     ty = float(np.clip(delta[1] / divisor, -1.0, 1.0)) * divisor + robot_pos[1]
     tt = _face_ball(robot_pos, ball_pos)
-    return {"skill": "walkTo", "x": tx, "y": ty, "theta": tt}
+    return StructuredSkillAction(
+        skill_type=SkillType.walk,
+        target_x=tx,
+        target_y=ty,
+        target_theta=tt,
+    )
 
 
 def _apply_kick(ball_pos: np.ndarray, robot_theta: float):
@@ -292,10 +299,13 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
         action = _heuristic_action(robot_pos, ball_pos, robot_theta)
 
         # 3. Enviar acción a BHuman
-        pybh.rl_set_action(PLAYER_NUMBER, action["skill"],
-                           action.get("x", 0.0),
-                           action.get("y", 0.0),
-                           action.get("theta", 0.0))
+        pybh.rl_set_action(
+            PLAYER_NUMBER,
+            "walkTo" if action.skill_name == "walk" else action.skill_name,
+            float(action.target_x),
+            float(action.target_y),
+            float(action.target_theta),
+        )
 
         # 4. Avanzar un frame
         if backend == "simrobot":
@@ -317,7 +327,7 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
         # 6. Física local fallback cuando no se usa el backend C++.
         if backend == "python" and shoot_issued:
             ball_pos, ball_vel = _step_ball(ball_pos, ball_vel)
-        elif action["skill"] == "shoot":
+        elif action.skill_name == "shoot":
             if not shoot_issued:
                 shoot_issued = True
                 first_shoot_step = step
@@ -326,10 +336,10 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
                     ball_vel = _apply_kick(ball_pos, robot_theta)
 
         # 7. Física local fallback del cuerpo cuando no se usa el backend C++.
-        if backend == "python" and action["skill"] == "walkTo":
-            target = np.array([action["x"], action["y"]], dtype=np.float32)
+        if backend == "python" and action.skill_name == "walk":
+            target = np.array([action.target_x, action.target_y], dtype=np.float32)
             robot_pos, robot_theta, walk_left_phase = _simrobot_walk_step(
-                robot_pos, robot_theta, walk_left_phase, target, float(action["theta"])
+                robot_pos, robot_theta, walk_left_phase, target, float(action.target_theta)
             )
 
         if _goal_scored(ball_pos):
