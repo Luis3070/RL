@@ -13,3 +13,5 @@ settings.local.json
 .codex
 .codex/
 AGENTS.md
+
+.venv/
