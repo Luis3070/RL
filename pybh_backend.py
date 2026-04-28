@@ -4,7 +4,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import numpy as np
 
@@ -24,6 +24,48 @@ from config import (
 
 os.chdir(BHUMAN_DIR)
 import pybh.controller as pybh
+
+
+def _normalize_angle(theta: float) -> float:
+    return math.atan2(math.sin(theta), math.cos(theta))
+
+
+def _field_to_robot(robot_x: float, robot_y: float, robot_theta: float, target_x: float, target_y: float) -> tuple[float, float]:
+    dx = target_x - robot_x
+    dy = target_y - robot_y
+    c = math.cos(robot_theta)
+    s = math.sin(robot_theta)
+    return c * dx + s * dy, -s * dx + c * dy
+
+
+def adapt_action_to_backend(
+    action: StructuredSkillAction,
+    obs: "BackendObservation | Mapping[str, float | int] | None",
+    *,
+    mode: str,
+) -> StructuredSkillAction:
+    # The C++ RLSim2D path consumes field-global walk targets directly.
+    if mode == "cpp" or obs is None or action.skill is not SkillType.walk:
+        return action
+
+    if isinstance(obs, BackendObservation):
+        robot_x = obs.robot_x
+        robot_y = obs.robot_y
+        robot_theta = obs.robot_theta
+    else:
+        robot_x = float(obs.get("robot_x", 0.0))
+        robot_y = float(obs.get("robot_y", 0.0))
+        robot_theta = float(obs.get("robot_theta", 0.0))
+
+    local_x, local_y = _field_to_robot(robot_x, robot_y, robot_theta, action.target_x, action.target_y)
+    local_theta = _normalize_angle(float(action.target_theta) - robot_theta)
+    return StructuredSkillAction(
+        skill_type=int(action.skill_type),
+        target_x=float(local_x),
+        target_y=float(local_y),
+        target_theta=float(local_theta),
+        pass_target=int(action.pass_target),
+    )
 
 
 @dataclass
@@ -62,6 +104,7 @@ class PyBHBackend:
         self.obs_timeout_ms = int(obs_timeout_ms)
         self._controller = None
         self._started = False
+        self._last_obs: Optional[BackendObservation] = None
 
     def start(self) -> None:
         if self._started:
@@ -93,6 +136,7 @@ class PyBHBackend:
             self._controller.stop()
             self._controller = None
         self._started = False
+        self._last_obs = None
 
     def reset(self, *, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> BackendObservation:
         self.start()
@@ -114,7 +158,9 @@ class PyBHBackend:
             pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
             self._set_world_state(ball_pos, robot_pos, robot_theta)
             self._step_controller()
-        return self.read_obs()
+        obs = self.read_obs()
+        self._last_obs = obs
+        return obs
 
     def step(self, action: StructuredSkillAction) -> BackendObservation:
         action = clamp_action(
@@ -130,19 +176,23 @@ class PyBHBackend:
                 np.array([obs.robot_x, obs.robot_y], dtype=np.float32),
                 float(obs.robot_theta),
             )
-        self._set_action(action)
+        adapted_action = adapt_action_to_backend(action, self._last_obs, mode=self.mode)
+        self._set_action(adapted_action)
         for _ in range(self.frames_per_step):
             if self.mode == "simrobot":
                 pybh.simrobot_step(1)
             else:
                 self._step_controller()
-        return self.read_obs()
+        obs = self.read_obs()
+        self._last_obs = obs
+        return obs
 
     def read_obs(self) -> BackendObservation:
         attempts = 5 if self.mode in {"cpp", "simrobot"} else 1
         for attempt in range(attempts):
             obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms))
             if obs.obs_ready:
+                self._last_obs = obs
                 return obs
             if self.mode == "simrobot":
                 pybh.simrobot_step(1)

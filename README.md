@@ -598,6 +598,55 @@ Este es el smoke más importante de esta fase, porque junta:
 - bridge real
 - SimRobot embebido real
 
+## Visualización en vivo en SimRobot
+
+Estado actual:
+
+- el backend `simrobot` embebido de [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py) corre en modo headless
+- eso significa que la escena real `.ros2d` sí avanza, pero no aparece una ventana
+- en este repo no encontré escenas `.ros`; hoy el path listo es 2D, no 3D
+- la convención Python del stack quedó fijada así:
+  `walk.target_x/target_y/target_theta` se expresan en coordenadas globales de campo
+  y [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py) hace la conversión al frame que consume el backend real
+
+Ruta práctica para ver el agente vivo:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/RL
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --policy heuristic
+```
+
+Por defecto ahora corre en modo continuo hasta `Ctrl+C`.
+También usa la política heurística por defecto.
+Si quieres limitarlo:
+
+```bash
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --steps 500
+```
+
+Si quieres volver al patrón fijo de depuración:
+
+```bash
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --policy fixed
+```
+
+Ese script:
+
+- abre `Build/Linux/SimRobot/Develop/SimRobot`
+- carga `Config/Scenes/RL1v0.ros2d`
+- manda acciones RL por shared memory con `rl_set_action(...)`
+- lee observaciones con `rl_get_obs(...)`
+
+Uso esperado:
+
+- al abrirse SimRobot, arrancar la simulación con `F5`
+- si `RLSkillProvider` está cargado correctamente, el robot visible debe empezar a reaccionar en vivo
+
+Limitación actual:
+
+- este probe visible no hace `reset()` del mundo como el backend embebido
+- sirve para validar visualización/control en vivo, no todavía para episodios RL completos en UI
+
 ## Estado funcional actual
 
 ### Qué sí funciona

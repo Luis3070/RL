@@ -37,7 +37,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from action import SkillType, StructuredSkillAction
-from pybh_backend import PyBHBackend
+from pybh_backend import PyBHBackend, adapt_action_to_backend
 
 # pybh resolves Config and related assets from the process CWD.
 # Keep the process rooted in SabanaHerons2026 for the full controller lifetime.
@@ -296,12 +296,21 @@ def _run_episode(
 
         # 3. Enviar acción a BHuman
         if backend == "python":
+            adapted_action = adapt_action_to_backend(
+                action,
+                {
+                    "robot_x": float(robot_pos[0]),
+                    "robot_y": float(robot_pos[1]),
+                    "robot_theta": float(robot_theta),
+                },
+                mode=backend,
+            )
             pybh.rl_set_action(
                 PLAYER_NUMBER,
-                "walkTo" if action.skill_name == "walk" else action.skill_name,
-                float(action.target_x),
-                float(action.target_y),
-                float(action.target_theta),
+                "walkTo" if adapted_action.skill_name == "walk" else adapted_action.skill_name,
+                float(adapted_action.target_x),
+                float(adapted_action.target_y),
+                float(adapted_action.target_theta),
             )
             assert ctrl is not None
             ctrl.update()
