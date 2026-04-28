@@ -47,7 +47,7 @@ class RealSimRobotEnvWrapper:
             steps += 1
             for agent, value in step_rewards.items():
                 rewards[agent] += value
-            if terminateds.get("__all__") or truncateds.get("__all__"):
+            if not self.agents or any(terminateds.values()) or any(truncateds.values()):
                 break
         return {
             "steps": steps,

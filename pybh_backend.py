@@ -139,13 +139,15 @@ class PyBHBackend:
         return self.read_obs()
 
     def read_obs(self) -> BackendObservation:
-        attempts = 5 if self.mode == "simrobot" else 1
+        attempts = 5 if self.mode in {"cpp", "simrobot"} else 1
         for attempt in range(attempts):
             obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms))
             if obs.obs_ready:
                 return obs
             if self.mode == "simrobot":
                 pybh.simrobot_step(1)
+            elif self.mode == "cpp" and attempt + 1 < attempts:
+                self._step_controller()
         raise RuntimeError(f"pybh.rl_get_obs timed out in backend={self.mode}")
 
     def _set_action(self, action: StructuredSkillAction) -> None:

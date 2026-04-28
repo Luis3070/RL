@@ -1,2 +1,2 @@
 episode,seed,steps,handoff_ready,shoot_issued,goal_scored,first_shoot_step
-1,200,105,True,True,False,46
+1,200,500,True,True,False,1

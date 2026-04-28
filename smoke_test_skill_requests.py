@@ -26,13 +26,13 @@ def main() -> None:
     parser.add_argument("--backend", choices=("simrobot", "cpp", "python"), default="cpp")
     args = parser.parse_args()
 
-    backend = PyBHBackend(mode=args.backend, frames_per_step=1, obs_timeout_ms=1000)
+    backend = PyBHBackend(mode=args.backend, frames_per_step=3 if args.backend == "simrobot" else 1, obs_timeout_ms=1000)
     backend.start()
     try:
-        start_ball = np.array([500.0, 0.0], dtype=np.float32)
-        start_robot = np.array([-300.0, 0.0], dtype=np.float32)
-        backend.reset(ball_pos=start_ball, robot_pos=start_robot, robot_theta=0.0)
         for skill in SkillType:
+            start_ball = np.array([500.0, 0.0], dtype=np.float32)
+            start_robot = np.array([-300.0, 0.0], dtype=np.float32)
+            backend.reset(ball_pos=start_ball, robot_pos=start_robot, robot_theta=0.0)
             action = build_probe_action(skill)
             obs = backend.step(action)
             print(

@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from action import SkillType, StructuredSkillAction
+from pybh_backend import PyBHBackend
 
 # pybh resolves Config and related assets from the process CWD.
 # Keep the process rooted in SabanaHerons2026 for the full controller lifetime.
@@ -244,7 +245,12 @@ def _simrobot_walk_step(robot_pos: np.ndarray, robot_theta: float,
 
 # ── Episodio ──────────────────────────────────────────────────────────────────
 
-def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Dict:
+def _run_episode(
+    ctrl: Optional[pybh.Controller],
+    backend_runner: Optional[PyBHBackend],
+    seed: int,
+    backend: str,
+) -> Dict:
     rng = np.random.default_rng(seed)
 
     # Posición inicial aleatoria del balón y del robot
@@ -265,31 +271,21 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
     step = 0
     walk_left_phase: Optional[bool] = None
 
-    if backend == "cpp":
-        pybh.rl_sim_reset(
-            PLAYER_NUMBER,
-            float(ball_pos[0]), float(ball_pos[1]),
-            float(robot_pos[0]), float(robot_pos[1]),
-            float(robot_theta),
-        )
-    elif backend == "python":
+    if backend == "python":
         pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
     else:
-        _simrobot_reset(ball_pos, robot_pos, robot_theta)
-        pybh.rl_set_action(PLAYER_NUMBER, "stand", 0.0, 0.0, 0.0)
-        pybh.simrobot_step(1)
-        obs = pybh.rl_get_obs(PLAYER_NUMBER, 1000)
-        if not obs["obs_ready"]:
-            raise RuntimeError("SimRobot no produjo observación inicial para RL.")
-        ball_pos[0] = obs["ball_x"]
-        ball_pos[1] = obs["ball_y"]
-        robot_pos[0] = obs["robot_x"]
-        robot_pos[1] = obs["robot_y"]
-        robot_theta = obs["robot_theta"]
+        assert backend_runner is not None
+        obs = backend_runner.reset(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=float(robot_theta))
+        ball_pos[0] = obs.ball_x
+        ball_pos[1] = obs.ball_y
+        robot_pos[0] = obs.robot_x
+        robot_pos[1] = obs.robot_y
+        robot_theta = obs.robot_theta
 
     for step in range(1, MAX_STEPS + 1):
         # 1. Sincronizar el estado visible por BHuman.
         if backend == "python":
+            assert ctrl is not None
             pybh.set_world_state(ctrl, 0,
                                  float(ball_pos[0]), float(ball_pos[1]),
                                  float(robot_pos[0]), float(robot_pos[1]),
@@ -299,30 +295,32 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
         action = _heuristic_action(robot_pos, ball_pos, robot_theta)
 
         # 3. Enviar acción a BHuman
-        pybh.rl_set_action(
-            PLAYER_NUMBER,
-            "walkTo" if action.skill_name == "walk" else action.skill_name,
-            float(action.target_x),
-            float(action.target_y),
-            float(action.target_theta),
-        )
-
-        # 4. Avanzar un frame
-        if backend == "simrobot":
-            pybh.simrobot_step(1)
-        else:
+        if backend == "python":
+            pybh.rl_set_action(
+                PLAYER_NUMBER,
+                "walkTo" if action.skill_name == "walk" else action.skill_name,
+                float(action.target_x),
+                float(action.target_y),
+                float(action.target_theta),
+            )
             assert ctrl is not None
             ctrl.update()
-
-        # 5. Leer observación de vuelta
-        obs = pybh.rl_get_obs(PLAYER_NUMBER, 1000)
-        if not obs["obs_ready"]:
-            raise RuntimeError(f"No llegó observación RL en backend={backend} paso={step}.")
-        ball_pos[0] = obs["ball_x"]
-        ball_pos[1] = obs["ball_y"]
-        robot_pos[0] = obs["robot_x"]
-        robot_pos[1] = obs["robot_y"]
-        robot_theta = obs["robot_theta"]
+            obs = pybh.rl_get_obs(PLAYER_NUMBER, 1000)
+            if not obs["obs_ready"]:
+                raise RuntimeError(f"No llegó observación RL en backend={backend} paso={step}.")
+            ball_pos[0] = obs["ball_x"]
+            ball_pos[1] = obs["ball_y"]
+            robot_pos[0] = obs["robot_x"]
+            robot_pos[1] = obs["robot_y"]
+            robot_theta = obs["robot_theta"]
+        else:
+            assert backend_runner is not None
+            obs = backend_runner.step(action)
+            ball_pos[0] = obs.ball_x
+            ball_pos[1] = obs.ball_y
+            robot_pos[0] = obs.robot_x
+            robot_pos[1] = obs.robot_y
+            robot_theta = obs.robot_theta
 
         # 6. Física local fallback cuando no se usa el backend C++.
         if backend == "python" and shoot_issued:
@@ -361,13 +359,16 @@ def _run_episode(ctrl: Optional[pybh.Controller], seed: int, backend: str) -> Di
 # ── Experimento ───────────────────────────────────────────────────────────────
 
 def run_experiment(n_episodes: int, seed_base: int, backend: str) -> List[Dict]:
-    if backend == "simrobot":
-        if not hasattr(pybh, "simrobot_load_scene"):
-            raise RuntimeError("La versión instalada de pybh no expone simrobot_load_scene().")
-        if not pybh.simrobot_load_scene(str(SIMROBOT_SCENE_PATH)):
-            raise RuntimeError(f"No se pudo cargar la escena SimRobot: {pybh.simrobot_last_error()}")
+    if backend in {"cpp", "simrobot"}:
+        backend_runner = PyBHBackend(
+            mode=backend,
+            frames_per_step=3 if backend == "simrobot" else 1,
+            obs_timeout_ms=1000,
+        )
+        backend_runner.start()
         ctrl = None
     else:
+        backend_runner = None
         ctrl = pybh.Controller()
         ctrl.add_player(
             name=f"Heron{PLAYER_NUMBER}",
@@ -383,15 +384,15 @@ def run_experiment(n_episodes: int, seed_base: int, backend: str) -> List[Dict]:
     results = []
     try:
         for i in range(n_episodes):
-            r = _run_episode(ctrl, seed_base + i, backend=backend)
+            r = _run_episode(ctrl, backend_runner, seed_base + i, backend=backend)
             results.append(r)
             if (i + 1) % 10 == 0:
                 g = sum(x["goal_scored"] for x in results)
                 h = sum(x["handoff_ready"] for x in results)
                 print(f"  [{i+1}/{n_episodes}] goals={g}  handoffs={h}")
     finally:
-        if backend == "simrobot":
-            pybh.simrobot_unload_scene()
+        if backend_runner is not None:
+            backend_runner.close()
         else:
             assert ctrl is not None
             ctrl.stop()
@@ -399,7 +400,7 @@ def run_experiment(n_episodes: int, seed_base: int, backend: str) -> List[Dict]:
     return results
 
 
-def print_summary(results: List[Dict]) -> None:
+def print_summary(results: List[Dict], backend: str) -> None:
     n = len(results)
     goals    = sum(r["goal_scored"]   for r in results)
     handoffs = sum(r["handoff_ready"] for r in results)
@@ -408,7 +409,7 @@ def print_summary(results: List[Dict]) -> None:
 
     print()
     print("=" * 55)
-    print(f"  HEURISTIC AGENT — SimRobot path ({n} episodios)")
+    print(f"  HEURISTIC AGENT — {backend} ({n} episodios)")
     print("=" * 55)
     print(f"  goal_rate      : {goals/n:.3f}  ({goals}/{n})")
     print(f"  handoff_rate   : {handoffs/n:.3f}  ({handoffs}/{n})")
@@ -493,7 +494,7 @@ def main() -> None:
     results = run_experiment(args.episodes, args.seed_base, backend=backend)
     elapsed = time.perf_counter() - t0
 
-    print_summary(results)
+    print_summary(results, backend)
     print(f"  Tiempo total: {elapsed:.1f}s  ({elapsed/args.episodes:.2f}s/episodio)")
 
     save_csv(results, _SCRIPT_DIR / "heuristic_experiment_results.csv")

@@ -30,16 +30,23 @@ class RealSimRobotEnv(ParallelEnv):
             "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         }
         self.action_spaces = {
-            "player_1": gym.spaces.Dict(
-                {
-                    "skill_type": gym.spaces.Discrete(len(ACTION.skill_names)),
-                    "target_x": gym.spaces.Box(low=-ACTION.x_range, high=ACTION.x_range, shape=(), dtype=np.float32),
-                    "target_y": gym.spaces.Box(low=-ACTION.y_range, high=ACTION.y_range, shape=(), dtype=np.float32),
-                    "target_theta": gym.spaces.Box(low=-math.pi, high=math.pi, shape=(), dtype=np.float32),
-                    "pass_target": gym.spaces.Discrete(ACTION.max_pass_target + 1),
-                }
+            "player_1": gym.spaces.Box(
+                low=np.asarray([0.0, -ACTION.x_range, -ACTION.y_range, -math.pi, 0.0], dtype=np.float32),
+                high=np.asarray(
+                    [
+                        float(len(ACTION.skill_names) - 1),
+                        ACTION.x_range,
+                        ACTION.y_range,
+                        math.pi,
+                        float(ACTION.max_pass_target),
+                    ],
+                    dtype=np.float32,
+                ),
+                shape=(5,),
+                dtype=np.float32,
             )
         }
+        self.state_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         self._rng = np.random.default_rng(self.cfg.seed)
         self._last_obs: Optional[np.ndarray] = None
         self._episode_step = 0
@@ -96,8 +103,8 @@ class RealSimRobotEnv(ParallelEnv):
         self._last_obs = encoded
         info = self._build_info(obs)
         rewards = {"player_1": reward.total}
-        terminations = {"player_1": done, "__all__": done}
-        truncations = {"player_1": False, "__all__": False}
+        terminations = {"player_1": done}
+        truncations = {"player_1": False}
         if done:
             self.agents = []
         return {"player_1": encoded}, rewards, terminations, truncations, {"player_1": info}
@@ -107,6 +114,9 @@ class RealSimRobotEnv(ParallelEnv):
 
     def get_global_state(self) -> np.ndarray:
         return self._last_obs.copy() if self._last_obs is not None else np.zeros(9, dtype=np.float32)
+
+    def state(self) -> np.ndarray:
+        return self.get_global_state()
 
     def _encode_obs(self, obs: BackendObservation) -> np.ndarray:
         dx = obs.ball_x - obs.robot_x

@@ -62,6 +62,10 @@ class EnvConfig:
 class TrainConfig:
     seed: int = 42
     smoke_steps: int = 32
+    trainer_timesteps: int = 64
+    rollout_steps: int = 16
+    learning_epochs: int = 2
+    mini_batches: int = 2
     hidden_size: int = 128
     device: str = "cpu"
 
