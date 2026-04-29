@@ -11,15 +11,14 @@ import numpy as np
 from action import SkillType, StructuredSkillAction, clamp_action
 from config import (
     ACTION,
+    BackendConfig,
     BHUMAN_DIR,
     DT,
-    MM_PER_M,
     PLAYER_NUMBER,
     SCENARIO,
-    SIMROBOT_ROBOT_NAME,
-    SIMROBOT_SCENE_PATH,
     TEAM_NUMBER,
     LOCATION,
+    resolve_simrobot_scene_config,
 )
 
 os.chdir(BHUMAN_DIR)
@@ -98,10 +97,28 @@ class BackendObservation:
 
 
 class PyBHBackend:
-    def __init__(self, *, mode: str = "simrobot", frames_per_step: int = 1, obs_timeout_ms: int = 1000):
+    def __init__(
+        self,
+        *,
+        mode: str = "simrobot",
+        frames_per_step: int = 1,
+        obs_timeout_ms: int = 1000,
+        simrobot_profile: str = "2d",
+        simrobot_scene_path: Path | None = None,
+        simrobot_robot_name: str | None = None,
+        simrobot_theta_offset: float | None = None,
+    ):
         self.mode = mode
         self.frames_per_step = max(1, int(frames_per_step))
         self.obs_timeout_ms = int(obs_timeout_ms)
+        self.simrobot_scene = resolve_simrobot_scene_config(
+            BackendConfig(
+                simrobot_profile=simrobot_profile,
+                simrobot_scene_path=simrobot_scene_path,
+                simrobot_robot_name=simrobot_robot_name,
+                simrobot_theta_offset=simrobot_theta_offset,
+            )
+        )
         self._controller = None
         self._started = False
         self._last_obs: Optional[BackendObservation] = None
@@ -110,7 +127,7 @@ class PyBHBackend:
         if self._started:
             return
         if self.mode == "simrobot":
-            if not pybh.simrobot_load_scene(str(SIMROBOT_SCENE_PATH)):
+            if not pybh.simrobot_load_scene(str(self.simrobot_scene.scene_path)):
                 raise RuntimeError(f"simrobot_load_scene failed: {pybh.simrobot_last_error()}")
         else:
             self._controller = pybh.Controller()
@@ -236,14 +253,16 @@ class PyBHBackend:
             float(robot_theta),
         )
 
-    @staticmethod
-    def _simrobot_reset(ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
-        scene_ball_x = float(-ball_pos[0] / MM_PER_M)
-        scene_ball_y = float(-ball_pos[1] / MM_PER_M)
-        scene_robot_x = float(-robot_pos[0] / MM_PER_M)
-        scene_robot_y = float(-robot_pos[1] / MM_PER_M)
-        scene_robot_theta = float(math.atan2(math.sin(robot_theta - math.pi), math.cos(robot_theta - math.pi)))
+    def _simrobot_reset(self, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
+        scale = self.simrobot_scene.position_scale
+        scene_ball_x = float(ball_pos[0] * scale)
+        scene_ball_y = float(ball_pos[1] * scale)
+        scene_robot_x = float(robot_pos[0] * scale)
+        scene_robot_y = float(robot_pos[1] * scale)
+        scene_robot_theta = float(_normalize_angle(robot_theta + self.simrobot_scene.theta_offset))
         if not pybh.simrobot_set_ball_state(scene_ball_x, scene_ball_y, 0.0, 0.0):
             raise RuntimeError("simrobot_set_ball_state failed")
-        if not pybh.simrobot_set_robot_pose(SIMROBOT_ROBOT_NAME, scene_robot_x, scene_robot_y, scene_robot_theta):
-            raise RuntimeError(f"simrobot_set_robot_pose failed for {SIMROBOT_ROBOT_NAME}")
+        if not pybh.simrobot_set_robot_pose(
+            self.simrobot_scene.robot_name, scene_robot_x, scene_robot_y, scene_robot_theta
+        ):
+            raise RuntimeError(f"simrobot_set_robot_pose failed for {self.simrobot_scene.robot_name}")

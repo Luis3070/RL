@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from config import BHUMAN_DIR, PLAYER_NUMBER, SIMROBOT_SCENE_PATH
+from config import BHUMAN_DIR, PLAYER_NUMBER, SIMROBOT_SCENE_PRESETS
 from action import SkillType, StructuredSkillAction
 from pybh_backend import adapt_action_to_backend
 
@@ -23,10 +23,11 @@ LIVE_SHOOT_DISTANCE_MM = 260.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Drive a visible SimRobot 2D scene from Python through RLSharedState."
+        description="Drive a visible SimRobot scene from Python through RLSharedState."
     )
     parser.add_argument("--player-number", type=int, default=PLAYER_NUMBER)
-    parser.add_argument("--scene", type=Path, default=SIMROBOT_SCENE_PATH)
+    parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default="2d")
+    parser.add_argument("--scene", type=Path, default=None)
     parser.add_argument("--simrobot-bin", type=Path, default=SIMROBOT_BIN)
     parser.add_argument("--launch", action="store_true", help="Launch SimRobot with the selected scene.")
     parser.add_argument(
@@ -116,6 +117,8 @@ def send_heuristic_action(player_number: int, obs: dict) -> str:
 
 def main() -> None:
     args = parse_args()
+    if args.scene is None:
+        args.scene = SIMROBOT_SCENE_PRESETS[args.simrobot_profile].scene_path
     simrobot_process = maybe_launch_simrobot(args.simrobot_bin, args.scene) if args.launch else None
 
     print("Visible SimRobot probe")

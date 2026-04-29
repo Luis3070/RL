@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
@@ -9,8 +9,6 @@ from action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
 
 ROOT_DIR = Path(__file__).resolve().parent
 BHUMAN_DIR = (ROOT_DIR.parent / "SabanaHerons2026").resolve()
-SIMROBOT_SCENE_PATH = BHUMAN_DIR / "Config/Scenes/RL1v0.ros2d"
-SIMROBOT_ROBOT_NAME = "robot1"
 
 TEAM_NUMBER = 24
 PLAYER_NUMBER = 1
@@ -24,6 +22,33 @@ GOAL_Y_HALF = 750.0
 MM_PER_M = 1000.0
 DT = 0.033
 MAX_EPISODE_STEPS = 400
+
+
+@dataclass(frozen=True)
+class SimRobotSceneConfig:
+    profile: str
+    scene_path: Path
+    robot_name: str = "robot1"
+    position_scale: float = -1.0 / MM_PER_M
+    theta_offset: float = -math.pi
+
+
+SIMROBOT_SCENE_PRESETS = {
+    "2d": SimRobotSceneConfig(
+        profile="2d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0.ros2d",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-math.pi,
+    ),
+    "3d": SimRobotSceneConfig(
+        profile="3d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0.ros2",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-(math.pi / 2.0),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +70,25 @@ class BackendConfig:
     mode: str = "simrobot"
     frames_per_step: int = 1
     obs_timeout_ms: int = 1000
+    simrobot_profile: str = "2d"
+    simrobot_scene_path: Path | None = None
+    simrobot_robot_name: str | None = None
+    simrobot_theta_offset: float | None = None
+
+
+def resolve_simrobot_scene_config(backend: BackendConfig) -> SimRobotSceneConfig:
+    if backend.simrobot_profile not in SIMROBOT_SCENE_PRESETS:
+        valid_profiles = ", ".join(sorted(SIMROBOT_SCENE_PRESETS))
+        raise ValueError(f"Unsupported SimRobot profile {backend.simrobot_profile!r}. Expected one of: {valid_profiles}")
+
+    scene_cfg = SIMROBOT_SCENE_PRESETS[backend.simrobot_profile]
+    if backend.simrobot_scene_path is not None:
+        scene_cfg = replace(scene_cfg, scene_path=Path(backend.simrobot_scene_path).resolve())
+    if backend.simrobot_robot_name is not None:
+        scene_cfg = replace(scene_cfg, robot_name=backend.simrobot_robot_name)
+    if backend.simrobot_theta_offset is not None:
+        scene_cfg = replace(scene_cfg, theta_offset=float(backend.simrobot_theta_offset))
+    return scene_cfg
 
 
 @dataclass(frozen=True)

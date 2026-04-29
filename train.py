@@ -15,7 +15,7 @@ from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
 from action import StructuredSkillAction, action_to_numpy
-from config import ACTION, ENV, TRAIN
+from config import ACTION, ENV, TRAIN, BackendConfig
 from environment import RealSimRobotEnv
 
 RUNS_DIR = str((Path(__file__).resolve().parent / "runs").resolve())
@@ -69,8 +69,8 @@ class ValueNetwork(DeterministicMixin, Model):
         return self.net(states), {}
 
 
-def build_env(backend: str):
-    env_cfg = replace(ENV, backend=replace(ENV.backend, mode=backend))
+def build_env(backend_cfg: BackendConfig):
+    env_cfg = replace(ENV, backend=backend_cfg)
     env = RealSimRobotEnv(env_cfg=env_cfg)
     return env, wrap_env(env, wrapper="pettingzoo")
 
@@ -148,8 +148,9 @@ def sample_smoke_action(agent: MAPPO, wrapped_env, observations, timestep: int, 
     return action
 
 
-def run_smoke(steps: int, backend: str, device: str) -> None:
-    raw_env, wrapped_env = build_env(backend)
+def run_smoke(steps: int, backend: str, device: str, simrobot_profile: str) -> None:
+    backend_cfg = replace(ENV.backend, mode=backend, simrobot_profile=simrobot_profile)
+    raw_env, wrapped_env = build_env(backend_cfg)
     observations, infos = wrapped_env.reset()
     agent = build_mappo(wrapped_env, device)
     total_reward = 0.0
@@ -171,8 +172,9 @@ def run_smoke(steps: int, backend: str, device: str) -> None:
     print(f"[smoke] total_reward={total_reward:.3f}")
 
 
-def run_training(timesteps: int, backend: str, device: str) -> None:
-    raw_env, wrapped_env = build_env(backend)
+def run_training(timesteps: int, backend: str, device: str, simrobot_profile: str) -> None:
+    backend_cfg = replace(ENV.backend, mode=backend, simrobot_profile=simrobot_profile)
+    raw_env, wrapped_env = build_env(backend_cfg)
     agent = build_mappo(wrapped_env, device)
     trainer_cfg = SequentialTrainerCfg(
         timesteps=timesteps,
@@ -227,6 +229,7 @@ def run_training(timesteps: int, backend: str, device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train or smoke-test the pybh SkillRequest environment")
     parser.add_argument("--backend", choices=("simrobot", "cpp", "python"), default="simrobot")
+    parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default=ENV.backend.simrobot_profile)
     parser.add_argument("--mode", choices=("smoke", "train"), default="smoke")
     parser.add_argument("--smoke-steps", type=int, default=TRAIN.smoke_steps)
     parser.add_argument("--train-steps", type=int, default=TRAIN.trainer_timesteps)
@@ -234,9 +237,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.mode == "smoke":
-        run_smoke(args.smoke_steps, backend=args.backend, device=args.device)
+        run_smoke(args.smoke_steps, backend=args.backend, device=args.device, simrobot_profile=args.simrobot_profile)
     else:
-        run_training(args.train_steps, backend=args.backend, device=args.device)
+        run_training(
+            args.train_steps,
+            backend=args.backend,
+            device=args.device,
+            simrobot_profile=args.simrobot_profile,
+        )
 
 
 if __name__ == "__main__":
