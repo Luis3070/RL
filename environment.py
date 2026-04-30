@@ -29,6 +29,8 @@ class RealSimRobotEnv(ParallelEnv):
             simrobot_scene_path=self.cfg.backend.simrobot_scene_path,
             simrobot_robot_name=self.cfg.backend.simrobot_robot_name,
             simrobot_theta_offset=self.cfg.backend.simrobot_theta_offset,
+            simrobot_launch=self.cfg.backend.simrobot_launch,
+            simrobot_bin=self.cfg.backend.simrobot_bin,
         )
         self.observation_spaces = {
             "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)

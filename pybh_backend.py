@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -43,8 +44,9 @@ def adapt_action_to_backend(
     *,
     mode: str,
 ) -> StructuredSkillAction:
-    # The C++ RLSim2D path consumes field-global walk targets directly.
-    if mode == "cpp" or obs is None or action.skill is not SkillType.walk:
+    # B-Human SkillRequest::walkTo consumes field-global targets. Only the
+    # legacy Python world-state backend needs robot-relative walk commands.
+    if mode in {"cpp", "simrobot", "simrobot_visible"} or obs is None or action.skill is not SkillType.walk:
         return action
 
     if isinstance(obs, BackendObservation):
@@ -107,6 +109,8 @@ class PyBHBackend:
         simrobot_scene_path: Path | None = None,
         simrobot_robot_name: str | None = None,
         simrobot_theta_offset: float | None = None,
+        simrobot_launch: bool = False,
+        simrobot_bin: Path | None = None,
     ):
         self.mode = mode
         self.frames_per_step = max(1, int(frames_per_step))
@@ -122,13 +126,35 @@ class PyBHBackend:
         self._controller = None
         self._started = False
         self._last_obs: Optional[BackendObservation] = None
+        self._simrobot_launch = bool(simrobot_launch)
+        self._simrobot_bin = Path(simrobot_bin).resolve() if simrobot_bin is not None else None
+        self._simrobot_process: subprocess.Popen[str] | None = None
+
+    def _uses_embedded_simrobot(self) -> bool:
+        return self.mode == "simrobot"
+
+    def _uses_visible_simrobot(self) -> bool:
+        return self.mode == "simrobot_visible"
 
     def start(self) -> None:
         if self._started:
             return
-        if self.mode == "simrobot":
+        if self._uses_embedded_simrobot():
+            pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
             if not pybh.simrobot_load_scene(str(self.simrobot_scene.scene_path)):
                 raise RuntimeError(f"simrobot_load_scene failed: {pybh.simrobot_last_error()}")
+        elif self._uses_visible_simrobot():
+            pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
+            if self._simrobot_launch:
+                if self._simrobot_bin is None or not self._simrobot_bin.exists():
+                    raise FileNotFoundError(f"SimRobot binary not found: {self._simrobot_bin}")
+                if not self.simrobot_scene.scene_path.exists():
+                    raise FileNotFoundError(f"SimRobot scene not found: {self.simrobot_scene.scene_path}")
+                self._simrobot_process = subprocess.Popen(
+                    [str(self._simrobot_bin), str(self.simrobot_scene.scene_path)],
+                    cwd=BHUMAN_DIR,
+                    env=os.environ.copy(),
+                )
         else:
             self._controller = pybh.Controller()
             self._controller.add_player(
@@ -147,8 +173,13 @@ class PyBHBackend:
     def close(self) -> None:
         if not self._started:
             return
-        if self.mode == "simrobot":
+        if self._uses_embedded_simrobot():
             pybh.simrobot_unload_scene()
+        elif self._uses_visible_simrobot():
+            if self._simrobot_process is not None and self._simrobot_process.poll() is None:
+                self._simrobot_process.terminate()
+                self._simrobot_process.wait(timeout=5)
+            self._simrobot_process = None
         elif self._controller is not None:
             self._controller.stop()
             self._controller = None
@@ -157,10 +188,15 @@ class PyBHBackend:
 
     def reset(self, *, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> BackendObservation:
         self.start()
-        if self.mode == "simrobot":
+        if self._uses_embedded_simrobot():
             self._simrobot_reset(ball_pos, robot_pos, robot_theta)
             self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-            pybh.simrobot_step(1)
+            obs = self._wait_for_embedded_reset_obs(robot_pos)
+            self._last_obs = obs
+            return obs
+        elif self._uses_visible_simrobot():
+            self._visible_simrobot_reset(ball_pos, robot_pos, robot_theta)
+            self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
         elif self.mode == "cpp":
             pybh.rl_sim_reset(
                 PLAYER_NUMBER,
@@ -196,8 +232,10 @@ class PyBHBackend:
         adapted_action = adapt_action_to_backend(action, self._last_obs, mode=self.mode)
         self._set_action(adapted_action)
         for _ in range(self.frames_per_step):
-            if self.mode == "simrobot":
+            if self._uses_embedded_simrobot():
                 pybh.simrobot_step(1)
+            elif self._uses_visible_simrobot():
+                break
             else:
                 self._step_controller()
         obs = self.read_obs()
@@ -211,7 +249,7 @@ class PyBHBackend:
             if obs.obs_ready:
                 self._last_obs = obs
                 return obs
-            if self.mode == "simrobot":
+            if self._uses_embedded_simrobot():
                 pybh.simrobot_step(1)
             elif self.mode == "cpp" and attempt + 1 < attempts:
                 self._step_controller()
@@ -266,3 +304,29 @@ class PyBHBackend:
             self.simrobot_scene.robot_name, scene_robot_x, scene_robot_y, scene_robot_theta
         ):
             raise RuntimeError(f"simrobot_set_robot_pose failed for {self.simrobot_scene.robot_name}")
+
+    def _wait_for_embedded_reset_obs(self, robot_pos: np.ndarray, *, max_steps: int = 80) -> BackendObservation:
+        expected_x = float(robot_pos[0])
+        expected_y = float(robot_pos[1])
+        last_obs: BackendObservation | None = None
+        for _ in range(max_steps):
+            pybh.simrobot_step(1)
+            obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, max(1, self.obs_timeout_ms // 10)))
+            last_obs = obs
+            if not obs.obs_ready:
+                continue
+            if math.hypot(obs.robot_x - expected_x, obs.robot_y - expected_y) <= 150.0:
+                return obs
+        if last_obs is not None and last_obs.obs_ready:
+            return last_obs
+        raise RuntimeError("pybh.rl_get_obs timed out while waiting for embedded SimRobot reset")
+
+    def _visible_simrobot_reset(self, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
+        pybh.rl_reset_world(
+            PLAYER_NUMBER,
+            float(ball_pos[0]),
+            float(ball_pos[1]),
+            float(robot_pos[0]),
+            float(robot_pos[1]),
+            float(robot_theta),
+        )

@@ -9,11 +9,12 @@ from action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
 
 ROOT_DIR = Path(__file__).resolve().parent
 BHUMAN_DIR = (ROOT_DIR.parent / "SabanaHerons2026").resolve()
+SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 
 TEAM_NUMBER = 24
 PLAYER_NUMBER = 1
 LOCATION = "field_e"
-SCENARIO = "4v4_Scaled"
+SCENARIO = "4v4_RL2D"
 
 FIELD_X_HALF = 4500.0
 FIELD_Y_HALF = 3000.0
@@ -43,7 +44,7 @@ SIMROBOT_SCENE_PRESETS = {
     ),
     "3d": SimRobotSceneConfig(
         profile="3d",
-        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0.ros2",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0_3D.ros2",
         robot_name="robot1",
         position_scale=-1.0 / MM_PER_M,
         theta_offset=-(math.pi / 2.0),
@@ -74,6 +75,8 @@ class BackendConfig:
     simrobot_scene_path: Path | None = None
     simrobot_robot_name: str | None = None
     simrobot_theta_offset: float | None = None
+    simrobot_launch: bool = False
+    simrobot_bin: Path = SIMROBOT_BIN
 
 
 def resolve_simrobot_scene_config(backend: BackendConfig) -> SimRobotSceneConfig:

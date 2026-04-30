@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import math
+from pathlib import Path
 
 import numpy as np
 
 from action import SkillType, StructuredSkillAction
+from config import SIMROBOT_BIN
 from pybh_backend import PyBHBackend
 
 
@@ -23,8 +25,10 @@ def build_probe_action(skill: SkillType) -> StructuredSkillAction:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke every public SkillRequest variant through pybh")
-    parser.add_argument("--backend", choices=("simrobot", "cpp", "python"), default="cpp")
+    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible", "cpp", "python"), default="cpp")
     parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default="2d")
+    parser.add_argument("--launch-simrobot", action="store_true")
+    parser.add_argument("--simrobot-bin", type=Path, default=SIMROBOT_BIN)
     args = parser.parse_args()
 
     backend = PyBHBackend(
@@ -32,6 +36,8 @@ def main() -> None:
         frames_per_step=3 if args.backend == "simrobot" else 1,
         obs_timeout_ms=1000,
         simrobot_profile=args.simrobot_profile,
+        simrobot_launch=args.launch_simrobot,
+        simrobot_bin=args.simrobot_bin,
     )
     backend.start()
     try:

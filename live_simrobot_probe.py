@@ -11,7 +11,6 @@ import numpy as np
 
 from config import BHUMAN_DIR, PLAYER_NUMBER, SIMROBOT_SCENE_PRESETS
 from action import SkillType, StructuredSkillAction
-from pybh_backend import adapt_action_to_backend
 
 os.chdir(BHUMAN_DIR)
 import pybh.controller as pybh
@@ -19,6 +18,10 @@ import pybh.controller as pybh
 
 SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 LIVE_SHOOT_DISTANCE_MM = 260.0
+LIVE_RESET_BALL_POS = np.array([0.0, 0.0], dtype=np.float32)
+LIVE_RESET_ROBOT_POS = np.array([-900.0, 0.0], dtype=np.float32)
+LIVE_RESET_ROBOT_THETA = 0.0
+LIVE_RESET_TOLERANCE_MM = 150.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +61,7 @@ def maybe_launch_simrobot(simrobot_bin: Path, scene: Path) -> subprocess.Popen[s
         raise FileNotFoundError(f"SimRobot binary not found: {simrobot_bin}")
     if not scene.exists():
         raise FileNotFoundError(f"Scene file not found: {scene}")
-    return subprocess.Popen([str(simrobot_bin), str(scene)], cwd=BHUMAN_DIR)
+    return subprocess.Popen([str(simrobot_bin), str(scene)], cwd=BHUMAN_DIR, env=os.environ.copy())
 
 
 def send_phase_action(player_number: int, phase: int, obs: dict | None) -> str:
@@ -75,15 +78,14 @@ def send_phase_action(player_number: int, phase: int, obs: dict | None) -> str:
         pybh.rl_set_action(player_number, "stand", 0.0, 0.0, 0.0)
         return "stand"
 
-    adapted_action = adapt_action_to_backend(action, obs, mode="python")
     pybh.rl_set_action(
         player_number,
         "walkTo",
-        float(adapted_action.target_x),
-        float(adapted_action.target_y),
-        float(adapted_action.target_theta),
+        float(action.target_x),
+        float(action.target_y),
+        float(action.target_theta),
     )
-    return f"walkToRel({adapted_action.target_x:.0f}, {adapted_action.target_y:.0f}, {adapted_action.target_theta:.2f})"
+    return f"walkToField({action.target_x:.0f}, {action.target_y:.0f}, {action.target_theta:.2f})"
 
 
 def send_heuristic_action(player_number: int, obs: dict) -> str:
@@ -101,18 +103,29 @@ def send_heuristic_action(player_number: int, obs: dict) -> str:
         target_y=float(ball_pos[1]),
         target_theta=float(math.atan2(float(delta[1]), float(delta[0]))),
     )
-    adapted_action = adapt_action_to_backend(global_action, obs, mode="python")
     pybh.rl_set_action(
         player_number,
         "walkTo",
-        float(adapted_action.target_x),
-        float(adapted_action.target_y),
-        float(adapted_action.target_theta),
+        float(global_action.target_x),
+        float(global_action.target_y),
+        float(global_action.target_theta),
     )
     return (
-        f"walkToRel({adapted_action.target_x:.0f}, "
-        f"{adapted_action.target_y:.0f}, {adapted_action.target_theta:.2f})"
+        f"walkToField({global_action.target_x:.0f}, "
+        f"{global_action.target_y:.0f}, {global_action.target_theta:.2f})"
     )
+
+
+def wait_for_reset_observation(player_number: int, timeout_ms: int, max_wait_s: float = 30.0) -> dict | None:
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        obs = pybh.rl_get_obs(player_number, timeout_ms)
+        if not obs.get("obs_ready", False):
+            continue
+        robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
+        if float(np.linalg.norm(robot_pos - LIVE_RESET_ROBOT_POS)) <= LIVE_RESET_TOLERANCE_MM:
+            return obs
+    return None
 
 
 def main() -> None:
@@ -129,6 +142,30 @@ def main() -> None:
     print("If the SimRobot window is open, start the simulation with F5 before expecting observations.")
     print("Press Ctrl+C to stop.")
 
+    pybh.rl_reset_world(
+        args.player_number,
+        float(LIVE_RESET_BALL_POS[0]),
+        float(LIVE_RESET_BALL_POS[1]),
+        float(LIVE_RESET_ROBOT_POS[0]),
+        float(LIVE_RESET_ROBOT_POS[1]),
+        float(LIVE_RESET_ROBOT_THETA),
+    )
+    pybh.rl_set_action(args.player_number, "stand", 0.0, 0.0, 0.0)
+    initial_obs = wait_for_reset_observation(args.player_number, args.timeout_ms) if args.launch else None
+    if initial_obs is not None:
+        print(
+            "reset frame={frame} robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f})".format(
+                frame=int(initial_obs.get("frame", 0)),
+                rx=float(initial_obs.get("robot_x", 0.0)),
+                ry=float(initial_obs.get("robot_y", 0.0)),
+                rt=float(initial_obs.get("robot_theta", 0.0)),
+                bx=float(initial_obs.get("ball_x", 0.0)),
+                by=float(initial_obs.get("ball_y", 0.0)),
+            )
+        )
+    elif args.launch:
+        print("reset obs not confirmed yet; continuing with phase policy until observations settle")
+
     period = 1.0 / max(args.hz, 0.1)
     phase_steps = max(1, int(round(args.hz * 2.0)))
     if args.steps is not None:
@@ -140,7 +177,7 @@ def main() -> None:
 
     try:
         step = 0
-        last_obs: dict | None = None
+        last_obs: dict | None = initial_obs
         while total_steps is None or step < total_steps:
             if args.policy == "heuristic" and last_obs is not None and last_obs.get("obs_ready", False):
                 action_name = send_heuristic_action(args.player_number, last_obs)
@@ -153,7 +190,12 @@ def main() -> None:
             else:
                 print(
                     "step={step} action={action} frame={frame} "
-                    "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f})".format(
+                    "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f}) "
+                    "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
+                    "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
+                    "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
+                    "motion=({motion},{phase}) speed=({sx:.1f},{sy:.1f},{sr:.2f}) "
+                    "legs=({lhp:.2f},{lkp:.2f},{rhp:.2f},{rkp:.2f})".format(
                         step=step + 1,
                         action=action_name,
                         frame=int(obs.get("frame", 0)),
@@ -162,6 +204,34 @@ def main() -> None:
                         rt=float(obs.get("robot_theta", 0.0)),
                         bx=float(obs.get("ball_x", 0.0)),
                         by=float(obs.get("ball_y", 0.0)),
+                        pmotion=int(obs.get("provider_motion_request", -1)),
+                        pcalls=int(obs.get("provider_call_count", -1)),
+                        ptx=float(obs.get("provider_target_x", 0.0)),
+                        pty=float(obs.get("provider_target_y", 0.0)),
+                        ptt=float(obs.get("provider_target_theta", 0.0)),
+                        sbskill=int(obs.get("skill_behavior_skill_request", -1)),
+                        sbmotion=int(obs.get("skill_behavior_motion_request", -1)),
+                        sbcalls=int(obs.get("skill_behavior_call_count", -1)),
+                        sbx=float(obs.get("skill_behavior_walk_target_x", 0.0)),
+                        sby=float(obs.get("skill_behavior_walk_target_y", 0.0)),
+                        sbt=float(obs.get("skill_behavior_walk_target_theta", 0.0)),
+                        mein=int(obs.get("motion_engine_input_request", -1)),
+                        meeff=int(obs.get("motion_engine_effective_request", -1)),
+                        mephase=int(obs.get("motion_engine_phase", -1)),
+                        mesit=int(bool(obs.get("motion_engine_force_sit_down", False))),
+                        megyro=int(bool(obs.get("motion_engine_gyro_offset_finished", False))),
+                        mefall=int(obs.get("motion_engine_fall_state", -1)),
+                        meix=float(obs.get("motion_engine_inertial_angle_x", 0.0)),
+                        meiy=float(obs.get("motion_engine_inertial_angle_y", 0.0)),
+                        motion=int(obs.get("motion_request", -1)),
+                        phase=int(obs.get("motion_phase", -1)),
+                        sx=float(obs.get("motion_speed_x", 0.0)),
+                        sy=float(obs.get("motion_speed_y", 0.0)),
+                        sr=float(obs.get("motion_speed_rot", 0.0)),
+                        lhp=float(obs.get("joint_l_hip_pitch", 0.0)),
+                        lkp=float(obs.get("joint_l_knee_pitch", 0.0)),
+                        rhp=float(obs.get("joint_r_hip_pitch", 0.0)),
+                        rkp=float(obs.get("joint_r_knee_pitch", 0.0)),
                     )
                 )
             step += 1
