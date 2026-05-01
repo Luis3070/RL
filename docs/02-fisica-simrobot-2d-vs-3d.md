@@ -145,3 +145,22 @@ joint_* cambian con valores de caminata
 
 Si esas trazas estan vivas, B-Human esta generando caminata natural.
 
+## Comparativo medido en esta sesion
+
+El detalle completo esta en [06-simrobot-skill-matrix.md](./06-simrobot-skill-matrix.md).
+
+Resumen:
+
+- `2d`: `8/8` skills validadas.
+- `3d`: `8/8` skills validadas.
+- `2d` RSS promedio del proceso: ~`179774 KB`.
+- `3d` RSS promedio del proceso: ~`192248 KB`.
+- `2d` step wall promedio: ~`324.6 ms`.
+- `3d` step wall promedio: ~`236.5 ms`.
+
+Interpretacion correcta de esos numeros:
+
+- `3d` no necesariamente sale mas lento en esta muestra porque la medicion es del proceso Python completo, no de un benchmark aislado del motor fisico.
+- `2d` paga mas overhead relativo en algunas skills porque el bridge y la observacion planar quedan dominando el costo total.
+- el `cpu_ms` del proceso puede ser mayor que el `wall_ms` porque `B-Human` ejecuta varios threads y `time.process_time()` acumula CPU consumido por todos ellos.
+- el primer reset de `2d` es mas caro porque incluye el costo frio de carga/estabilizacion de escena.

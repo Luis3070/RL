@@ -10,6 +10,7 @@ Lectura recomendada:
 4. [Contrato RL, backend y entorno](./03-contrato-rl-env.md)
 5. [Verificacion operativa](./04-verificacion-operativa.md)
 6. [Premisas irrompibles](./05-premisas-irrompibles.md)
+7. [Matriz de skills y comparativo 2D vs 3D](./06-simrobot-skill-matrix.md)
 
 Resumen corto:
 
@@ -19,4 +20,3 @@ Resumen corto:
 - `MotionEngine` y SimRobot ejecutan la caminata natural.
 - El backend rapido `cpp` usa `RLSim2D`, pero ahora tambien avanza desde el `MotionRequest` final.
 - Los perfiles SimRobot reales (`2d`, `3d`) tienen `sim2D.enabled = false`.
-

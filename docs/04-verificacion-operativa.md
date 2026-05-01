@@ -197,3 +197,20 @@ rm -f /dev/shm/pybh_rl_shared_state_v2
 
 Con version 12, el mutex es robusto y normalmente no deberia hacer falta.
 
+## Matriz completa de skills
+
+Hay un harness reproducible para validar todas las skills y generar comparativo cuantitativo entre `2d` y `3d`:
+
+```bash
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+.venv/bin/python validate_simrobot_matrix.py \
+  --steps-per-skill 20 \
+  --output docs/06-simrobot-skill-matrix.md
+```
+
+Ese script:
+
+- valida `stand`, `walk`, `shoot`, `pass`, `dribble`, `block`, `mark`, `observe`;
+- comprueba que `requested_skill`, `SkillBehaviorControl` y `MotionEngine` queden consistentes;
+- registra `reset_wall_ms`, `step_wall_ms`, `step_cpu_ms` y `rss_kb`;
+- deja el reporte final en [06-simrobot-skill-matrix.md](./06-simrobot-skill-matrix.md).
