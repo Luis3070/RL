@@ -11,6 +11,8 @@ Lectura recomendada:
 5. [Verificacion operativa](./04-verificacion-operativa.md)
 6. [Premisas irrompibles](./05-premisas-irrompibles.md)
 7. [Matriz de skills y comparativo 2D vs 3D](./06-simrobot-skill-matrix.md)
+8. [Observation space realista y fallback de canary](./07-observation-space-realista-y-fallback-canary.md)
+9. [Handoff tecnico PPO 23 vars + MAPPO 35 vars](./08-codex-handoff-ppo-mappo.md)
 
 Resumen corto:
 
