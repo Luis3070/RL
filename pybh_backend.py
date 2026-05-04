@@ -81,20 +81,66 @@ class BackendObservation:
     sim_enabled: bool
     requested_skill: str = ""
     requested_pass_target: int = -1
+    ball_rel_x: float = 0.0
+    ball_rel_y: float = 0.0
+    ball_end_rel_x: float = 0.0
+    ball_end_rel_y: float = 0.0
+    ball_vel_x: float = 0.0
+    ball_vel_y: float = 0.0
+    time_since_ball_seen: float = 0.0
+    time_since_ball_disappeared: float = 0.0
+    ball_seen_percentage: float = 0.0
+    ball_consistent_with_game_state: bool = False
+    can_score_now: bool = False
+    shot_quality_no_obstacles: float = 0.0
+    shot_opening_with_obstacles: float = 0.0
+    pass_options_count: float = 0.0
+    nearest_teammate_dist: float = 0.0
+    nearest_opponent_dist: float = 0.0
+    nearest_uncertain_obstacle_dist: float = 0.0
+    nearest_teammate_front_dist: float = 0.0
+    nearest_opponent_front_dist: float = 0.0
+    nearest_uncertain_front_dist: float = 0.0
 
     @classmethod
     def from_payload(cls, payload: dict) -> "BackendObservation":
+        robot_x = float(payload["robot_x"])
+        robot_y = float(payload["robot_y"])
+        robot_theta = float(payload["robot_theta"])
+        ball_x = float(payload["ball_x"])
+        ball_y = float(payload["ball_y"])
+        fallback_rel_x, fallback_rel_y = _field_to_robot(robot_x, robot_y, robot_theta, ball_x, ball_y)
         return cls(
-            ball_x=float(payload["ball_x"]),
-            ball_y=float(payload["ball_y"]),
-            robot_x=float(payload["robot_x"]),
-            robot_y=float(payload["robot_y"]),
-            robot_theta=float(payload["robot_theta"]),
+            ball_x=ball_x,
+            ball_y=ball_y,
+            robot_x=robot_x,
+            robot_y=robot_y,
+            robot_theta=robot_theta,
             frame=int(payload.get("frame", 0)),
             obs_ready=bool(payload.get("obs_ready", False)),
             sim_enabled=bool(payload.get("sim_enabled", False)),
             requested_skill=str(payload.get("requested_skill", "")),
             requested_pass_target=int(payload.get("requested_pass_target", -1)),
+            ball_rel_x=float(payload.get("ball_rel_x", fallback_rel_x)),
+            ball_rel_y=float(payload.get("ball_rel_y", fallback_rel_y)),
+            ball_end_rel_x=float(payload.get("ball_end_rel_x", fallback_rel_x)),
+            ball_end_rel_y=float(payload.get("ball_end_rel_y", fallback_rel_y)),
+            ball_vel_x=float(payload.get("ball_vel_x", 0.0)),
+            ball_vel_y=float(payload.get("ball_vel_y", 0.0)),
+            time_since_ball_seen=float(payload.get("time_since_ball_seen", 0.0)),
+            time_since_ball_disappeared=float(payload.get("time_since_ball_disappeared", 0.0)),
+            ball_seen_percentage=float(payload.get("ball_seen_percentage", 0.0)),
+            ball_consistent_with_game_state=bool(payload.get("ball_consistent_with_game_state", False)),
+            can_score_now=bool(payload.get("can_score_now", False)),
+            shot_quality_no_obstacles=float(payload.get("shot_quality_no_obstacles", 0.0)),
+            shot_opening_with_obstacles=float(payload.get("shot_opening_with_obstacles", 0.0)),
+            pass_options_count=float(payload.get("pass_options_count", 0.0)),
+            nearest_teammate_dist=float(payload.get("nearest_teammate_dist", 0.0)),
+            nearest_opponent_dist=float(payload.get("nearest_opponent_dist", 0.0)),
+            nearest_uncertain_obstacle_dist=float(payload.get("nearest_uncertain_obstacle_dist", 0.0)),
+            nearest_teammate_front_dist=float(payload.get("nearest_teammate_front_dist", 0.0)),
+            nearest_opponent_front_dist=float(payload.get("nearest_opponent_front_dist", 0.0)),
+            nearest_uncertain_front_dist=float(payload.get("nearest_uncertain_front_dist", 0.0)),
         )
 
 

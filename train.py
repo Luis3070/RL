@@ -148,8 +148,13 @@ def sample_smoke_action(agent: MAPPO, wrapped_env, observations, timestep: int, 
     return action
 
 
-def run_smoke(steps: int, backend: str, device: str, simrobot_profile: str) -> None:
-    backend_cfg = replace(ENV.backend, mode=backend, simrobot_profile=simrobot_profile)
+def run_smoke(steps: int, backend: str, device: str, simrobot_profile: str, simrobot_launch: bool = False) -> None:
+    backend_cfg = replace(
+        ENV.backend,
+        mode=backend,
+        simrobot_profile=simrobot_profile,
+        simrobot_launch=simrobot_launch,
+    )
     raw_env, wrapped_env = build_env(backend_cfg)
     observations, infos = wrapped_env.reset()
     agent = build_mappo(wrapped_env, device)
@@ -172,8 +177,13 @@ def run_smoke(steps: int, backend: str, device: str, simrobot_profile: str) -> N
     print(f"[smoke] total_reward={total_reward:.3f}")
 
 
-def run_training(timesteps: int, backend: str, device: str, simrobot_profile: str) -> None:
-    backend_cfg = replace(ENV.backend, mode=backend, simrobot_profile=simrobot_profile)
+def run_training(timesteps: int, backend: str, device: str, simrobot_profile: str, simrobot_launch: bool = False) -> None:
+    backend_cfg = replace(
+        ENV.backend,
+        mode=backend,
+        simrobot_profile=simrobot_profile,
+        simrobot_launch=simrobot_launch,
+    )
     raw_env, wrapped_env = build_env(backend_cfg)
     agent = build_mappo(wrapped_env, device)
     trainer_cfg = SequentialTrainerCfg(
@@ -228,7 +238,8 @@ def run_training(timesteps: int, backend: str, device: str, simrobot_profile: st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train or smoke-test the pybh SkillRequest environment")
-    parser.add_argument("--backend", choices=("simrobot", "cpp", "python"), default="simrobot")
+    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible", "cpp", "python"), default="simrobot")
+    parser.add_argument("--launch-simrobot", "--simrobot-launch", dest="simrobot_launch", action="store_true")
     parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default=ENV.backend.simrobot_profile)
     parser.add_argument("--mode", choices=("smoke", "train"), default="smoke")
     parser.add_argument("--smoke-steps", type=int, default=TRAIN.smoke_steps)
@@ -237,13 +248,20 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.mode == "smoke":
-        run_smoke(args.smoke_steps, backend=args.backend, device=args.device, simrobot_profile=args.simrobot_profile)
+        run_smoke(
+            args.smoke_steps,
+            backend=args.backend,
+            device=args.device,
+            simrobot_profile=args.simrobot_profile,
+            simrobot_launch=args.simrobot_launch,
+        )
     else:
         run_training(
             args.train_steps,
             backend=args.backend,
             device=args.device,
             simrobot_profile=args.simrobot_profile,
+            simrobot_launch=args.simrobot_launch,
         )
 
 

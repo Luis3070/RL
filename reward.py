@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from observation import ObsIndex
+
 
 @dataclass
 class RewardBreakdown:
@@ -36,6 +38,6 @@ def goal_scored(ball_x: float, ball_y: float, *, goal_x: float, goal_y_half: flo
 
 
 def ball_distance(obs: np.ndarray) -> float:
-    dx = float(obs[0])
-    dy = float(obs[1])
+    dx = float(obs[ObsIndex.ball_rel_x])
+    dy = float(obs[ObsIndex.ball_rel_y])
     return math.hypot(dx, dy)

@@ -18,6 +18,7 @@ import pybh.controller as pybh
 
 SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 LIVE_SHOOT_DISTANCE_MM = 260.0
+LIVE_SHOOT_HOLD_STEPS = 20
 LIVE_RESET_BALL_POS = np.array([0.0, 0.0], dtype=np.float32)
 LIVE_RESET_ROBOT_POS = np.array([-900.0, 0.0], dtype=np.float32)
 LIVE_RESET_ROBOT_THETA = 0.0
@@ -53,6 +54,8 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of loop iterations. Omit for continuous mode.",
     )
     parser.add_argument("--timeout-ms", type=int, default=1500)
+    parser.add_argument("--shoot-distance", type=float, default=LIVE_SHOOT_DISTANCE_MM)
+    parser.add_argument("--shoot-hold-steps", type=int, default=LIVE_SHOOT_HOLD_STEPS)
     return parser.parse_args()
 
 
@@ -88,14 +91,20 @@ def send_phase_action(player_number: int, phase: int, obs: dict | None) -> str:
     return f"walkToField({action.target_x:.0f}, {action.target_y:.0f}, {action.target_theta:.2f})"
 
 
-def send_heuristic_action(player_number: int, obs: dict) -> str:
+def ball_distance_from_obs(obs: dict) -> float:
+    robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
+    ball_pos = np.array([float(obs.get("ball_x", 0.0)), float(obs.get("ball_y", 0.0))], dtype=np.float32)
+    return float(np.linalg.norm(ball_pos - robot_pos))
+
+
+def send_heuristic_action(player_number: int, obs: dict, shoot_distance: float, force_shoot: bool = False) -> str:
     robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
     ball_pos = np.array([float(obs.get("ball_x", 0.0)), float(obs.get("ball_y", 0.0))], dtype=np.float32)
     delta = ball_pos - robot_pos
     distance = float(np.linalg.norm(delta))
-    if distance <= LIVE_SHOOT_DISTANCE_MM:
+    if force_shoot or distance <= shoot_distance:
         pybh.rl_set_action(player_number, "shoot", 0.0, 0.0, 0.0)
-        return "shoot"
+        return f"shoot(dist={distance:.0f})"
 
     global_action = StructuredSkillAction(
         skill_type=SkillType.walk,
@@ -178,16 +187,23 @@ def main() -> None:
     try:
         step = 0
         last_obs: dict | None = initial_obs
+        shoot_hold = 0
         while total_steps is None or step < total_steps:
             if args.policy == "heuristic" and last_obs is not None and last_obs.get("obs_ready", False):
-                action_name = send_heuristic_action(args.player_number, last_obs)
+                if ball_distance_from_obs(last_obs) <= args.shoot_distance:
+                    shoot_hold = max(shoot_hold, max(1, args.shoot_hold_steps))
+                force_shoot = shoot_hold > 0
+                action_name = send_heuristic_action(args.player_number, last_obs, args.shoot_distance, force_shoot)
+                if shoot_hold > 0:
+                    shoot_hold -= 1
             else:
                 action_name = send_phase_action(args.player_number, step // phase_steps, last_obs)
             obs = pybh.rl_get_obs(args.player_number, args.timeout_ms)
-            last_obs = obs
             if not obs.get("obs_ready", False):
-                print(f"step={step + 1} action={action_name} obs_ready=0")
+                stale_frame = int(last_obs.get("frame", 0)) if last_obs is not None else 0
+                print(f"step={step + 1} action={action_name} obs_ready=0 stale_frame={stale_frame}")
             else:
+                last_obs = obs
                 print(
                     "step={step} action={action} frame={frame} "
                     "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f}) "

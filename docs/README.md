@@ -13,6 +13,7 @@ Lectura recomendada:
 7. [Matriz de skills y comparativo 2D vs 3D](./06-simrobot-skill-matrix.md)
 8. [Observation space realista y fallback de canary](./07-observation-space-realista-y-fallback-canary.md)
 9. [Handoff tecnico PPO 23 vars + MAPPO 35 vars](./08-codex-handoff-ppo-mappo.md)
+10. [Implementacion PPO observation space 23](./09-implementacion-ppo-observation-space-23.md)
 
 Resumen corto:
 

@@ -9,8 +9,13 @@ from pettingzoo import ParallelEnv
 
 from action import StructuredSkillAction, action_from_mapping, action_from_numpy, skill_mask
 from config import ACTION, ENV, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, GOAL_Y_HALF
-from pybh_backend import BackendObservation, PyBHBackend
+from observation import OBS_FEATURE_NAMES, OBS_SIZE
 from reward import ball_distance, compute_progress_reward, goal_scored
+from pybh_backend import BackendObservation, PyBHBackend
+
+BALL_VEL_NORM = 3000.0
+TIME_NORM_MS = 5000.0
+PASS_COUNT_NORM = 5.0
 
 
 class RealSimRobotEnv(ParallelEnv):
@@ -33,7 +38,7 @@ class RealSimRobotEnv(ParallelEnv):
             simrobot_bin=self.cfg.backend.simrobot_bin,
         )
         self.observation_spaces = {
-            "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
+            "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
         }
         self.action_spaces = {
             "player_1": gym.spaces.Box(
@@ -52,7 +57,10 @@ class RealSimRobotEnv(ParallelEnv):
                 dtype=np.float32,
             )
         }
-        self.state_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
+        self.state_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
+        self.state_spaces = {
+            "player_1": self.state_space,
+        }
         self._rng = np.random.default_rng(self.cfg.seed)
         self._last_obs: Optional[np.ndarray] = None
         self._episode_step = 0
@@ -119,25 +127,43 @@ class RealSimRobotEnv(ParallelEnv):
         self.backend.close()
 
     def get_global_state(self) -> np.ndarray:
-        return self._last_obs.copy() if self._last_obs is not None else np.zeros(9, dtype=np.float32)
+        return self._last_obs.copy() if self._last_obs is not None else np.zeros(OBS_SIZE, dtype=np.float32)
 
     def state(self) -> np.ndarray:
         return self.get_global_state()
 
     def _encode_obs(self, obs: BackendObservation) -> np.ndarray:
-        dx = obs.ball_x - obs.robot_x
-        dy = obs.ball_y - obs.robot_y
+        def norm_time(value: float) -> float:
+            return float(np.clip(value / TIME_NORM_MS, 0.0, 1.0))
+
+        def norm_dist(value: float) -> float:
+            return float(np.clip(value / ACTION.x_range, 0.0, 1.0))
+
         return np.asarray(
             [
-                dx / ACTION.x_range,
-                dy / ACTION.y_range,
-                obs.robot_theta / math.pi,
-                obs.ball_x / ACTION.x_range,
-                obs.ball_y / ACTION.y_range,
                 obs.robot_x / ACTION.x_range,
                 obs.robot_y / ACTION.y_range,
-                float(obs.frame) / 10000.0,
-                1.0 if obs.sim_enabled else 0.0,
+                obs.robot_theta / math.pi,
+                obs.ball_rel_x / ACTION.x_range,
+                obs.ball_rel_y / ACTION.y_range,
+                obs.ball_end_rel_x / ACTION.x_range,
+                obs.ball_end_rel_y / ACTION.y_range,
+                obs.ball_vel_x / BALL_VEL_NORM,
+                obs.ball_vel_y / BALL_VEL_NORM,
+                norm_time(obs.time_since_ball_seen),
+                norm_time(obs.time_since_ball_disappeared),
+                float(np.clip(obs.ball_seen_percentage / 100.0, 0.0, 1.0)),
+                1.0 if obs.ball_consistent_with_game_state else 0.0,
+                1.0 if obs.can_score_now else 0.0,
+                float(np.clip(obs.shot_quality_no_obstacles, 0.0, 1.0)),
+                float(np.clip(obs.shot_opening_with_obstacles, 0.0, 1.0)),
+                float(np.clip(obs.pass_options_count / PASS_COUNT_NORM, 0.0, 1.0)),
+                norm_dist(obs.nearest_teammate_dist),
+                norm_dist(obs.nearest_opponent_dist),
+                norm_dist(obs.nearest_uncertain_obstacle_dist),
+                norm_dist(obs.nearest_teammate_front_dist),
+                norm_dist(obs.nearest_opponent_front_dist),
+                norm_dist(obs.nearest_uncertain_front_dist),
             ],
             dtype=np.float32,
         )
@@ -145,6 +171,7 @@ class RealSimRobotEnv(ParallelEnv):
     def _build_info(self, obs: BackendObservation) -> Dict[str, object]:
         return {
             "state": self.get_global_state(),
+            "obs_feature_names": OBS_FEATURE_NAMES,
             "backend_mode": self.cfg.backend.mode,
             "active_skill_mask": skill_mask(self.cfg.active_skill_names),
             "bridge_obs_ready": obs.obs_ready,
@@ -156,4 +183,12 @@ class RealSimRobotEnv(ParallelEnv):
             "robot_x": obs.robot_x,
             "robot_y": obs.robot_y,
             "robot_theta": obs.robot_theta,
+            "ball_rel_x": obs.ball_rel_x,
+            "ball_rel_y": obs.ball_rel_y,
+            "time_since_ball_seen": obs.time_since_ball_seen,
+            "ball_seen_percentage": obs.ball_seen_percentage,
+            "ball_consistent_with_game_state": obs.ball_consistent_with_game_state,
+            "shot_quality_no_obstacles": obs.shot_quality_no_obstacles,
+            "shot_opening_with_obstacles": obs.shot_opening_with_obstacles,
+            "pass_options_count": obs.pass_options_count,
         }
