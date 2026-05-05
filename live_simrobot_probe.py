@@ -20,9 +20,10 @@ SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 LIVE_SHOOT_DISTANCE_MM = 260.0
 LIVE_SHOOT_HOLD_STEPS = 20
 LIVE_RESET_BALL_POS = np.array([0.0, 0.0], dtype=np.float32)
-LIVE_RESET_ROBOT_POS = np.array([-900.0, 0.0], dtype=np.float32)
-LIVE_RESET_ROBOT_THETA = 0.0
+LIVE_RESET_ROBOT_POS = np.array([-2438.0, 1875.0], dtype=np.float32)
+LIVE_RESET_ROBOT_THETA = -math.pi / 2.0
 LIVE_RESET_TOLERANCE_MM = 150.0
+LIVE_BALL_SEEN_TIMEOUT_MS = 1000.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,7 +98,30 @@ def ball_distance_from_obs(obs: dict) -> float:
     return float(np.linalg.norm(ball_pos - robot_pos))
 
 
+def ball_observation_reliable(obs: dict) -> bool:
+    seen_percentage = float(obs.get("ball_seen_percentage", 0.0))
+    time_since_seen = float(obs.get("time_since_ball_seen", 1e9))
+    return seen_percentage > 0.0 and time_since_seen <= LIVE_BALL_SEEN_TIMEOUT_MS
+
+
+def send_search_action(player_number: int, obs: dict) -> str:
+    robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
+    delta = LIVE_RESET_BALL_POS - robot_pos
+    target_theta = float(math.atan2(float(delta[1]), float(delta[0]))) if np.linalg.norm(delta) > 1.0 else 0.0
+    pybh.rl_set_action(
+        player_number,
+        "walkTo",
+        float(LIVE_RESET_BALL_POS[0]),
+        float(LIVE_RESET_BALL_POS[1]),
+        target_theta,
+    )
+    return f"searchBallAt({LIVE_RESET_BALL_POS[0]:.0f}, {LIVE_RESET_BALL_POS[1]:.0f}, {target_theta:.2f})"
+
+
 def send_heuristic_action(player_number: int, obs: dict, shoot_distance: float, force_shoot: bool = False) -> str:
+    if not ball_observation_reliable(obs):
+        return send_search_action(player_number, obs)
+
     robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
     ball_pos = np.array([float(obs.get("ball_x", 0.0)), float(obs.get("ball_y", 0.0))], dtype=np.float32)
     delta = ball_pos - robot_pos
@@ -190,8 +214,10 @@ def main() -> None:
         shoot_hold = 0
         while total_steps is None or step < total_steps:
             if args.policy == "heuristic" and last_obs is not None and last_obs.get("obs_ready", False):
-                if ball_distance_from_obs(last_obs) <= args.shoot_distance:
+                if ball_observation_reliable(last_obs) and ball_distance_from_obs(last_obs) <= args.shoot_distance:
                     shoot_hold = max(shoot_hold, max(1, args.shoot_hold_steps))
+                elif not ball_observation_reliable(last_obs):
+                    shoot_hold = 0
                 force_shoot = shoot_hold > 0
                 action_name = send_heuristic_action(args.player_number, last_obs, args.shoot_distance, force_shoot)
                 if shoot_hold > 0:
@@ -206,7 +232,9 @@ def main() -> None:
                 last_obs = obs
                 print(
                     "step={step} action={action} frame={frame} "
-                    "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f}) "
+                    "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f},seen={seen:.1f},since={since:.0f},reliable={reliable}) "
+                    "ballpipe=(percept={bpstatus},filtered={filtered},p=({bpx:.1f},{bpy:.1f}),last={bmlast},gone={bmgone}) "
+                    "vision=(us={us},ls={ls},up={up},lp={lp},uprob={uprob:.2f},lprob={lprob:.2f},ur={ur},lr={lr},usp=({usx:.1f},{usy:.1f}),lsp=({lsx:.1f},{lsy:.1f}),ucm={ucm},lcm={lcm},ubop={ubop}/{ubmax:.2f},lbop={lbop}/{lbmax:.2f}) "
                     "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
                     "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
                     "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
@@ -220,6 +248,33 @@ def main() -> None:
                         rt=float(obs.get("robot_theta", 0.0)),
                         bx=float(obs.get("ball_x", 0.0)),
                         by=float(obs.get("ball_y", 0.0)),
+                        seen=float(obs.get("ball_seen_percentage", 0.0)),
+                        since=float(obs.get("time_since_ball_seen", 0.0)),
+                        reliable=int(ball_observation_reliable(obs)),
+                        bpstatus=int(obs.get("debug_ball_percept_status", -1)),
+                        filtered=int(obs.get("debug_filtered_ball_percepts", -1)),
+                        bpx=float(obs.get("debug_ball_percept_x", 0.0)),
+                        bpy=float(obs.get("debug_ball_percept_y", 0.0)),
+                        bmlast=int(obs.get("debug_ball_model_last_seen", 0)),
+                        bmgone=int(obs.get("debug_ball_model_disappeared", 0)),
+                        us=int(obs.get("debug_upper_ball_spots", -1)),
+                        ls=int(obs.get("debug_lower_ball_spots", -1)),
+                        up=int(obs.get("debug_upper_ball_percept_status", -1)),
+                        lp=int(obs.get("debug_lower_ball_percept_status", -1)),
+                        uprob=float(obs.get("debug_upper_ball_percept_best_prob", -1.0)),
+                        lprob=float(obs.get("debug_lower_ball_percept_best_prob", -1.0)),
+                        ur=int(obs.get("debug_upper_ball_reject_stage", -1)),
+                        lr=int(obs.get("debug_lower_ball_reject_stage", -1)),
+                        usx=float(obs.get("debug_upper_best_spot_x", 0.0)),
+                        usy=float(obs.get("debug_upper_best_spot_y", 0.0)),
+                        lsx=float(obs.get("debug_lower_best_spot_x", 0.0)),
+                        lsy=float(obs.get("debug_lower_best_spot_y", 0.0)),
+                        ucm=int(bool(obs.get("debug_upper_camera_matrix_valid", False))),
+                        lcm=int(bool(obs.get("debug_lower_camera_matrix_valid", False))),
+                        ubop=int(bool(obs.get("debug_upper_bop_apply_ok", False))),
+                        lbop=int(bool(obs.get("debug_lower_bop_apply_ok", False))),
+                        ubmax=float(obs.get("debug_upper_bop_max", -1.0)),
+                        lbmax=float(obs.get("debug_lower_bop_max", -1.0)),
                         pmotion=int(obs.get("provider_motion_request", -1)),
                         pcalls=int(obs.get("provider_call_count", -1)),
                         ptx=float(obs.get("provider_target_x", 0.0)),

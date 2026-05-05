@@ -14,6 +14,8 @@ Lectura recomendada:
 8. [Observation space realista y fallback de canary](./07-observation-space-realista-y-fallback-canary.md)
 9. [Handoff tecnico PPO 23 vars + MAPPO 35 vars](./08-codex-handoff-ppo-mappo.md)
 10. [Implementacion PPO observation space 23](./09-implementacion-ppo-observation-space-23.md)
+11. [Escenarios RL sin oracle world model](./10-escenarios-rl-sin-oracle-world-model.md)
+12. [RL1v0_3D: percepcion natural y diagnostico](./11-rl1v0-3d-percepcion-natural.md)
 
 Resumen corto:
 
