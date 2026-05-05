@@ -233,8 +233,6 @@ def main() -> None:
                 print(
                     "step={step} action={action} frame={frame} "
                     "robot=({rx:.1f},{ry:.1f},{rt:.2f}) ball=({bx:.1f},{by:.1f},seen={seen:.1f},since={since:.0f},reliable={reliable}) "
-                    "ballpipe=(percept={bpstatus},filtered={filtered},p=({bpx:.1f},{bpy:.1f}),last={bmlast},gone={bmgone}) "
-                    "vision=(us={us},ls={ls},up={up},lp={lp},uprob={uprob:.2f},lprob={lprob:.2f},ur={ur},lr={lr},usp=({usx:.1f},{usy:.1f}),lsp=({lsx:.1f},{lsy:.1f}),ucm={ucm},lcm={lcm},ubop={ubop}/{ubmax:.2f},lbop={lbop}/{lbmax:.2f}) "
                     "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
                     "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
                     "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
@@ -251,30 +249,6 @@ def main() -> None:
                         seen=float(obs.get("ball_seen_percentage", 0.0)),
                         since=float(obs.get("time_since_ball_seen", 0.0)),
                         reliable=int(ball_observation_reliable(obs)),
-                        bpstatus=int(obs.get("debug_ball_percept_status", -1)),
-                        filtered=int(obs.get("debug_filtered_ball_percepts", -1)),
-                        bpx=float(obs.get("debug_ball_percept_x", 0.0)),
-                        bpy=float(obs.get("debug_ball_percept_y", 0.0)),
-                        bmlast=int(obs.get("debug_ball_model_last_seen", 0)),
-                        bmgone=int(obs.get("debug_ball_model_disappeared", 0)),
-                        us=int(obs.get("debug_upper_ball_spots", -1)),
-                        ls=int(obs.get("debug_lower_ball_spots", -1)),
-                        up=int(obs.get("debug_upper_ball_percept_status", -1)),
-                        lp=int(obs.get("debug_lower_ball_percept_status", -1)),
-                        uprob=float(obs.get("debug_upper_ball_percept_best_prob", -1.0)),
-                        lprob=float(obs.get("debug_lower_ball_percept_best_prob", -1.0)),
-                        ur=int(obs.get("debug_upper_ball_reject_stage", -1)),
-                        lr=int(obs.get("debug_lower_ball_reject_stage", -1)),
-                        usx=float(obs.get("debug_upper_best_spot_x", 0.0)),
-                        usy=float(obs.get("debug_upper_best_spot_y", 0.0)),
-                        lsx=float(obs.get("debug_lower_best_spot_x", 0.0)),
-                        lsy=float(obs.get("debug_lower_best_spot_y", 0.0)),
-                        ucm=int(bool(obs.get("debug_upper_camera_matrix_valid", False))),
-                        lcm=int(bool(obs.get("debug_lower_camera_matrix_valid", False))),
-                        ubop=int(bool(obs.get("debug_upper_bop_apply_ok", False))),
-                        lbop=int(bool(obs.get("debug_lower_bop_apply_ok", False))),
-                        ubmax=float(obs.get("debug_upper_bop_max", -1.0)),
-                        lbmax=float(obs.get("debug_lower_bop_max", -1.0)),
                         pmotion=int(obs.get("provider_motion_request", -1)),
                         pcalls=int(obs.get("provider_call_count", -1)),
                         ptx=float(obs.get("provider_target_x", 0.0)),
