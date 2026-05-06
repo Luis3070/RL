@@ -16,6 +16,7 @@ Lectura recomendada:
 10. [Implementacion PPO observation space 23](./09-implementacion-ppo-observation-space-23.md)
 11. [Escenarios RL sin oracle world model](./10-escenarios-rl-sin-oracle-world-model.md)
 12. [RL1v0_3D: percepcion natural y diagnostico](./11-rl1v0-3d-percepcion-natural.md)
+13. [Wire RL realista final](./12-wire-rl-realista-final.md)
 
 Resumen corto:
 
