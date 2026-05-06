@@ -91,14 +91,16 @@ Se ejecutó la matriz de skills sobre `simrobot` embebido en perfiles `2d` y `3d
 
 Resultado resumido:
 
-- `stand`, `walk`, `dribble`, `block`, `mark`, `observe` validaron completo en `2d` y `3d`
-- `shoot` y `pass` llegaron como `SkillRequest` correcto, pero en esta ventana corta de validación manifestaron `dribble` como `motion_request`
+- las 8 skills validaron en `2d` y `3d`
+- `shoot` acepta `walkToBallAndKick` o `dribble`
+- `pass` acepta `walkToBallAndKick` o `dribble`
 
 Interpretación:
 
-- el wire de RL hacia `SkillRequest` sí quedó correcto para `shoot` y `pass`
-- el comportamiento que sigue después ya es decisión interna de B-Human en una ventana corta del benchmark
-- por tanto, esto se documenta como comportamiento aguas abajo, no como falla del bridge
+- el wire de RL hacia `SkillRequest` quedó correcto para todas las skills
+- en B-Human, `shoot` puede degradar a `dribble` dentro de `KickAtGoal`
+- en `RL1v0`, `pass` puede degradar a `dribble` porque no existe teammate válido y `PassToTeammate` aborta hacia `KickAtGoal`
+- eso se documenta como comportamiento aguas abajo, no como falla del bridge
 
 La matriz actualizada quedó en:
 

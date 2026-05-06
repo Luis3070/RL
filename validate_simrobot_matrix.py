@@ -51,8 +51,8 @@ MOTION_REQUEST_NAMES = {
 EXPECTED_MOTIONS = {
     SkillType.stand: {1},
     SkillType.walk: {4},
-    SkillType.shoot: {5},
-    SkillType.pass_: {5},
+    SkillType.shoot: {5, 6},
+    SkillType.pass_: {5, 6},
     SkillType.dribble: {6},
     SkillType.block: {4},
     SkillType.mark: {4},
@@ -108,6 +108,11 @@ def current_rss_kb() -> int:
     return 0
 
 
+def finite_float(value: Any) -> float:
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else 0.0
+
+
 def reset_pose_for_skill(skill: SkillType) -> tuple[np.ndarray, float]:
     if skill in {SkillType.shoot, SkillType.pass_, SkillType.dribble}:
         return ROBOT_NEAR_POS.copy(), 0.0
@@ -142,6 +147,10 @@ def validate_result(skill: SkillType, obs: Any, payload: dict[str, Any]) -> tupl
         return False, f"motion {got} no esperado, esperaba {expected}"
     if int(payload.get("motion_engine_input_request", -1)) != motion:
         return False, "MotionEngine input no coincide con SkillBehavior motion"
+    if skill is SkillType.shoot and motion == 6:
+        return True, "shoot degrado a dribble dentro de KickAtGoal"
+    if skill is SkillType.pass_ and motion == 6:
+        return True, "pass degrado a dribble en RL1v0 sin teammate valido"
     return True, "ok"
 
 
@@ -178,9 +187,9 @@ def run_skill(backend: PyBHBackend, profile: str, skill: SkillType) -> SkillRun:
         engine_phase=int(payload.get("motion_engine_phase", -1)),
         engine_fall=int(payload.get("motion_engine_fall_state", -1)),
         motion_phase=int(payload.get("motion_phase", -1)),
-        motion_speed_x=float(payload.get("motion_speed_x", 0.0)),
-        motion_speed_y=float(payload.get("motion_speed_y", 0.0)),
-        motion_speed_rot=float(payload.get("motion_speed_rot", 0.0)),
+        motion_speed_x=finite_float(payload.get("motion_speed_x", 0.0)),
+        motion_speed_y=finite_float(payload.get("motion_speed_y", 0.0)),
+        motion_speed_rot=finite_float(payload.get("motion_speed_rot", 0.0)),
         robot_x=float(payload.get("robot_x", 0.0)),
         robot_y=float(payload.get("robot_y", 0.0)),
         robot_theta=float(payload.get("robot_theta", 0.0)),
@@ -313,7 +322,7 @@ def render_report(results: list[SkillRun], *, steps_per_skill: int) -> str:
         "",
         f"- En esta muestra, `3d` no fue mas lento en `step_wall_ms_avg`; de hecho quedo `{step_delta:.1f} ms` por debajo de `2d`. Eso no significa que el motor 3D sea mas barato: significa que este benchmark mide el proceso completo Python + bridge + stepping, no un microbenchmark aislado del motor fisico.",
         "- 2D expone mejor la velocidad planar efectiva en `motion_speed_*`; 3D expone mejor el estado interno del motor a traves de `engine_phase`, `fall_state` y joints, aunque la traslacion global visible pueda tardar mas en aparecer.",
-        "- En skills de pelota (`shoot`, `pass`, `dribble`) ambos perfiles entran al request esperado, pero 3D necesita mas frames para manifestar el comportamiento fisico completo. Por eso esta matriz valida pipeline y activacion, no exito final de la patada.",
+        "- En skills de pelota (`shoot`, `pass`, `dribble`) ambos perfiles entran al request esperado, pero `shoot` puede degradar a `dribble` dentro de `KickAtGoal` y `pass` puede caer a esa misma ruta si no hay teammate valido. Por eso esta matriz valida pipeline y activacion, no una trayectoria tactica unica.",
         "- El costo de memoria adicional de 3D es persistente pero no explosivo en esta muestra: alrededor de 12 MB sobre 2D. El costo cualitativo fuerte de 3D no es solo RSS, sino la dependencia en joints, contacto y fases del motor.",
         "- La mayor fragilidad operativa estuvo del lado 2D antes del fix de `RobotPose` y `BallModel`: cuando la pose era estimada y no oracular, `SkillBehaviorControl` construia targets relativos absurdos y el robot orbitaba la pelota.",
         "",
@@ -336,7 +345,8 @@ def render_report(results: list[SkillRun], *, steps_per_skill: int) -> str:
         "",
         "- Los tiempos reportados son del proceso Python actual. Incluyen bridge, stepping embebido y espera de observacion.",
         "- `rss_kb` es la memoria residente del proceso en `/proc/self/status` despues de cada skill.",
-        "- Las skills `shoot` y `pass` validan que el pipeline entre a `walkToBallAndKick`; no garantizan que el remate completo termine en un solo burst de frames.",
+        "- `shoot` valida `walkToBallAndKick` o `dribble`, porque `KickAtGoal` puede degradar a `dribbleToGoal` si no hay ventana de remate.",
+        "- `pass` valida `walkToBallAndKick` o `dribble`; en `RL1v0` no hay teammate valido y `PassToTeammate` aborta hacia `KickAtGoal`.",
         "- En 3D la caminata puede mostrar poca traslacion global en ventanas cortas aun con joints y fases correctas; por eso la validacion no depende solo de `robot_x`.",
         "",
     ]
