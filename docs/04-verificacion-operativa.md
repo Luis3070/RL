@@ -15,6 +15,29 @@ cp Build/Linux/Python/Develop/controller.cpython-312-x86_64-linux-gnu.so \
   Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
 ```
 
+Alternativa mas segura:
+
+```bash
+cd Make/Python
+python3 setup.py build_ext --inplace
+```
+
+Fallo observado en la practica:
+
+- `cmake --build ...` podia quedar en `ninja: no work to do`
+- `Build/Linux/Python/Develop/controller...so` podia estar nuevo
+- pero `Make/Python/pybh/controller...so` podia seguir viejo
+- como el `PYTHONPATH` apunta a `Make/Python`, Python terminaba cargando ese
+  modulo viejo y parecia que el rebuild "no habia servido"
+
+Chequeo rapido:
+
+```bash
+ls -lh \
+  Build/Linux/Python/Develop/controller.cpython-312-x86_64-linux-gnu.so \
+  Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
+```
+
 Reducir debug symbols para no superar el limite de GitHub:
 
 ```bash

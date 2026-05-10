@@ -444,6 +444,31 @@ Importante:
 /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python/pybh/logs.cpython-312-x86_64-linux-gnu.so
 ```
 
+Error real que apareció varias veces:
+
+- `cmake --build ... --target PythonController SimulatedNao B-Human` podía decir
+  `ninja: no work to do`
+- pero Python seguía importando un `controller...so` viejo desde
+  `Make/Python/pybh/`
+- en ese caso el problema no era el `PYTHONPATH` en sí, sino que el artefacto
+  cargado por ese `PYTHONPATH` estaba desalineado con `Build/Linux/...`
+
+Chequeo rápido:
+
+```bash
+ls -lh \
+  /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Build/Linux/Python/Develop/controller.cpython-312-x86_64-linux-gnu.so \
+  /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
+```
+
+Si `Build/Linux/...` tiene timestamp nuevo y `Make/Python/pybh/...` quedó viejo,
+hay que correr otra vez:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python
+python3 setup.py build_ext --inplace
+```
+
 Eso simplifica bastante el uso: ya no hace falta apuntar el `PYTHONPATH` al
 subdirectorio `build/lib...`; basta con apuntarlo a `Make/Python`.
 

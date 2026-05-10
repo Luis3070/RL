@@ -17,6 +17,7 @@ Lectura recomendada:
 11. [Escenarios RL sin oracle world model](./10-escenarios-rl-sin-oracle-world-model.md)
 12. [RL1v0_3D: percepcion natural y diagnostico](./11-rl1v0-3d-percepcion-natural.md)
 13. [Wire RL realista final](./12-wire-rl-realista-final.md)
+14. [Pruebas GUI en SimRobot](./13-pruebas-gui-simrobot.md)
 
 Resumen corto:
 
