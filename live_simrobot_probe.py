@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Duration of the probe. Omit for continuous mode until Ctrl+C.",
     )
-    parser.add_argument("--hz", type=float, default=5.0)
+    parser.add_argument("--hz", type=float, default=10.0)
     parser.add_argument(
         "--steps",
         type=int,
@@ -102,6 +102,60 @@ def ball_observation_reliable(obs: dict) -> bool:
     seen_percentage = float(obs.get("ball_seen_percentage", 0.0))
     time_since_seen = float(obs.get("time_since_ball_seen", 1e9))
     return seen_percentage > 0.0 and time_since_seen <= LIVE_BALL_SEEN_TIMEOUT_MS
+
+
+def format_obstacle_debug(obs: dict) -> str:
+    return (
+        "obstacles=(cam={cam},oframe={oframe},pf={pf},pfopp={pfopp},pfteam={pfteam},pfunk={pfunk},acc={acc},hyp={hyp},pub={pub},seen={seenmax},min={minp},arm={arm},foot={foot},"
+        "n={n},opp={opp},team={team},unc={unc},front={front},"
+        "near={near:.0f}@{angle:.2f},oppnear={oppnear:.0f}@{oppangle:.2f},frontnear={frontnear:.0f})"
+    ).format(
+        cam=int(obs.get("obstacle_camera", -1)),
+        oframe=int(obs.get("obstacle_frame", 0)),
+        pf=int(obs.get("obstacle_field_percept_count", 0)),
+        pfopp=int(obs.get("obstacle_field_percept_opponent_count", 0)),
+        pfteam=int(obs.get("obstacle_field_percept_teammate_count", 0)),
+        pfunk=int(obs.get("obstacle_field_percept_unknown_count", 0)),
+        acc=int(obs.get("obstacle_accepted_percept_count", 0)),
+        hyp=int(obs.get("obstacle_hypothesis_count", 0)),
+        pub=int(obs.get("obstacle_published_count", 0)),
+        seenmax=int(obs.get("obstacle_max_seen_count", 0)),
+        minp=int(obs.get("obstacle_min_percepts", 0)),
+        arm=int(bool(obs.get("obstacle_arm_contact", False))),
+        foot=int(bool(obs.get("obstacle_foot_contact", False))),
+        n=int(obs.get("obstacle_count", 0)),
+        opp=int(obs.get("obstacle_opponent_count", 0)),
+        team=int(obs.get("obstacle_teammate_count", 0)),
+        unc=int(obs.get("obstacle_uncertain_count", 0)),
+        front=int(obs.get("obstacle_front_count", 0)),
+        near=float(obs.get("nearest_obstacle_dist", 0.0)),
+        angle=float(obs.get("nearest_obstacle_angle", 0.0)),
+        oppnear=float(obs.get("nearest_opponent_dist", 0.0)),
+        oppangle=float(obs.get("nearest_opponent_angle", 0.0)),
+        frontnear=float(obs.get("nearest_front_obstacle_dist", 0.0)),
+    )
+
+
+def format_avoidance_debug(obs: dict) -> str:
+    return (
+        "avoid=(reqv=({rvx:.2f},{rvy:.2f}),reqp={rp},reqseg=({rsx:.0f},{rsy:.0f},r={rsr:.0f},cw={rscw}),"
+        "walkv=({wvx:.2f},{wvy:.2f}),walkp={wp},walkseg=({wsx:.0f},{wsy:.0f},r={wsr:.0f},cw={wscw}))"
+    ).format(
+        rvx=float(obs.get("motion_obstacle_avoidance_x", 0.0)),
+        rvy=float(obs.get("motion_obstacle_avoidance_y", 0.0)),
+        rp=int(obs.get("motion_obstacle_path_count", 0)),
+        rsx=float(obs.get("motion_obstacle_first_x", 0.0)),
+        rsy=float(obs.get("motion_obstacle_first_y", 0.0)),
+        rsr=float(obs.get("motion_obstacle_first_radius", 0.0)),
+        rscw=int(bool(obs.get("motion_obstacle_first_clockwise", False))),
+        wvx=float(obs.get("walk_to_pose_avoidance_x", 0.0)),
+        wvy=float(obs.get("walk_to_pose_avoidance_y", 0.0)),
+        wp=int(obs.get("walk_to_pose_path_count", 0)),
+        wsx=float(obs.get("walk_to_pose_first_obstacle_x", 0.0)),
+        wsy=float(obs.get("walk_to_pose_first_obstacle_y", 0.0)),
+        wsr=float(obs.get("walk_to_pose_first_obstacle_radius", 0.0)),
+        wscw=int(bool(obs.get("walk_to_pose_first_obstacle_clockwise", False))),
+    )
 
 
 def send_search_action(player_number: int, obs: dict) -> str:
@@ -167,13 +221,13 @@ def main() -> None:
         args.scene = SIMROBOT_SCENE_PRESETS[args.simrobot_profile].scene_path
     simrobot_process = maybe_launch_simrobot(args.simrobot_bin, args.scene) if args.launch else None
 
-    print("Visible SimRobot probe")
-    print(f"scene={args.scene}")
+    print("Visible SimRobot probe", flush=True)
+    print(f"scene={args.scene}", flush=True)
     if args.launch:
-        print(f"launched={args.simrobot_bin}")
-    print(f"policy={args.policy}")
-    print("If the SimRobot window is open, start the simulation with F5 before expecting observations.")
-    print("Press Ctrl+C to stop.")
+        print(f"launched={args.simrobot_bin}", flush=True)
+    print(f"policy={args.policy}", flush=True)
+    print("If the SimRobot window is open, start the simulation with F5 before expecting observations.", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
 
     pybh.rl_reset_world(
         args.player_number,
@@ -195,9 +249,9 @@ def main() -> None:
                 bx=float(initial_obs.get("ball_x", 0.0)),
                 by=float(initial_obs.get("ball_y", 0.0)),
             )
-        )
+        , flush=True)
     elif args.launch:
-        print("reset obs not confirmed yet; continuing with phase policy until observations settle")
+        print("reset obs not confirmed yet; continuing with phase policy until observations settle", flush=True)
 
     period = 1.0 / max(args.hz, 0.1)
     phase_steps = max(1, int(round(args.hz * 2.0)))
@@ -227,7 +281,7 @@ def main() -> None:
             obs = pybh.rl_get_obs(args.player_number, args.timeout_ms)
             if not obs.get("obs_ready", False):
                 stale_frame = int(last_obs.get("frame", 0)) if last_obs is not None else 0
-                print(f"step={step + 1} action={action_name} obs_ready=0 stale_frame={stale_frame}")
+                print(f"step={step + 1} action={action_name} obs_ready=0 stale_frame={stale_frame}", flush=True)
             else:
                 last_obs = obs
                 print(
@@ -236,6 +290,7 @@ def main() -> None:
                     "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
                     "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
                     "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
+                    "{obstacles} {avoid} "
                     "motion=({motion},{phase}) speed=({sx:.1f},{sy:.1f},{sr:.2f}) "
                     "legs=({lhp:.2f},{lkp:.2f},{rhp:.2f},{rkp:.2f})".format(
                         step=step + 1,
@@ -268,6 +323,8 @@ def main() -> None:
                         mefall=int(obs.get("motion_engine_fall_state", -1)),
                         meix=float(obs.get("motion_engine_inertial_angle_x", 0.0)),
                         meiy=float(obs.get("motion_engine_inertial_angle_y", 0.0)),
+                        obstacles=format_obstacle_debug(obs),
+                        avoid=format_avoidance_debug(obs),
                         motion=int(obs.get("motion_request", -1)),
                         phase=int(obs.get("motion_phase", -1)),
                         sx=float(obs.get("motion_speed_x", 0.0)),
@@ -278,11 +335,11 @@ def main() -> None:
                         rhp=float(obs.get("joint_r_hip_pitch", 0.0)),
                         rkp=float(obs.get("joint_r_knee_pitch", 0.0)),
                     )
-                )
+                , flush=True)
             step += 1
             time.sleep(period)
     except KeyboardInterrupt:
-        print("Stopped by user.")
+        print("Stopped by user.", flush=True)
     finally:
         if simrobot_process is not None and simrobot_process.poll() is None:
             simrobot_process.terminate()
