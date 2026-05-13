@@ -12,14 +12,12 @@ Lectura recomendada:
 6. [Premisas irrompibles](./05-premisas-irrompibles.md)
 7. [Matriz de skills y comparativo 2D vs 3D](./06-simrobot-skill-matrix.md)
 8. [Observation space realista y fallback de canary](./07-observation-space-realista-y-fallback-canary.md)
-9. [Handoff tecnico PPO 23 vars + MAPPO 35 vars](./08-codex-handoff-ppo-mappo.md)
-10. [Implementacion PPO observation space 23](./09-implementacion-ppo-observation-space-23.md)
-11. [Escenarios RL sin oracle world model](./10-escenarios-rl-sin-oracle-world-model.md)
-12. [RL1v0_3D: percepcion natural y diagnostico](./11-rl1v0-3d-percepcion-natural.md)
-13. [Wire RL realista final](./12-wire-rl-realista-final.md)
-14. [Pruebas GUI en SimRobot](./13-pruebas-gui-simrobot.md)
-15. [Handoff de deteccion de obstaculos](./14-obstacle-detection-handoff.md)
-16. [Guia practica para armar escenas y escenarios RL](./15-guia-escenas-y-escenarios-rl.md)
+9. [Implementacion PPO observation space 23](./09-implementacion-ppo-observation-space-23.md)
+10. [Escenarios RL sin oracle world model](./10-escenarios-rl-sin-oracle-world-model.md)
+11. [RL1v0_3D: percepcion natural y diagnostico](./11-rl1v0-3d-percepcion-natural.md)
+12. [Wire RL realista final](./12-wire-rl-realista-final.md)
+13. [Pruebas GUI en SimRobot](./13-pruebas-gui-simrobot.md)
+14. [Guia practica para armar escenas y escenarios RL](./15-guia-escenas-y-escenarios-rl.md)
 
 Resumen corto:
 

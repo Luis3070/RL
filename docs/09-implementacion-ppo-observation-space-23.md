@@ -5,7 +5,7 @@
 Este documento describe la implementacion ya aplicada para ampliar el observation space de PPO desde el vector historico de 9 variables hacia un vector realista de 23 variables, alineado con los documentos:
 
 - `docs/07-observation-space-realista-y-fallback-canary.md`
-- `docs/08-codex-handoff-ppo-mappo.md`
+- `docs/12-wire-rl-realista-final.md`
 
 El objetivo de esta fase no es resolver toda la politica futbolistica ni entrenar MAPPO. El objetivo es dejar PPO listo para consumir observaciones mas cercanas al flujo real de B-Human, sin romper el pipeline natural:
 
@@ -298,4 +298,3 @@ Desde el punto de vista PPO, este cambio queda listo para commit cuando:
 - el test de contrato pasa,
 - el probe visible recibe observaciones frescas,
 - y el bridge B-Human se commitea aparte sin cambios ajenos de `Config/Locations` o submodulos.
-

@@ -1,8 +1,7 @@
 # RL × B-Human con `pybh`
 
 > Estado actual: la documentacion mantenida de la integracion natural RL/B-Human esta en
-> [docs/README.md](./docs/README.md). Los documentos `BHUMAN_NATURAL_SKILLS_PLAN.md`
-> y `VISIBLE_SIMROBOT_HANDOFF.md` quedan como contexto historico de investigacion.
+> [docs/README.md](./docs/README.md).
 
 Guia operativa nueva para escenas y escenarios RL:
 
