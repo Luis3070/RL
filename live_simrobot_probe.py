@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
         help="Action source for the visible robot.",
     )
     parser.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="Skip rl_reset_world so the robot stays at the scene's initial position.",
+    )
+    parser.add_argument(
         "--seconds",
         type=float,
         default=None,
@@ -184,23 +189,24 @@ def send_heuristic_action(player_number: int, obs: dict, shoot_distance: float, 
         pybh.rl_set_action(player_number, "shoot", 0.0, 0.0, 0.0)
         return f"shoot(dist={distance:.0f})"
 
-    global_action = StructuredSkillAction(
-        skill_type=SkillType.walk,
-        target_x=float(ball_pos[0]),
-        target_y=float(ball_pos[1]),
-        target_theta=float(math.atan2(float(delta[1]), float(delta[0]))),
-    )
-    pybh.rl_set_action(
-        player_number,
-        "walkTo",
-        float(global_action.target_x),
-        float(global_action.target_y),
-        float(global_action.target_theta),
-    )
-    return (
-        f"walkToField({global_action.target_x:.0f}, "
-        f"{global_action.target_y:.0f}, {global_action.target_theta:.2f})"
-    )
+    # Target the opponent goal (4500, 0) in field coords converted to robot-relative,
+    # so the path planner engages (target > 1000mm) and routes around obstacles.
+    robot_theta = float(obs.get("robot_theta", 0.0))
+    goal_field = np.array([4500.0, 0.0], dtype=np.float32)
+    delta_to_goal = goal_field - robot_pos
+    cos_t = math.cos(-robot_theta)
+    sin_t = math.sin(-robot_theta)
+    goal_rel = np.array([
+        cos_t * delta_to_goal[0] - sin_t * delta_to_goal[1],
+        sin_t * delta_to_goal[0] + cos_t * delta_to_goal[1],
+    ], dtype=np.float32)
+    goal_dist = float(np.linalg.norm(goal_rel))
+    if goal_dist > 600.0:
+        goal_rel = goal_rel / goal_dist * 600.0
+    tx, ty = float(goal_rel[0]), float(goal_rel[1])
+    target_theta = float(math.atan2(ty, tx))
+    pybh.rl_set_action(player_number, "walkTo", tx, ty, target_theta)
+    return f"walkToGoal({tx:.0f}, {ty:.0f}, {target_theta:.2f})"
 
 
 def wait_for_reset_observation(player_number: int, timeout_ms: int, max_wait_s: float = 30.0) -> dict | None:
@@ -229,14 +235,15 @@ def main() -> None:
     print("If the SimRobot window is open, start the simulation with F5 before expecting observations.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
-    pybh.rl_reset_world(
-        args.player_number,
-        float(LIVE_RESET_BALL_POS[0]),
-        float(LIVE_RESET_BALL_POS[1]),
-        float(LIVE_RESET_ROBOT_POS[0]),
-        float(LIVE_RESET_ROBOT_POS[1]),
-        float(LIVE_RESET_ROBOT_THETA),
-    )
+    if not args.no_reset:
+        pybh.rl_reset_world(
+            args.player_number,
+            float(LIVE_RESET_BALL_POS[0]),
+            float(LIVE_RESET_BALL_POS[1]),
+            float(LIVE_RESET_ROBOT_POS[0]),
+            float(LIVE_RESET_ROBOT_POS[1]),
+            float(LIVE_RESET_ROBOT_THETA),
+        )
     pybh.rl_set_action(args.player_number, "stand", 0.0, 0.0, 0.0)
     initial_obs = wait_for_reset_observation(args.player_number, args.timeout_ms) if args.launch else None
     if initial_obs is not None:
