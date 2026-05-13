@@ -18,6 +18,7 @@ Lectura recomendada:
 12. [Wire RL realista final](./12-wire-rl-realista-final.md)
 13. [Pruebas GUI en SimRobot](./13-pruebas-gui-simrobot.md)
 14. [Guia practica para armar escenas y escenarios RL](./15-guia-escenas-y-escenarios-rl.md)
+15. [Curriculum dinamico: balon y rivales](./16-curriculum-dinamico-balon-y-rivales.md)
 
 Resumen corto:
 
