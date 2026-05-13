@@ -19,6 +19,7 @@ Lectura recomendada:
 13. [Pruebas GUI en SimRobot](./13-pruebas-gui-simrobot.md)
 14. [Guia practica para armar escenas y escenarios RL](./15-guia-escenas-y-escenarios-rl.md)
 15. [Curriculum dinamico: balon y rivales](./16-curriculum-dinamico-balon-y-rivales.md)
+16. [Handoff visible SimRobot GUI](./17-handoff-visible-simrobot-gui.md)
 
 Resumen corto:
 
@@ -26,5 +27,5 @@ Resumen corto:
 - Python manda `SkillRequest` por `RLSharedState`.
 - `SkillBehaviorControl` convierte el skill en `MotionRequest`.
 - `MotionEngine` y SimRobot ejecutan la caminata natural.
-- El backend rapido `cpp` usa `RLSim2D`, pero ahora tambien avanza desde el `MotionRequest` final.
-- Los perfiles SimRobot reales (`2d`, `3d`) tienen `sim2D.enabled = false`.
+- Los backends soportados son SimRobot real: `simrobot` y `simrobot_visible`.
+- Los perfiles operativos son `2d` y `3d`.

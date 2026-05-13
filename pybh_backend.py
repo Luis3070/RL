@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Iterable, Mapping, Optional
 
 import numpy as np
 
@@ -14,16 +15,16 @@ from config import (
     ACTION,
     BackendConfig,
     BHUMAN_DIR,
-    DT,
     PLAYER_NUMBER,
-    SCENARIO,
-    TEAM_NUMBER,
-    LOCATION,
     resolve_simrobot_scene_config,
 )
 
 os.chdir(BHUMAN_DIR)
 import pybh.controller as pybh
+
+MAX_WORLD_PLAYERS_PER_TEAM = 20
+WORLD_STATUS_POLL_INTERVAL_S = 0.01
+DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
 
 
 def _normalize_angle(theta: float) -> float:
@@ -44,29 +45,126 @@ def adapt_action_to_backend(
     *,
     mode: str,
 ) -> StructuredSkillAction:
-    # B-Human SkillRequest::walkTo consumes field-global targets. Only the
-    # legacy Python world-state backend needs robot-relative walk commands.
-    if mode in {"cpp", "simrobot", "simrobot_visible"} or obs is None or action.skill is not SkillType.walk:
-        return action
+    del obs, mode
+    # All supported backends now forward field-global walk targets directly to
+    # B-Human through SkillRequest::walkTo.
+    return action
 
-    if isinstance(obs, BackendObservation):
-        robot_x = obs.robot_x
-        robot_y = obs.robot_y
-        robot_theta = obs.robot_theta
-    else:
-        robot_x = float(obs.get("robot_x", 0.0))
-        robot_y = float(obs.get("robot_y", 0.0))
-        robot_theta = float(obs.get("robot_theta", 0.0))
 
-    local_x, local_y = _field_to_robot(robot_x, robot_y, robot_theta, action.target_x, action.target_y)
-    local_theta = _normalize_angle(float(action.target_theta) - robot_theta)
-    return StructuredSkillAction(
-        skill_type=int(action.skill_type),
-        target_x=float(local_x),
-        target_y=float(local_y),
-        target_theta=float(local_theta),
-        pass_target=int(action.pass_target),
+@dataclass(frozen=True)
+class WorldPlayerSpec:
+    number: int
+    x: float
+    y: float
+    theta: float = 0.0
+    upright: bool = True
+
+    def as_tuple(self) -> tuple[int, float, float, float, bool]:
+        return (int(self.number), float(self.x), float(self.y), float(self.theta), bool(self.upright))
+
+
+@dataclass(frozen=True)
+class WorldSpec:
+    ball_x: float
+    ball_y: float
+    robot_x: float
+    robot_y: float
+    robot_theta: float
+    teammates: tuple[WorldPlayerSpec, ...] = ()
+    opponents: tuple[WorldPlayerSpec, ...] = ()
+
+
+def _coerce_world_players(players: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list]) -> tuple[WorldPlayerSpec, ...]:
+    specs: list[WorldPlayerSpec] = []
+    for player in players:
+        if isinstance(player, WorldPlayerSpec):
+            specs.append(player)
+            continue
+        if isinstance(player, Mapping):
+            specs.append(
+                WorldPlayerSpec(
+                    number=int(player["number"]),
+                    x=float(player["x"]),
+                    y=float(player["y"]),
+                    theta=float(player.get("theta", 0.0)),
+                    upright=bool(player.get("upright", True)),
+                )
+            )
+            continue
+        values = tuple(player)
+        if len(values) == 4:
+            values = (*values, True)
+        if len(values) != 5:
+            raise ValueError(f"Expected world player spec with 4 or 5 values, got {values!r}")
+        specs.append(
+            WorldPlayerSpec(
+                number=int(values[0]),
+                x=float(values[1]),
+                y=float(values[2]),
+                theta=float(values[3]),
+                upright=bool(values[4]),
+            )
+        )
+    return tuple(specs)
+
+
+def build_world_spec(
+    *,
+    ball_pos: np.ndarray,
+    robot_pos: np.ndarray,
+    robot_theta: float,
+    teammates: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] = (),
+    opponents: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] = (),
+) -> WorldSpec:
+    return WorldSpec(
+        ball_x=float(ball_pos[0]),
+        ball_y=float(ball_pos[1]),
+        robot_x=float(robot_pos[0]),
+        robot_y=float(robot_pos[1]),
+        robot_theta=float(robot_theta),
+        teammates=_coerce_world_players(teammates),
+        opponents=_coerce_world_players(opponents),
     )
+
+
+def _validate_world_players(
+    players: tuple[WorldPlayerSpec, ...],
+    *,
+    label: str,
+    allow_non_upright: bool,
+) -> None:
+    if len(players) > MAX_WORLD_PLAYERS_PER_TEAM:
+        raise ValueError(
+            f"{label} supports at most {MAX_WORLD_PLAYERS_PER_TEAM} players, got {len(players)}"
+        )
+
+    seen_numbers: set[int] = set()
+    for player in players:
+        if not 1 <= int(player.number) <= MAX_WORLD_PLAYERS_PER_TEAM:
+            raise ValueError(
+                f"{label} player numbers must be within 1..{MAX_WORLD_PLAYERS_PER_TEAM}, got {player.number}"
+            )
+        if int(player.number) in seen_numbers:
+            raise ValueError(f"{label} player number {player.number} is duplicated")
+        seen_numbers.add(int(player.number))
+        if not allow_non_upright and not bool(player.upright):
+            raise ValueError(f"{label} player {player.number} requested upright=False in an unsupported backend")
+
+
+def validate_world_spec(world_spec: WorldSpec, *, mode: str) -> None:
+    if mode not in {"simrobot", "simrobot_visible"}:
+        raise ValueError(f"Unsupported backend mode {mode!r}. Expected one of: simrobot, simrobot_visible")
+    if any(player.number == PLAYER_NUMBER for player in world_spec.teammates):
+        raise ValueError(
+            f"teammates must not include the controlled robot number {PLAYER_NUMBER}; use robot_pose for the RL robot"
+        )
+    _validate_world_players(world_spec.teammates, label="teammates", allow_non_upright=False)
+    _validate_world_players(world_spec.opponents, label="opponents", allow_non_upright=False)
+
+
+def simrobot_body_name_for_player(number: int, *, opponent: bool) -> str:
+    absolute_number = int(number) + (MAX_WORLD_PLAYERS_PER_TEAM if opponent else 0)
+    return f"robot{absolute_number}"
 
 
 @dataclass
@@ -76,9 +174,11 @@ class BackendObservation:
     robot_x: float
     robot_y: float
     robot_theta: float
+    simrobot_robot_x: float
+    simrobot_robot_y: float
+    simrobot_robot_theta: float
     frame: int
     obs_ready: bool
-    sim_enabled: bool
     requested_skill: str = ""
     requested_pass_target: int = -1
     ball_rel_x: float = 0.0
@@ -107,6 +207,9 @@ class BackendObservation:
         robot_x = float(payload["robot_x"])
         robot_y = float(payload["robot_y"])
         robot_theta = float(payload["robot_theta"])
+        simrobot_robot_x = float(payload.get("simrobot_robot_x", robot_x))
+        simrobot_robot_y = float(payload.get("simrobot_robot_y", robot_y))
+        simrobot_robot_theta = float(payload.get("simrobot_robot_theta", robot_theta))
         ball_x = float(payload["ball_x"])
         ball_y = float(payload["ball_y"])
         fallback_rel_x, fallback_rel_y = _field_to_robot(robot_x, robot_y, robot_theta, ball_x, ball_y)
@@ -116,9 +219,11 @@ class BackendObservation:
             robot_x=robot_x,
             robot_y=robot_y,
             robot_theta=robot_theta,
+            simrobot_robot_x=simrobot_robot_x,
+            simrobot_robot_y=simrobot_robot_y,
+            simrobot_robot_theta=simrobot_robot_theta,
             frame=int(payload.get("frame", 0)),
             obs_ready=bool(payload.get("obs_ready", False)),
-            sim_enabled=bool(payload.get("sim_enabled", False)),
             requested_skill=str(payload.get("requested_skill", "")),
             requested_pass_target=int(payload.get("requested_pass_target", -1)),
             ball_rel_x=float(payload.get("ball_rel_x", fallback_rel_x)),
@@ -144,6 +249,41 @@ class BackendObservation:
         )
 
 
+@dataclass(frozen=True)
+class WorldUpdateStatus:
+    result_request_id: int
+    result_ok: bool
+    result_error: str
+    reset_request_id: int
+    reset_applied_id: int
+    reset_pending: bool
+    dynamic_request_id: int
+    dynamic_applied_id: int
+    dynamic_pending: bool
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "WorldUpdateStatus":
+        return cls(
+            result_request_id=int(payload.get("result_request_id", 0)),
+            result_ok=bool(payload.get("result_ok", False)),
+            result_error=str(payload.get("result_error", "")),
+            reset_request_id=int(payload.get("reset_request_id", 0)),
+            reset_applied_id=int(payload.get("reset_applied_id", 0)),
+            reset_pending=bool(payload.get("reset_pending", False)),
+            dynamic_request_id=int(payload.get("dynamic_request_id", 0)),
+            dynamic_applied_id=int(payload.get("dynamic_applied_id", 0)),
+            dynamic_pending=bool(payload.get("dynamic_pending", False)),
+        )
+
+    def summary(self) -> str:
+        return (
+            f"result_request_id={self.result_request_id} "
+            f"result_ok={int(self.result_ok)} "
+            f"reset=({self.reset_applied_id}/{self.reset_request_id},pending={int(self.reset_pending)}) "
+            f"dynamic=({self.dynamic_applied_id}/{self.dynamic_request_id},pending={int(self.dynamic_pending)})"
+        )
+
+
 class PyBHBackend:
     def __init__(
         self,
@@ -151,6 +291,9 @@ class PyBHBackend:
         mode: str = "simrobot",
         frames_per_step: int = 1,
         obs_timeout_ms: int = 1000,
+        visible_request_timeout_ms: int | None = None,
+        visible_reset_obs_timeout_ms: int | None = None,
+        visible_status_log_interval_s: float = 0.0,
         simrobot_profile: str = "2d",
         simrobot_scene_path: Path | None = None,
         simrobot_robot_name: str | None = None,
@@ -158,11 +301,23 @@ class PyBHBackend:
         simrobot_launch: bool = False,
         simrobot_bin: Path | None = None,
     ):
+        if mode not in {"simrobot", "simrobot_visible"}:
+            raise ValueError(f"Unsupported backend mode {mode!r}. Expected one of: simrobot, simrobot_visible")
         self.mode = mode
         self.frames_per_step = max(1, int(frames_per_step))
         self.obs_timeout_ms = int(obs_timeout_ms)
+        self.visible_request_timeout_ms = (
+            self.obs_timeout_ms if visible_request_timeout_ms is None else max(1, int(visible_request_timeout_ms))
+        )
+        self.visible_reset_obs_timeout_ms = (
+            self.obs_timeout_ms
+            if visible_reset_obs_timeout_ms is None
+            else max(1, int(visible_reset_obs_timeout_ms))
+        )
+        self.visible_status_log_interval_s = max(0.0, float(visible_status_log_interval_s))
         self.simrobot_scene = resolve_simrobot_scene_config(
             BackendConfig(
+                mode=mode,
                 simrobot_profile=simrobot_profile,
                 simrobot_scene_path=simrobot_scene_path,
                 simrobot_robot_name=simrobot_robot_name,
@@ -172,6 +327,7 @@ class PyBHBackend:
         self._controller = None
         self._started = False
         self._last_obs: Optional[BackendObservation] = None
+        self._world_spec: Optional[WorldSpec] = None
         self._simrobot_launch = bool(simrobot_launch)
         self._simrobot_bin = Path(simrobot_bin).resolve() if simrobot_bin is not None else None
         self._simrobot_process: subprocess.Popen[str] | None = None
@@ -186,11 +342,9 @@ class PyBHBackend:
         if self._started:
             return
         if self._uses_embedded_simrobot():
-            pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
             if not pybh.simrobot_load_scene(str(self.simrobot_scene.scene_path)):
                 raise RuntimeError(f"simrobot_load_scene failed: {pybh.simrobot_last_error()}")
         elif self._uses_visible_simrobot():
-            pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
             if self._simrobot_launch:
                 if self._simrobot_bin is None or not self._simrobot_bin.exists():
                     raise FileNotFoundError(f"SimRobot binary not found: {self._simrobot_bin}")
@@ -202,18 +356,7 @@ class PyBHBackend:
                     env=os.environ.copy(),
                 )
         else:
-            self._controller = pybh.Controller()
-            self._controller.add_player(
-                name=f"Heron{PLAYER_NUMBER}",
-                team_number=TEAM_NUMBER,
-                field_player_color=pybh.TeamColor.black,
-                goalkeeper_color=pybh.TeamColor.black,
-                player_number=PLAYER_NUMBER,
-                location=LOCATION,
-                scenario=SCENARIO,
-            )
-            self._controller.start()
-            pybh.rl_sim_set_enabled(PLAYER_NUMBER, self.mode == "cpp")
+            raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
         self._started = True
 
     def close(self) -> None:
@@ -226,37 +369,105 @@ class PyBHBackend:
                 self._simrobot_process.terminate()
                 self._simrobot_process.wait(timeout=5)
             self._simrobot_process = None
-        elif self._controller is not None:
-            self._controller.stop()
-            self._controller = None
         self._started = False
         self._last_obs = None
+        self._world_spec = None
 
-    def reset(self, *, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> BackendObservation:
+    def reset(
+        self,
+        *,
+        ball_pos: np.ndarray | None = None,
+        robot_pos: np.ndarray | None = None,
+        robot_theta: float | None = None,
+        teammates: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] = (),
+        opponents: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] = (),
+        world_spec: WorldSpec | None = None,
+    ) -> BackendObservation:
         self.start()
+        if world_spec is None:
+            if ball_pos is None or robot_pos is None or robot_theta is None:
+                raise ValueError("reset() requires either world_spec or ball_pos/robot_pos/robot_theta")
+            world_spec = build_world_spec(
+                ball_pos=np.asarray(ball_pos, dtype=np.float32),
+                robot_pos=np.asarray(robot_pos, dtype=np.float32),
+                robot_theta=float(robot_theta),
+                teammates=teammates,
+                opponents=opponents,
+            )
+        validate_world_spec(world_spec, mode=self.mode)
+        self._world_spec = world_spec
+
         if self._uses_embedded_simrobot():
-            self._simrobot_reset(ball_pos, robot_pos, robot_theta)
+            self._simrobot_reset(world_spec)
             self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-            obs = self._wait_for_embedded_reset_obs(robot_pos)
+            obs = self._wait_for_embedded_reset_obs(
+                np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
+            )
             self._last_obs = obs
             return obs
         elif self._uses_visible_simrobot():
-            self._visible_simrobot_reset(ball_pos, robot_pos, robot_theta)
+            request_id = self._visible_simrobot_reset(world_spec)
+            self._wait_for_visible_world_request(request_id=request_id)
             self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-        elif self.mode == "cpp":
-            pybh.rl_sim_reset(
-                PLAYER_NUMBER,
-                float(ball_pos[0]),
-                float(ball_pos[1]),
-                float(robot_pos[0]),
-                float(robot_pos[1]),
-                float(robot_theta),
+            obs = self._wait_for_visible_reset_obs(
+                np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
             )
-            self._step_controller()
+            self._last_obs = obs
+            return obs
         else:
-            pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
-            self._set_world_state(ball_pos, robot_pos, robot_theta)
-            self._step_controller()
+            raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
+        obs = self.read_obs()
+        self._last_obs = obs
+        return obs
+
+    def set_dynamic_world(
+        self,
+        *,
+        ball_pos: np.ndarray | None = None,
+        robot_pos: np.ndarray | None = None,
+        robot_theta: float | None = None,
+        teammates: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] | None = None,
+        opponents: Iterable[WorldPlayerSpec | Mapping[str, float | int | bool] | tuple | list] | None = None,
+    ) -> BackendObservation:
+        if (robot_pos is None) != (robot_theta is None):
+            raise ValueError("robot_pos and robot_theta must be provided together")
+        teammate_specs = None if teammates is None else _coerce_world_players(teammates)
+        opponent_specs = None if opponents is None else _coerce_world_players(opponents)
+        if teammate_specs is not None:
+            _validate_world_players(teammate_specs, label="teammates", allow_non_upright=False)
+            if any(player.number == PLAYER_NUMBER for player in teammate_specs):
+                raise ValueError(
+                    f"teammates must not include the controlled robot number {PLAYER_NUMBER}; use robot_pose for the RL robot"
+                )
+        if opponent_specs is not None:
+            _validate_world_players(opponent_specs, label="opponents", allow_non_upright=False)
+
+        self.start()
+        if self._uses_embedded_simrobot():
+            self._apply_embedded_dynamic_world(
+                ball_pos=ball_pos,
+                robot_pos=robot_pos,
+                robot_theta=robot_theta,
+                teammates=teammate_specs,
+                opponents=opponent_specs,
+            )
+            obs = self.read_obs()
+            self._last_obs = obs
+            return obs
+
+        assert self._uses_visible_simrobot()
+        request_id = int(
+            pybh.rl_set_dynamic_world(
+                PLAYER_NUMBER,
+                ball=None if ball_pos is None else (float(ball_pos[0]), float(ball_pos[1])),
+                own_pose=None
+                if robot_pos is None or robot_theta is None
+                else (float(robot_pos[0]), float(robot_pos[1]), float(robot_theta)),
+                teammates=None if teammate_specs is None else self._serialize_players(teammate_specs),
+                opponents=None if opponent_specs is None else self._serialize_players(opponent_specs),
+            )
+        )
+        self._wait_for_visible_world_request(request_id=request_id)
         obs = self.read_obs()
         self._last_obs = obs
         return obs
@@ -268,13 +479,6 @@ class PyBHBackend:
             y_range=ACTION.y_range,
             max_pass_target=ACTION.max_pass_target,
         )
-        if self.mode == "python":
-            obs = self.read_obs()
-            self._set_world_state(
-                np.array([obs.ball_x, obs.ball_y], dtype=np.float32),
-                np.array([obs.robot_x, obs.robot_y], dtype=np.float32),
-                float(obs.robot_theta),
-            )
         adapted_action = adapt_action_to_backend(action, self._last_obs, mode=self.mode)
         self._set_action(adapted_action)
         for _ in range(self.frames_per_step):
@@ -282,14 +486,12 @@ class PyBHBackend:
                 pybh.simrobot_step(1)
             elif self._uses_visible_simrobot():
                 break
-            else:
-                self._step_controller()
         obs = self.read_obs()
         self._last_obs = obs
         return obs
 
     def read_obs(self) -> BackendObservation:
-        attempts = 5 if self.mode in {"cpp", "simrobot"} else 1
+        attempts = 5 if self._uses_embedded_simrobot() else 1
         for attempt in range(attempts):
             obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms))
             if obs.obs_ready:
@@ -297,8 +499,6 @@ class PyBHBackend:
                 return obs
             if self._uses_embedded_simrobot():
                 pybh.simrobot_step(1)
-            elif self.mode == "cpp" and attempt + 1 < attempts:
-                self._step_controller()
         raise RuntimeError(f"pybh.rl_get_obs timed out in backend={self.mode}")
 
     def _set_action(self, action: StructuredSkillAction) -> None:
@@ -319,37 +519,89 @@ class PyBHBackend:
                 pass
         pybh.rl_set_action(**kwargs)
 
-    def _step_controller(self) -> None:
-        if self._controller is None:
-            raise RuntimeError("Controller backend is not running")
-        self._controller.update()
+    def _serialize_players(self, players: tuple[WorldPlayerSpec, ...]) -> list[tuple[int, float, float, float, bool]]:
+        return [player.as_tuple() for player in players]
 
-    def _set_world_state(self, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
-        if self._controller is None:
-            return
-        pybh.set_world_state(
-            self._controller,
-            0,
-            float(ball_pos[0]),
-            float(ball_pos[1]),
-            float(robot_pos[0]),
-            float(robot_pos[1]),
-            float(robot_theta),
-        )
+    def _read_world_status(self) -> WorldUpdateStatus:
+        return WorldUpdateStatus.from_payload(pybh.rl_get_world_status(PLAYER_NUMBER))
 
-    def _simrobot_reset(self, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
+    def _maybe_log_visible_wait(self, message: str, *, next_log_at: float, now: float) -> float:
+        if self.visible_status_log_interval_s <= 0.0 or now < next_log_at:
+            return next_log_at
+        print(message, flush=True)
+        return now + self.visible_status_log_interval_s
+
+    def _simrobot_reset(self, world_spec: WorldSpec) -> None:
         scale = self.simrobot_scene.position_scale
-        scene_ball_x = float(ball_pos[0] * scale)
-        scene_ball_y = float(ball_pos[1] * scale)
-        scene_robot_x = float(robot_pos[0] * scale)
-        scene_robot_y = float(robot_pos[1] * scale)
-        scene_robot_theta = float(_normalize_angle(robot_theta + self.simrobot_scene.theta_offset))
+        scene_ball_x = float(world_spec.ball_x * scale)
+        scene_ball_y = float(world_spec.ball_y * scale)
+        scene_robot_x = float(world_spec.robot_x * scale)
+        scene_robot_y = float(world_spec.robot_y * scale)
+        scene_robot_theta = float(_normalize_angle(world_spec.robot_theta + self.simrobot_scene.theta_offset))
         if not pybh.simrobot_set_ball_state(scene_ball_x, scene_ball_y, 0.0, 0.0):
             raise RuntimeError("simrobot_set_ball_state failed")
         if not pybh.simrobot_set_robot_pose(
             self.simrobot_scene.robot_name, scene_robot_x, scene_robot_y, scene_robot_theta
         ):
             raise RuntimeError(f"simrobot_set_robot_pose failed for {self.simrobot_scene.robot_name}")
+        for player in world_spec.teammates:
+            body_name = simrobot_body_name_for_player(player.number, opponent=False)
+            scene_x = float(player.x * scale)
+            scene_y = float(player.y * scale)
+            scene_theta = float(_normalize_angle(player.theta + self.simrobot_scene.theta_offset))
+            if not pybh.simrobot_set_robot_pose(body_name, scene_x, scene_y, scene_theta):
+                raise RuntimeError(f"simrobot_set_robot_pose failed for {body_name}")
+        for player in world_spec.opponents:
+            body_name = simrobot_body_name_for_player(player.number, opponent=True)
+            scene_x = float(player.x * scale)
+            scene_y = float(player.y * scale)
+            scene_theta = float(_normalize_angle(player.theta + self.simrobot_scene.theta_offset))
+            if not pybh.simrobot_set_robot_pose(body_name, scene_x, scene_y, scene_theta):
+                raise RuntimeError(f"simrobot_set_robot_pose failed for {body_name}")
+
+    def _apply_embedded_dynamic_world(
+        self,
+        *,
+        ball_pos: np.ndarray | None,
+        robot_pos: np.ndarray | None,
+        robot_theta: float | None,
+        teammates: tuple[WorldPlayerSpec, ...] | None,
+        opponents: tuple[WorldPlayerSpec, ...] | None,
+    ) -> None:
+        scale = self.simrobot_scene.position_scale
+        if ball_pos is not None:
+            if not pybh.simrobot_set_ball_state(float(ball_pos[0] * scale), float(ball_pos[1] * scale), 0.0, 0.0):
+                raise RuntimeError("simrobot_set_ball_state failed during dynamic world update")
+        if robot_pos is not None:
+            if robot_theta is None:
+                raise ValueError("robot_theta is required when robot_pos is provided")
+            scene_robot_theta = float(_normalize_angle(float(robot_theta) + self.simrobot_scene.theta_offset))
+            if not pybh.simrobot_set_robot_pose(
+                self.simrobot_scene.robot_name,
+                float(robot_pos[0] * scale),
+                float(robot_pos[1] * scale),
+                scene_robot_theta,
+            ):
+                raise RuntimeError(f"simrobot_set_robot_pose failed for {self.simrobot_scene.robot_name}")
+        if teammates is not None:
+            for player in teammates:
+                if not pybh.simrobot_set_robot_pose(
+                    simrobot_body_name_for_player(player.number, opponent=False),
+                    float(player.x * scale),
+                    float(player.y * scale),
+                    float(_normalize_angle(player.theta + self.simrobot_scene.theta_offset)),
+                ):
+                    raise RuntimeError(f"simrobot_set_robot_pose failed for teammate robot {player.number}")
+        if opponents is not None:
+            for player in opponents:
+                if not pybh.simrobot_set_robot_pose(
+                    simrobot_body_name_for_player(player.number, opponent=True),
+                    float(player.x * scale),
+                    float(player.y * scale),
+                    float(_normalize_angle(player.theta + self.simrobot_scene.theta_offset)),
+                ):
+                    raise RuntimeError(f"simrobot_set_robot_pose failed for opponent robot {player.number}")
+        pybh.simrobot_step(1)
 
     def _wait_for_embedded_reset_obs(self, robot_pos: np.ndarray, *, max_steps: int = 80) -> BackendObservation:
         expected_x = float(robot_pos[0])
@@ -367,12 +619,78 @@ class PyBHBackend:
             return last_obs
         raise RuntimeError("pybh.rl_get_obs timed out while waiting for embedded SimRobot reset")
 
-    def _visible_simrobot_reset(self, ball_pos: np.ndarray, robot_pos: np.ndarray, robot_theta: float) -> None:
-        pybh.rl_reset_world(
+    def _wait_for_visible_world_request(self, *, request_id: int, timeout_ms: int | None = None) -> None:
+        effective_timeout_ms = self.visible_request_timeout_ms if timeout_ms is None else max(1, int(timeout_ms))
+        deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
+        started_at = time.monotonic()
+        next_log_at = started_at + min(DEFAULT_VISIBLE_LOG_INTERVAL_S, self.visible_status_log_interval_s or 1e9)
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            status = self._read_world_status()
+            next_log_at = self._maybe_log_visible_wait(
+                (
+                    f"[visible wait request {request_id}] "
+                    f"+{now - started_at:.1f}s {status.summary()}"
+                ),
+                next_log_at=next_log_at,
+                now=now,
+            )
+            if status.result_request_id >= request_id:
+                if status.result_ok:
+                    return
+                raise RuntimeError(status.result_error or f"Visible SimRobot world request {request_id} failed")
+            time.sleep(WORLD_STATUS_POLL_INTERVAL_S)
+        raise RuntimeError(f"Timed out waiting for visible SimRobot world request {request_id}")
+
+    def _wait_for_visible_reset_obs(self, robot_pos: np.ndarray, *, timeout_ms: int | None = None) -> BackendObservation:
+        effective_timeout_ms = self.visible_reset_obs_timeout_ms if timeout_ms is None else max(1, int(timeout_ms))
+        deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
+        last_obs: BackendObservation | None = None
+        expected_x = float(robot_pos[0])
+        expected_y = float(robot_pos[1])
+        per_try_timeout_ms = max(1, min(100, effective_timeout_ms // 20))
+        started_at = time.monotonic()
+        next_log_at = started_at + min(DEFAULT_VISIBLE_LOG_INTERVAL_S, self.visible_status_log_interval_s or 1e9)
+        while time.monotonic() < deadline:
+            obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, per_try_timeout_ms))
+            last_obs = obs
+            now = time.monotonic()
+            next_log_at = self._maybe_log_visible_wait(
+                (
+                    "[visible wait reset-obs] "
+                    f"+{now - started_at:.1f}s frame={obs.frame} "
+                    f"obs_ready={int(obs.obs_ready)} "
+                    f"robot_est=({obs.robot_x:.1f},{obs.robot_y:.1f},{obs.robot_theta:.2f}) "
+                    f"robot_sim=({obs.simrobot_robot_x:.1f},{obs.simrobot_robot_y:.1f},{obs.simrobot_robot_theta:.2f})"
+                ),
+                next_log_at=next_log_at,
+                now=now,
+            )
+            if not obs.obs_ready:
+                continue
+            if math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y) <= 150.0:
+                return obs
+        if last_obs is not None and last_obs.obs_ready:
+            distance_mm = math.hypot(last_obs.simrobot_robot_x - expected_x, last_obs.simrobot_robot_y - expected_y)
+            raise RuntimeError(
+                "Visible SimRobot reset obs did not converge to requested pose within timeout: "
+                f"expected=({expected_x:.1f},{expected_y:.1f}) "
+                f"got_sim=({last_obs.simrobot_robot_x:.1f},{last_obs.simrobot_robot_y:.1f},{last_obs.simrobot_robot_theta:.2f}) "
+                f"got_est=({last_obs.robot_x:.1f},{last_obs.robot_y:.1f},{last_obs.robot_theta:.2f}) "
+                f"distance_mm={distance_mm:.1f} timeout_ms={effective_timeout_ms}"
+            )
+        raise RuntimeError("pybh.rl_get_obs timed out while waiting for visible SimRobot reset")
+
+    def _visible_simrobot_reset(self, world_spec: WorldSpec) -> int:
+        return int(
+            pybh.rl_reset_world_extended(
             PLAYER_NUMBER,
-            float(ball_pos[0]),
-            float(ball_pos[1]),
-            float(robot_pos[0]),
-            float(robot_pos[1]),
-            float(robot_theta),
+            float(world_spec.ball_x),
+            float(world_spec.ball_y),
+            float(world_spec.robot_x),
+            float(world_spec.robot_y),
+            float(world_spec.robot_theta),
+            teammates=self._serialize_players(world_spec.teammates),
+            opponents=self._serialize_players(world_spec.opponents),
+            )
         )
