@@ -51,6 +51,23 @@ SIMROBOT_SCENE_PRESETS = {
     ),
 }
 
+SIMROBOT_VISIBLE_SCENE_PRESETS = {
+    "2d": SimRobotSceneConfig(
+        profile="2d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RLFull.ros2d",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-math.pi,
+    ),
+    "3d": SimRobotSceneConfig(
+        profile="3d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RLFull_3D.ros2",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-(math.pi / 2.0),
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ActionConfig:
@@ -80,11 +97,13 @@ class BackendConfig:
 
 
 def resolve_simrobot_scene_config(backend: BackendConfig) -> SimRobotSceneConfig:
-    if backend.simrobot_profile not in SIMROBOT_SCENE_PRESETS:
-        valid_profiles = ", ".join(sorted(SIMROBOT_SCENE_PRESETS))
+    scene_presets = SIMROBOT_VISIBLE_SCENE_PRESETS if backend.mode == "simrobot_visible" else SIMROBOT_SCENE_PRESETS
+
+    if backend.simrobot_profile not in scene_presets:
+        valid_profiles = ", ".join(sorted(scene_presets))
         raise ValueError(f"Unsupported SimRobot profile {backend.simrobot_profile!r}. Expected one of: {valid_profiles}")
 
-    scene_cfg = SIMROBOT_SCENE_PRESETS[backend.simrobot_profile]
+    scene_cfg = scene_presets[backend.simrobot_profile]
     if backend.simrobot_scene_path is not None:
         scene_cfg = replace(scene_cfg, scene_path=Path(backend.simrobot_scene_path).resolve())
     if backend.simrobot_robot_name is not None:

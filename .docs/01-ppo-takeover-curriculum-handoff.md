@@ -53,7 +53,6 @@ Versión operacional:
 
 - backend objetivo: `simrobot`
 - perfil objetivo: `3d`
-- ignorar totalmente `cpp/RLSim2D` como centro de entrenamiento
 - mantener el action contract actual
 - mantener fijo `obs space`
 - mantener fijo `action space`

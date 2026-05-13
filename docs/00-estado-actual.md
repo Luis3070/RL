@@ -4,8 +4,8 @@
 
 El proyecto se divide en dos repos hermanos:
 
-- `RL`: entorno, entrenamiento, heuristica, wrapper Python y scripts de prueba.
-- `SabanaHerons2026`: B-Human, SimRobot, modulos C++ y binding `pybh.controller`.
+- `RL`: entorno, entrenamiento, heurísticas y scripts Python.
+- `SabanaHerons2026`: B-Human, SimRobot, módulos C++ y binding `pybh.controller`.
 
 La ruta esperada es:
 
@@ -16,10 +16,12 @@ La ruta esperada es:
 
 ## Objetivo actual
 
-El objetivo ya no es mover el robot con un bypass de bajo nivel. El objetivo actual es:
+El objetivo activo es entrenar y depurar políticas que pidan `SkillRequest`
+coherentes, manteniendo el movimiento natural de B-Human:
 
 ```text
-RL/Python
+RL / Python
+  -> RLSharedState
   -> RLSkillProvider
   -> SkillRequest
   -> SkillBehaviorControl
@@ -31,92 +33,88 @@ RL/Python
 
 Esto aplica a:
 
-- SimRobot 2D embebido.
-- SimRobot 3D embebido.
-- SimRobot visible, cuando la ventana esta corriendo con F5.
-- Backend rapido `cpp`, usando `RLSim2D` como simulador barato, pero alimentado desde el `MotionRequest` final.
+- SimRobot embebido perfil `2d`
+- SimRobot embebido perfil `3d`
+- SimRobot visible con `F5`
 
-## Escenarios RL
+## Escenarios y escenas RL
 
-Hay escenarios dedicados para no contaminar escenarios normales de B-Human:
+Escenarios dedicados:
 
 ```text
 SabanaHerons2026/Config/Scenarios/4v4_RL2D
 SabanaHerons2026/Config/Scenarios/4v4_RL3D
 ```
 
-Ambos tienen:
-
-```cfg
-{representation = SkillRequest; provider = RLSkillProvider;}
-{representation = StrategyStatus; provider = RLSkillProvider;}
-{representation = MotionRequest; provider = SkillBehaviorControl;}
-```
-
-Y en `skillBehaviorControl.cfg`:
-
-```cfg
-options = [
-  HandleRLRequest,
-];
-
-playingOptions = [];
-
-useNewHandleCatchBallBehavior = true;
-```
-
-## Escenas RL
-
-Las escenas principales son:
+Escenas principales:
 
 ```text
 SabanaHerons2026/Config/Scenes/RL1v0.ros2d
 SabanaHerons2026/Config/Scenes/RL1v0_3D.ros2
 ```
 
-`RL1v0.ros2d` apunta a `4v4_RL2D`.
+Los escenarios RL mantienen:
 
-`RL1v0_3D.ros2` apunta a `4v4_RL3D`.
+- `SkillRequest` provisto por `RLSkillProvider`
+- `MotionRequest` provisto por `SkillBehaviorControl`
+- `HandleRLRequest` como puerta de entrada del request externo
 
-## Configuracion Python
+## Configuración Python
 
-`RL/config.py` contiene:
+`RL/config.py` define hoy:
 
-- `SCENARIO = "4v4_RL2D"` para el backend `cpp`.
-- preset `simrobot_profile="2d"` con escena `RL1v0.ros2d`.
-- preset `simrobot_profile="3d"` con escena `RL1v0_3D.ros2`.
-- `position_scale = -1.0 / 1000.0`.
-- `theta_offset = -pi` para 2D.
-- `theta_offset = -pi / 2` para 3D.
+- `simrobot_profile="2d"` con escena `RL1v0.ros2d`
+- `simrobot_profile="3d"` con escena `RL1v0_3D.ros2`
+- `position_scale = -1.0 / 1000.0`
+- `theta_offset = -pi` para `2d`
+- `theta_offset = -pi / 2` para `3d`
 
-## Backends
+## Superficie soportada
 
-`PyBHBackend` soporta:
+`PyBHBackend` soporta solo dos modos:
 
-- `cpp`: controlador B-Human con simulacion rapida `RLSim2D`.
-- `python`: legacy, inyecta `GroundTruthWorldState` desde Python.
-- `simrobot`: SimRobot embebido.
-- `simrobot_visible`: SimRobot visible externo, controlado por memoria compartida.
+- `simrobot`: SimRobot embebido en el proceso Python
+- `simrobot_visible`: SimRobot visible controlado por `RLSharedState`
 
-Para `simrobot` y `simrobot_visible`, `pybh_backend.py` apaga explicitamente `RLSim2D`:
+Ambos consumen el mismo contrato de acción y el mismo payload de observación.
 
-```python
-pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
-```
+## Wire de mundo
 
-Eso evita mezclar el simulador rapido 2D con SimRobot real.
+El reset extendido de mundo ya soporta:
+
+- pelota
+- robot RL
+- teammates
+- opponents
+
+Rutas disponibles:
+
+- `PyBHBackend.reset(... teammates=..., opponents=...)` en modo embebido
+- `pybh.rl_reset_world_extended(...)` para SimRobot visible
+
+Además existe `pybh.set_world_state_extended(...)` como utilidad de controller.
+
+## Wire dinámico
+
+También existe actualización de mundo intra-episodio:
+
+- `PyBHBackend.set_dynamic_world(...)` en modo embebido y visible
+- `pybh.rl_set_dynamic_world(...)` para SimRobot visible
+- `pybh.rl_get_world_status(...)` para esperar confirmación o error del request visible
+
+En `simrobot_visible`, `LocalConsole` valida que los slots pedidos existan en la
+escena antes de mover nada. Si falta un robot, el request falla con error claro
+en vez de aplicar un reset parcial.
 
 ## Estado verificado
 
-Verificado en esta sesion:
+Verificado en esta sesión:
 
-- `py_compile` de scripts principales de `RL`: OK.
-- SimRobot 2D embebido con agente heuristico: OK.
-- SimRobot 3D embebido con agente heuristico: OK en flujo natural.
-- Escena 2D y escena 3D cargan.
-- `controller.so` fue reconstruido y strippeado; queda alrededor de 74 MB.
+- `py_compile` de scripts principales de `RL`: OK
+- rebuild de `pybh/controller`: OK
+- el binding ya no expone funciones antiguas de simulación interna
+- smoke embebido `simrobot` fuera del sandbox: `obs_ready=True`
 
-Limitacion honesta:
+Limitación honesta:
 
-- La verificacion visible con GUI requiere una sesion grafica y presionar F5 en SimRobot. Desde automatizacion se valido el motor embebido y las trazas nativas; para la ventana visible se debe correr `live_simrobot_probe.py` manualmente y observar el robot.
-
+- la validación visible con GUI sigue requiriendo una sesión gráfica y `F5`

@@ -19,7 +19,6 @@ def test_observation_contract_size_and_reward_indices():
             robot_theta=0.25,
             frame=123,
             obs_ready=True,
-            sim_enabled=True,
             ball_rel_x=900.0,
             ball_rel_y=150.0,
             ball_end_rel_x=1100.0,

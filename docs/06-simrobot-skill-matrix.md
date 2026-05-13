@@ -75,7 +75,6 @@ Fecha: 2026-05-01 16:47:49
 ## Criterio de validacion
 
 - `obs_ready=True`.
-- `sim_enabled=False` en SimRobot real.
 - `requested_skill` coincide con la skill enviada, aceptando `walk -> walkTo`.
 - `skill_behavior_motion_request` cae en el conjunto esperado para la skill.
 - `motion_engine_input_request` coincide con la salida de `SkillBehaviorControl`.

@@ -2,15 +2,10 @@
 
 ## Objetivo
 
-Este documento cierra la fase de wiring del entorno RL hacia B-Human con foco en:
+Cerrar la fase de wiring RL -> B-Human con una superficie única y natural sobre
+SimRobot real.
 
-- eliminar dependencias activas de `GroundTruth` del flujo RL,
-- dejar una sola fuente canónica del payload de observación,
-- y validar que las skills sigan entrando al pipeline natural.
-
-## Estado final del flujo
-
-El flujo activo queda así:
+## Flujo activo
 
 ```text
 Python
@@ -23,7 +18,7 @@ Python
   -> SimRobot
 ```
 
-Regla de arquitectura que queda vigente:
+Regla vigente:
 
 ```text
 RL decide qué skill pedir.
@@ -32,94 +27,56 @@ B-Human decide cómo ejecutarla.
 
 ## Cambios cerrados
 
-### 1. `GroundTruth` removido del flujo RL activo
+### 1. Publicador canónico de observaciones
 
-Se removieron dependencias activas a `GroundTruth` en:
-
-- `RLSkillProvider`
-- `SelfLocator`
-- `RLNatural.con`
-- `4v4_RL2D/threads.cfg`
-- `4v4_RL3D/threads.cfg`
-
-Eso deja los escenarios RL activos apoyados en providers naturales para:
-
-- `RobotPose`
-- `BallModel`
-- `FieldBall`
-- `ObstacleModel`
-- `TeammatesBallModel`
-
-## 2. Publicador canónico de observaciones
-
-El payload observado por Python ahora se publica en un solo lugar:
+El payload que consume Python se publica en un solo lugar:
 
 - `SkillBehaviorControl`
 
-`RLSkillProvider` queda reducido a su responsabilidad real:
+`RLSkillProvider` queda dedicado a:
 
-- leer la acción RL desde `RLSharedState`
+- leer acción RL desde `RLSharedState`
 - producir `SkillRequest`
 - producir `StrategyStatus`
 
-Ya no mezcla bridge de acción con publicación del `obs`.
+### 2. Features ofensivas mínimas vivas
 
-## 3. Features ofensivas básicas ya no quedan muertas
-
-Las features:
+El wire natural ya publica:
 
 - `can_score_now`
 - `shot_quality_no_obstacles`
 - `shot_opening_with_obstacles`
 
-dejaron de publicarse como `false/0/0` en el flujo natural.
+### 3. Superficie soportada
 
-Ahora usan:
+El bridge activo expone:
 
-- `ExpectedGoals.xG(ballOnField)`
-- `ExpectedGoals.getRating(ballOnField)`
+- `simrobot`
+- `simrobot_visible`
+- reset extendido con teammates y opponents
+- cambios dinámicos de mundo intra-episodio
+- status explícito de requests visibles con `rl_get_world_status(...)`
 
-con el gating mínimo:
+### 4. Matriz de skills validada
 
-```text
-can_score_now = shot_opening_with_obstacles > 0.8
-```
-
-## Validación de skills
-
-Se ejecutó la matriz de skills sobre `simrobot` embebido en perfiles `2d` y `3d`.
-
-Resultado resumido:
-
-- las 8 skills validaron en `2d` y `3d`
-- `shoot` acepta `walkToBallAndKick` o `dribble`
-- `pass` acepta `walkToBallAndKick` o `dribble`
+Se validó el pipeline de las 8 skills públicas sobre perfiles `2d` y `3d`.
 
 Interpretación:
 
-- el wire de RL hacia `SkillRequest` quedó correcto para todas las skills
-- en B-Human, `shoot` puede degradar a `dribble` dentro de `KickAtGoal`
-- en `RL1v0`, `pass` puede degradar a `dribble` porque no existe teammate válido y `PassToTeammate` aborta hacia `KickAtGoal`
-- eso se documenta como comportamiento aguas abajo, no como falla del bridge
+- el bridge RL -> `SkillRequest` quedó correcto
+- las degradaciones internas de `shoot` o `pass` son comportamiento aguas abajo
 
-La matriz actualizada quedó en:
+## Qué queda fuera de esta fase
 
-- `docs/06-simrobot-skill-matrix.md`
+Lo siguiente ya no es wiring puro:
 
-## Qué sigue fuera de esta fase
-
-Esto ya no pertenece al alcance del wire, sino al equipo de RL o a una fase posterior:
-
-- decidir si el backend `cpp` se usa solo para smoke o también para entrenamiento
-- mejorar la semántica de `pass_options_count`
-- refinar la semántica de ausencia de obstáculos
-- redefinir validaciones largas para `shoot` y `pass` si se quiere medir ejecución completa y no solo activación del pipeline
+- reward semántico de takeover
+- curriculum por stages
+- masks activas en entrenamiento
+- telemetría de PPO
+- evaluación corta con gates
 
 ## Conclusión
 
-Para el flujo RL activo probado con el probe habitual:
-
-- el wire ya es natural,
-- el `obs` ya no depende de `GroundTruth`,
-- la publicación de observaciones ya no está duplicada,
-- y el bridge queda listo para ser consumido por entrenamiento RL sin seguir haciendo cambios estructurales del lado del wiring.
+El wire ya está listo para que el equipo de RL trabaje encima sin seguir
+tocando estructura base del bridge.

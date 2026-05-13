@@ -2,7 +2,7 @@
 
 Este documento complementa:
 
-- [01-ppo-takeover-curriculum-handoff.md](/home/luis/GitHub/RL/.docs/01-ppo-takeover-curriculum-handoff.md)
+- [01-ppo-takeover-curriculum-handoff.md](./01-ppo-takeover-curriculum-handoff.md)
 
 Su objetivo es aterrizar:
 

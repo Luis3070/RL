@@ -1,24 +1,9 @@
 # Premisas Irrompibles
 
-Estas reglas no son estilo. Son restricciones de arquitectura para no volver a romper el movimiento natural.
+Estas reglas no son estilo. Son restricciones de arquitectura para no volver a
+romper el flujo natural.
 
-## 1. RL no provee `MotionRequest` en escenarios naturales
-
-En escenarios RL de SimRobot:
-
-```cfg
-{representation = MotionRequest; provider = SkillBehaviorControl;}
-```
-
-No volver a:
-
-```cfg
-{representation = MotionRequest; provider = RLSkillProvider;}
-```
-
-`RLSkillProvider` puede conservar codigo legacy/debug para `MotionRequest`, pero el grafo natural no debe mapearlo como provider.
-
-## 2. El punto de entrada RL es `SkillRequest`
+## 1. RL entra por `SkillRequest`
 
 El contrato correcto:
 
@@ -27,21 +12,15 @@ RLSkillProvider -> SkillRequest
 SkillBehaviorControl -> MotionRequest
 ```
 
-No saltarse `SkillBehaviorControl`.
+No volver a saltarse `SkillBehaviorControl`.
 
-## 3. `walkTo` usa coordenadas de campo
+## 2. `walkTo` usa coordenadas de campo
 
-No convertir `walkTo` a coordenadas relativas para:
-
-```text
-cpp
-simrobot
-simrobot_visible
-```
+No convertir `walkTo` a coordenadas relativas en las rutas activas.
 
 `SkillRequest::Builder::walkTo(...)` espera campo global.
 
-## 4. No usar root-assist como solucion final
+## 3. No usar root-assist como solución final
 
 No activar por defecto:
 
@@ -50,88 +29,30 @@ PYBH_SIMROBOT_RL_ROOT_ASSIST
 PYBH_SIMROBOT_RL_ABSTRACT_MOTION
 ```
 
-Si se usan para diagnostico, deben quedar apagados antes de validar.
-
 Movimiento natural significa:
 
 ```text
 MotionEngine -> JointRequest -> SimRobot
 ```
 
-No:
+## 4. El reset debe devolver observación fresca
 
-```text
-Python -> mover raiz del robot
-```
+Después de `reset`, la primera observación debe corresponder al mundo pedido.
 
-## 5. SimRobot real debe tener `RLSim2D` apagado
+No se debe devolver una observación vieja por rapidez.
 
-Para:
+## 5. No importar `pybh.controller` desde cwd incorrecto
 
-```text
-mode="simrobot"
-mode="simrobot_visible"
-```
-
-debe ejecutarse:
-
-```python
-pybh.rl_sim_set_enabled(PLAYER_NUMBER, False)
-```
-
-`sim_enabled` en observaciones debe ser `False`.
-
-Si `sim_enabled=True` mientras se cree estar usando SimRobot real, la prueba no es valida.
-
-## 6. El reset debe devolver observacion fresca
-
-Despues de reset en SimRobot embebido, no se puede devolver la primera observacion vieja que aparezca.
-
-La observacion inicial debe estar cerca de la pose pedida.
-
-Motivo: si el agente heuristico lee `robot=(0,0)` y `ball=(0,0)`, manda `shoot` inmediatamente y puede ensuciar el estado.
-
-## 7. No importar `pybh.controller` desde cwd incorrecto
-
-Scripts nuevos deben hacer una de estas dos cosas:
+Usar:
 
 ```python
 from pybh_backend import PyBHBackend
 import pybh.controller as pybh
 ```
 
-o:
+o cambiar antes a `BHUMAN_DIR`.
 
-```python
-import os
-from config import BHUMAN_DIR
-os.chdir(BHUMAN_DIR)
-import pybh.controller as pybh
-```
-
-B-Human carga configuracion relativa al cwd. Importar `pybh.controller` demasiado temprano puede producir errores nativos dificiles de leer.
-
-## 8. No commitear `.so` de mas de 100 MB
-
-GitHub rechaza archivos sobre 100 MB.
-
-Despues de compilar y copiar:
-
-```bash
-strip --strip-debug \
-  Build/Linux/Python/Develop/controller.cpython-312-x86_64-linux-gnu.so \
-  Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
-```
-
-Verificar:
-
-```bash
-ls -lh Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
-```
-
-## 9. Escenarios normales no son laboratorio RL
-
-No romper `Default`, `4v4_Scaled`, `2D` u otros escenarios normales para probar RL.
+## 6. Escenarios normales no son laboratorio RL
 
 Usar escenarios dedicados:
 
@@ -140,11 +61,9 @@ Usar escenarios dedicados:
 4v4_RL3D
 ```
 
-## 10. La validacion minima debe mirar trazas, no solo posicion
+## 7. La validación mínima mira trazas, no solo posición
 
-Especialmente en 3D, la pose global puede moverse poco al inicio.
-
-Validar:
+Mirar como mínimo:
 
 ```text
 requested_skill
@@ -156,29 +75,23 @@ motion_engine_phase
 joints de piernas
 ```
 
-Para caminata:
+## 8. La ventana visible requiere control exclusivo
 
-```text
-requested_skill = walkTo
-skill_behavior_skill_request = 2
-skill_behavior_motion_request = 4
-motion_engine_input_request = 4
-motion_engine_effective_request = 4
-```
+Si se usa SimRobot visible:
 
-## 11. Smoke visual no es entrenamiento
+- la ventana correcta debe estar corriendo
+- hay que presionar `F5`
+- no debe haber otra instancia consumiendo el mismo `RLSharedState`
 
-`live_simrobot_probe.py --policy heuristic` es demo/diagnostico visual.
+## 9. Smoke visual no es entrenamiento
 
-`train.py --mode smoke` prueba el loop RL, pero una policy no entrenada puede mandar acciones casi quietas. No usarlo como prueba visual de movimiento natural.
+`live_simrobot_probe.py` y `heuristic_agent_experiment.py` sirven para
+diagnóstico y sanity check, no como evidencia de aprendizaje PPO.
 
-## 12. Si se mata un proceso nativo, limpiar antes de diagnosticar
-
-Si un proceso muere dentro de B-Human/SimRobot y las pruebas quedan inconsistentes:
+## 10. Si un proceso nativo muere, limpiar antes de diagnosticar
 
 ```bash
-rm -f /dev/shm/pybh_rl_shared_state_v2
+rm -f /dev/shm/pybh_rl_shared_state_v3
 ```
 
-Esto no borra codigo ni configuracion; solo borra estado temporal del bridge RL.
-
+Eso solo borra estado temporal del bridge.

@@ -238,7 +238,7 @@ def run_training(timesteps: int, backend: str, device: str, simrobot_profile: st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train or smoke-test the pybh SkillRequest environment")
-    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible", "cpp", "python"), default="simrobot")
+    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible"), default="simrobot")
     parser.add_argument("--launch-simrobot", "--simrobot-launch", dest="simrobot_launch", action="store_true")
     parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default=ENV.backend.simrobot_profile)
     parser.add_argument("--mode", choices=("smoke", "train"), default="smoke")

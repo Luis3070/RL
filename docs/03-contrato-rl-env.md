@@ -1,14 +1,10 @@
 # Contrato RL, Backend y Entorno
 
-## Contrato de accion
+## Contrato de acción
 
-El contrato canonico esta en:
+La acción canónica está en `RL/action.py`.
 
-```text
-RL/action.py
-```
-
-La accion plana tiene cinco campos:
+La acción plana tiene cinco campos:
 
 ```text
 [skill_type, target_x, target_y, target_theta, pass_target]
@@ -27,7 +23,7 @@ Skills:
 7 observe
 ```
 
-En Python, `pass` se llama `pass_` internamente para evitar la keyword del lenguaje, pero hacia `pybh` se envia como `"pass"`.
+`pass` se llama `pass_` solo dentro de Python para evitar la keyword.
 
 ## Coordenadas
 
@@ -37,15 +33,8 @@ Regla de oro:
 SkillRequest::walkTo usa coordenadas globales de campo.
 ```
 
-Por eso `adapt_action_to_backend(...)` deja sin transformar las acciones para:
-
-```text
-cpp
-simrobot
-simrobot_visible
-```
-
-Solo el backend legacy `python` convierte a coordenadas relativas.
+Por eso `adapt_action_to_backend(...)` hoy deja pasar las acciones sin
+transformación adicional.
 
 ## Bridge Python -> B-Human
 
@@ -73,8 +62,6 @@ passTarget
 obsReady = false
 ```
 
-Tambien drena posts viejos de `obsSignal` para que la siguiente observacion corresponda al frame nuevo.
-
 ## Bridge B-Human -> Python
 
 Python lee:
@@ -93,30 +80,33 @@ robot_y
 robot_theta
 frame
 obs_ready
-sim_enabled
 requested_skill
 requested_pass_target
 ```
 
-Campos de debug del flujo natural:
+Campos principales del estado actual:
 
 ```text
-provider_motion_request
-provider_call_count
-skill_behavior_skill_request
-skill_behavior_motion_request
-skill_behavior_call_count
-motion_engine_input_request
-motion_engine_effective_request
-motion_engine_phase
-motion_engine_fall_state
-motion_speed_x
-motion_speed_y
-motion_speed_rot
-joint_l_hip_pitch
-joint_l_knee_pitch
-joint_r_hip_pitch
-joint_r_knee_pitch
+ball_rel_x
+ball_rel_y
+ball_end_rel_x
+ball_end_rel_y
+ball_vel_x
+ball_vel_y
+time_since_ball_seen
+time_since_ball_disappeared
+ball_seen_percentage
+ball_consistent_with_game_state
+can_score_now
+shot_quality_no_obstacles
+shot_opening_with_obstacles
+pass_options_count
+nearest_teammate_dist
+nearest_opponent_dist
+nearest_uncertain_obstacle_dist
+nearest_teammate_front_dist
+nearest_opponent_front_dist
+nearest_uncertain_front_dist
 ```
 
 ## `RLSharedState`
@@ -127,30 +117,16 @@ Archivo:
 SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.h
 ```
 
-Propiedades:
+Propiedades actuales:
 
-- memoria compartida POSIX;
-- nombre actual: `/pybh_rl_shared_state_v2`;
-- version actual: `12`;
-- mutex compartido entre procesos;
-- mutex robusto: si un proceso muere con el lock tomado, el siguiente proceso recupera con `EOWNERDEAD`;
-- semaforo `obsSignal` para despertar a Python cuando hay observacion.
+- memoria compartida POSIX
+- nombre actual: `/pybh_rl_shared_state_v3`
+- versión actual: `25`
+- mutex robusto compartido entre procesos
+- semáforo `obsSignal`
+- buffers para reset extendido de teammates y opponents
 
-La robustez del mutex es importante porque los smoke tests con `timeout` pueden matar Python dentro de codigo nativo.
-
-## Backends de `PyBHBackend`
-
-### `mode="cpp"`
-
-Usa:
-
-```text
-pybh.Controller()
-scenario = 4v4_RL2D
-RLSim2D enabled
-```
-
-Este modo no carga SimRobot. Es el camino rapido para train/smoke.
+## Backends soportados por `PyBHBackend`
 
 ### `mode="simrobot"`
 
@@ -162,23 +138,44 @@ pybh.simrobot_step(...)
 pybh.simrobot_unload_scene()
 ```
 
-Apaga `RLSim2D`.
-
-El reset espera hasta ver la pose reseteada antes de devolver la primera observacion. Esto evita que el agente heuristico lea una observacion vieja `(0,0)` y dispare por error.
+El reset espera observación fresca alineada con la pose pedida.
 
 ### `mode="simrobot_visible"`
 
 Usa una instancia visible de SimRobot:
 
 ```text
-pybh.rl_reset_world(...)
+pybh.rl_reset_world_extended(...)
 pybh.rl_set_action(...)
 pybh.rl_get_obs(...)
 ```
 
-El loop de SimRobot visible tiene que estar corriendo. En la ventana, presionar F5.
+Requiere una ventana viva y `F5`.
 
-Este modo tambien apaga `RLSim2D`.
+## Contrato de mundo
+
+`PyBHBackend.reset(...)` ya acepta:
+
+```text
+ball_pos
+robot_pos
+robot_theta
+teammates
+opponents
+```
+
+Los jugadores se expresan como:
+
+```text
+(number, x, y, theta, upright)
+```
+
+Reglas:
+
+- números `1..20`
+- no duplicados por lista
+- el robot controlado no va en `teammates`
+- `upright=False` no está soportado en las rutas activas
 
 ## `RealSimRobotEnv`
 
@@ -188,41 +185,14 @@ Archivo:
 RL/environment.py
 ```
 
-Es un `ParallelEnv` monoagente:
+Es un `ParallelEnv` monoagente con:
 
-```text
-agent = player_1
-```
+- `agent = player_1`
+- `action_space = Box(5,)`
+- observación de `23` features
+- estado global igual a la observación actual
 
-Observacion de 9 floats:
-
-```text
-dx pelota-robot
-dy pelota-robot
-theta robot
-ball_x
-ball_y
-robot_x
-robot_y
-frame normalizado
-sim_enabled
-```
-
-Accion:
-
-```text
-Box(5,)
-```
-
-El entorno:
-
-1. samplea posicion de pelota;
-2. pone el robot detras de la pelota;
-3. calcula orientacion inicial;
-4. llama `backend.reset(...)`;
-5. en cada step convierte la accion plana a `StructuredSkillAction`;
-6. llama `backend.step(...)`;
-7. calcula reward por progreso hacia la pelota y gol.
+El vector de observación está definido en `RL/observation.py`.
 
 ## Import order importante
 
@@ -233,11 +203,11 @@ from pybh_backend import PyBHBackend
 import pybh.controller as pybh
 ```
 
-No importar `pybh.controller` antes de que `pybh_backend` haga `os.chdir(BHUMAN_DIR)`, salvo que el script haga explicitamente:
+O explícitamente:
 
 ```python
+import os
+from config import BHUMAN_DIR
 os.chdir(BHUMAN_DIR)
+import pybh.controller as pybh
 ```
-
-Algunos componentes nativos de B-Human esperan cwd en `SabanaHerons2026`.
-

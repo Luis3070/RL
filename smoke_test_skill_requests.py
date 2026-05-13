@@ -25,7 +25,7 @@ def build_probe_action(skill: SkillType) -> StructuredSkillAction:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke every public SkillRequest variant through pybh")
-    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible", "cpp", "python"), default="cpp")
+    parser.add_argument("--backend", choices=("simrobot", "simrobot_visible"), default="simrobot")
     parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default="2d")
     parser.add_argument("--launch-simrobot", action="store_true")
     parser.add_argument("--simrobot-bin", type=Path, default=SIMROBOT_BIN)

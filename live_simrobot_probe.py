@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from config import BHUMAN_DIR, PLAYER_NUMBER, SIMROBOT_SCENE_PRESETS
+from config import BHUMAN_DIR, PLAYER_NUMBER, SIMROBOT_VISIBLE_SCENE_PRESETS
 from action import SkillType, StructuredSkillAction
 
 os.chdir(BHUMAN_DIR)
@@ -181,6 +181,13 @@ def format_libwalk_debug(obs: dict) -> str:
     )
 
 
+def format_zweikampf_debug(obs: dict) -> str:
+    return "zweikampf=(active={active},calls={calls})".format(
+        active=int(bool(obs.get("zweikampf_active", False))),
+        calls=int(obs.get("zweikampf_call_count", 0)),
+    )
+
+
 def send_search_action(player_number: int, obs: dict) -> str:
     robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
     delta = LIVE_RESET_BALL_POS - robot_pos
@@ -233,7 +240,7 @@ def wait_for_reset_observation(player_number: int, timeout_ms: int, max_wait_s: 
 def main() -> None:
     args = parse_args()
     if args.scene is None:
-        args.scene = SIMROBOT_SCENE_PRESETS[args.simrobot_profile].scene_path
+        args.scene = SIMROBOT_VISIBLE_SCENE_PRESETS[args.simrobot_profile].scene_path
     simrobot_process = maybe_launch_simrobot(args.simrobot_bin, args.scene) if args.launch else None
 
     print("Visible SimRobot probe", flush=True)
@@ -306,7 +313,7 @@ def main() -> None:
                     "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
                     "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
                     "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
-                    "{obstacles} {avoid} {libwalk} "
+                    "{obstacles} {avoid} {libwalk} {zweikampf} "
                     "motion=({motion},{phase}) speed=({sx:.1f},{sy:.1f},{sr:.2f}) "
                     "legs=({lhp:.2f},{lkp:.2f},{rhp:.2f},{rkp:.2f})".format(
                         step=step + 1,
@@ -342,6 +349,7 @@ def main() -> None:
                         obstacles=format_obstacle_debug(obs),
                         avoid=format_avoidance_debug(obs),
                         libwalk=format_libwalk_debug(obs),
+                        zweikampf=format_zweikampf_debug(obs),
                         motion=int(obs.get("motion_request", -1)),
                         phase=int(obs.get("motion_phase", -1)),
                         sx=float(obs.get("motion_speed_x", 0.0)),

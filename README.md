@@ -13,11 +13,12 @@ una base donde:
 
 - Python manda acciones RL directo a B-Human dentro del mismo proceso.
 - el bridge ya entiende todas las variantes públicas de `SkillRequest`.
-- hay dos backends útiles:
-  - `cpp` con `RLSim2D` para iterar rápido
-  - `simrobot` con SimRobot 2D embebido real
+- los backends soportados son SimRobot real:
+  - `simrobot` embebido
+  - `simrobot_visible` con instancia visible
+  - ambos con perfil `2d` o `3d`
 - `train.py` ya levanta un agente `MAPPO` real con `skrl`
-- el smoke y el train corto ya corren tanto en `cpp` como en `simrobot`
+- el smoke y el train corto ya corren sobre SimRobot real
 
 No está terminado el stack final de entrenamiento completo, pero sí quedó
 cerrada esta fase: bridge, backend real y loop RL mínimo funcional.
@@ -145,19 +146,18 @@ esta base nueva.
 En [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py)
 se encapsuló el acceso a `pybh`.
 
-Tiene tres modos:
+Tiene dos modos soportados:
 
 - `simrobot`
-- `cpp`
-- `python`
+- `simrobot_visible`
 
 Qué hace:
 
-- `start()`: levanta `pybh.Controller()` o carga escena SimRobot
+- `start()`: carga o conecta una escena SimRobot
 - `reset()`: reinicia pelota/robot según el backend
 - `step()`: manda acción RL y avanza uno o más frames
 - `read_obs()`: consume `pybh.rl_get_obs(...)`
-- `close()`: apaga controller o descarga la escena
+- `close()`: descarga la escena o cierra la instancia visible
 
 Detalles importantes:
 
@@ -197,7 +197,6 @@ Observación actual:
 - pose robot
 - pose pelota
 - frame del bridge
-- flag de backend
 
 Todavía falta:
 
@@ -303,7 +302,6 @@ La otra mitad del trabajo se hizo en el repo hermano:
 - [Module.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/Module.cpp)
 - [RLSharedState.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.h)
 - [RLSharedState.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.cpp)
-- [RLSim2D.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSim2D.h)
 - [RLSkillProvider.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/Infrastructure/RLSkillProvider/RLSkillProvider.cpp)
 
 ### 1. Shared state RL
@@ -377,17 +375,13 @@ Ojo con esto:
 - la interfaz canónica sigue siendo `SkillRequest`
 - el fallback existe para no dejar muerto el otro camino de la representación
 
-### 4. `RLSim2D`
+### 4. Estado actual del bridge
 
-En el simulador headless rápido:
+La superficie soportada hoy para RL queda en:
 
-- `block`
-- `mark`
-- `observe`
-
-se tratan como `walk`
-
-y:
+- `simrobot`
+- `simrobot_visible`
+- perfiles `2d` y `3d`
 
 - `pass`
 
@@ -530,20 +524,7 @@ Eso hace que Python vea `pybh.controller` y `pybh.logs` recién compilados.
 
 Acá van los flujos útiles, de menor a mayor complejidad.
 
-### 1. Smoke del bridge en backend rápido `cpp`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 smoke_test_skill_requests.py --backend cpp
-```
-
-Qué valida:
-
-- que el bridge reciba las 8 variantes
-- que `requested_skill` y `requested_pass_target` estén bien
-- que no crashee el path rápido
-
-### 2. Smoke del bridge en `simrobot` real
+### 1. Smoke del bridge en `simrobot`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
@@ -561,23 +542,23 @@ Importante:
 - este modo necesita ejecutarse fuera de entornos muy restringidos si el
   plugin intenta abrir sockets UDP
 
-### 3. Experimento heurístico rápido en `cpp`
+### 2. Smoke del bridge en `simrobot_visible`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 10 --no-plot
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 smoke_test_skill_requests.py --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
 ```
 
 Útil para:
 
-- iteración rápida
-- validar que el flujo heurístico no se rompió
+- validar el bridge con una instancia visible
+- verificar reseteos y requests directamente en la UI
 
-### 4. Experimento heurístico real en `simrobot`
+### 3. Experimento heurístico en `simrobot`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 1 --no-plot --simrobot-real
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 10 --no-plot --backend simrobot --simrobot-profile 2d
 ```
 
 Útil para:
@@ -585,22 +566,22 @@ PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python pyth
 - validar el path embebido real completo
 - confirmar que ya sale observación RL
 
-### 5. Smoke RL con `MAPPO` sobre backend `cpp`
+### 4. Experimento heurístico en `simrobot_visible`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend cpp --mode smoke --smoke-steps 8
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 3 --no-plot --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
 ```
 
 Útil para:
 
-- validar env + wrapper + `MAPPO` + bridge rápido
+- validar el mismo loop heurístico sobre SimRobot visible
 
-### 6. Train corto con `MAPPO` sobre backend `cpp`
+### 5. Smoke RL con `MAPPO` sobre `simrobot`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend cpp --mode train --train-steps 16
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend simrobot --mode smoke --smoke-steps 4
 ```
 
 Qué valida:
@@ -608,16 +589,9 @@ Qué valida:
 - `act`
 - `record_transition`
 - `post_interaction`
-- updates del agente
+- integración mínima del agente sobre SimRobot real
 
-### 7. Smoke RL con `MAPPO` sobre `simrobot` real
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend simrobot --mode smoke --smoke-steps 4
-```
-
-### 8. Train corto con `MAPPO` sobre `simrobot` real
+### 6. Train corto con `MAPPO` sobre `simrobot`
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
@@ -687,11 +661,10 @@ Limitación actual:
 - `rl_set_action()` y `rl_get_obs()` funcionan
 - el bridge ya soporta las 8 variantes públicas de `SkillRequest`
 - `pass_target` ya viaja hasta C++
-- `RLSim2D` sigue sirviendo como backend rápido
 - el host embebido de SimRobot carga escena real
 - `simrobot` volvió a emitir observación RL
 - `train.py` ya levanta `MAPPO` real
-- se puede hacer smoke y train corto tanto en `cpp` como en `simrobot`
+- se puede hacer smoke y train corto sobre SimRobot real
 
 ### Qué sigue faltando
 
@@ -729,7 +702,7 @@ Del lado C++:
 
 - binding Python: [Module.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/Module.cpp)
 - shared state: [RLSharedState.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.h)
-- sim headless rápido: [RLSim2D.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSim2D.h)
+- reseteo visible en SimRobot: [LocalConsole.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/SimulatedNao/LocalConsole.cpp)
 - host embebido real: [SimRobotHost.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/SimRobotHost.cpp)
 - traducción RL -> `SkillRequest`: [RLSkillProvider.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/Infrastructure/RLSkillProvider/RLSkillProvider.cpp)
 
@@ -738,8 +711,8 @@ Del lado C++:
 Si hay que resumir esta fase en una frase:
 
 “dejamos de tener un script suelto hablando con B-Human y pasamos a tener una
-superficie RL unificada, con bridge completo de `SkillRequest`, backend rápido,
-backend real de SimRobot rehabilitado y un `MAPPO` mínimo corriendo encima”.
+superficie RL unificada, con bridge completo de `SkillRequest`, SimRobot real
+rehabilitado y un `MAPPO` mínimo corriendo encima”.
 
 Eso todavía no es el sistema final, pero ya es una base honesta para construir
 la siguiente etapa sin parches raros ni contratos duplicados.

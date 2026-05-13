@@ -40,7 +40,7 @@ En 3D, el bypass o el root-assist puede producir deslizamiento: la pose cambia s
 
 `HandleRLRequest` es la opcion minima que conecta el skill externo de RL con el sistema normal de skills:
 
-```cpp
+```text
 option(HandleRLRequest)
 {
   initial_state(start)
@@ -126,24 +126,14 @@ Si `provider_motion_request` cambia pero `skill_behavior_motion_request` no camb
 
 ## 2D tambien respeta el flujo
 
-El backend rapido `cpp` usa `RLSim2D`, pero ya no avanza desde el skill crudo. Antes el flujo era:
-
-```text
-RLSkillProvider::update(SkillRequest&)
-  -> RLSim2D::stepFromSkill(...)
-```
-
-Eso adelantaba el simulador antes de que `SkillBehaviorControl` generara el `MotionRequest`.
-
-Ahora el flujo es:
+El perfil `2d` sigue exactamente la misma frontera de arquitectura:
 
 ```text
 RLSkillProvider::update(SkillRequest&)
   -> solo produce SkillRequest
 SkillBehaviorControl
   -> produce MotionRequest
-  -> RLSim2D::stepFromMotionRequest(...)
 ```
 
-Asi el 2D rapido queda alineado semanticamente con B-Human.
-
+La diferencia con `3d` no es el wire, sino el motor físico que ejecuta el
+request.

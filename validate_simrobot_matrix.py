@@ -70,7 +70,6 @@ class SkillRun:
     rss_kb_before: int
     rss_kb_after: int
     obs_ready: bool
-    sim_enabled: bool
     requested_skill: str
     skill_request: int
     skill_motion: int
@@ -134,8 +133,6 @@ def build_action(skill: SkillType) -> StructuredSkillAction:
 def validate_result(skill: SkillType, obs: Any, payload: dict[str, Any]) -> tuple[bool, str]:
     if not obs.obs_ready:
         return False, "obs_ready=0"
-    if obs.sim_enabled:
-        return False, "sim_enabled=True en SimRobot real"
     if payload.get("requested_skill") != skill.public_name and not (skill is SkillType.walk and payload.get("requested_skill") == "walkTo"):
         return False, f"requested_skill={payload.get('requested_skill')}"
     if int(payload.get("skill_behavior_skill_request", -1)) <= 0:
@@ -178,7 +175,6 @@ def run_skill(backend: PyBHBackend, profile: str, skill: SkillType) -> SkillRun:
         rss_kb_before=rss_before,
         rss_kb_after=rss_after,
         obs_ready=bool(obs.obs_ready),
-        sim_enabled=bool(obs.sim_enabled),
         requested_skill=str(payload.get("requested_skill", "")),
         skill_request=int(payload.get("skill_behavior_skill_request", -1)),
         skill_motion=int(payload.get("skill_behavior_motion_request", -1)),
@@ -336,7 +332,6 @@ def render_report(results: list[SkillRun], *, steps_per_skill: int) -> str:
         "## Criterio de validacion",
         "",
         "- `obs_ready=True`.",
-        "- `sim_enabled=False` en SimRobot real.",
         "- `requested_skill` coincide con la skill enviada, aceptando `walk -> walkTo`.",
         "- `skill_behavior_motion_request` cae en el conjunto esperado para la skill.",
         "- `motion_engine_input_request` coincide con la salida de `SkillBehaviorControl`.",

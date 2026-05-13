@@ -2,8 +2,8 @@
 
 Este documento complementa:
 
-- [01-ppo-takeover-curriculum-handoff.md](/home/luis/GitHub/RL/.docs/01-ppo-takeover-curriculum-handoff.md)
-- [02-instrumentation-ppo-sanity.md](/home/luis/GitHub/RL/.docs/02-instrumentation-ppo-sanity.md)
+- [01-ppo-takeover-curriculum-handoff.md](./01-ppo-takeover-curriculum-handoff.md)
+- [02-instrumentation-ppo-sanity.md](./02-instrumentation-ppo-sanity.md)
 
 Su objetivo es dar un filtro corto antes de lanzar entrenamiento real.
 
@@ -30,7 +30,6 @@ Su objetivo es dar un filtro corto antes de lanzar entrenamiento real.
 - [ ] `backend = simrobot`
 - [ ] `profile = 3d`
 - [ ] la escena RL carga y devuelve observaciones sin timeout
-- [ ] `RLSim2D` está apagado para este flujo
 
 ### 2. Señales mínimas del reward
 
