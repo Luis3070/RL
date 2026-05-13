@@ -163,6 +163,24 @@ def format_avoidance_debug(obs: dict) -> str:
     )
 
 
+def format_libwalk_debug(obs: dict) -> str:
+    return (
+        "libwalk=(obs={obsn},active={active},disabled={disabled},"
+        "target={target:.2f},left={left:.2f},right={right:.2f},"
+        "offl={offl:.2f},offr={offr:.2f},sel={sel:.2f})"
+    ).format(
+        obsn=int(obs.get("libwalk_obstacle_count", 0)),
+        active=int(obs.get("libwalk_active_obstacle_count", 0)),
+        disabled=int(bool(obs.get("libwalk_disable_obstacle_avoidance", False))),
+        target=float(obs.get("libwalk_target_angle", 0.0)),
+        left=float(obs.get("libwalk_angle_left", 0.0)),
+        right=float(obs.get("libwalk_angle_right", 0.0)),
+        offl=float(obs.get("libwalk_angle_offset_left", 0.0)),
+        offr=float(obs.get("libwalk_angle_offset_right", 0.0)),
+        sel=float(obs.get("libwalk_selected_offset", 0.0)),
+    )
+
+
 def send_search_action(player_number: int, obs: dict) -> str:
     robot_pos = np.array([float(obs.get("robot_x", 0.0)), float(obs.get("robot_y", 0.0))], dtype=np.float32)
     delta = LIVE_RESET_BALL_POS - robot_pos
@@ -189,24 +207,15 @@ def send_heuristic_action(player_number: int, obs: dict, shoot_distance: float, 
         pybh.rl_set_action(player_number, "shoot", 0.0, 0.0, 0.0)
         return f"shoot(dist={distance:.0f})"
 
-    # Target the opponent goal (4500, 0) in field coords converted to robot-relative,
-    # so the path planner engages (target > 1000mm) and routes around obstacles.
-    robot_theta = float(obs.get("robot_theta", 0.0))
-    goal_field = np.array([4500.0, 0.0], dtype=np.float32)
-    delta_to_goal = goal_field - robot_pos
-    cos_t = math.cos(-robot_theta)
-    sin_t = math.sin(-robot_theta)
-    goal_rel = np.array([
-        cos_t * delta_to_goal[0] - sin_t * delta_to_goal[1],
-        sin_t * delta_to_goal[0] + cos_t * delta_to_goal[1],
-    ], dtype=np.float32)
-    goal_dist = float(np.linalg.norm(goal_rel))
-    if goal_dist > 600.0:
-        goal_rel = goal_rel / goal_dist * 600.0
-    tx, ty = float(goal_rel[0]), float(goal_rel[1])
-    target_theta = float(math.atan2(ty, tx))
-    pybh.rl_set_action(player_number, "walkTo", tx, ty, target_theta)
-    return f"walkToGoal({tx:.0f}, {ty:.0f}, {target_theta:.2f})"
+    target_theta = float(math.atan2(float(delta[1]), float(delta[0]))) if distance > 1.0 else 0.0
+    pybh.rl_set_action(
+        player_number,
+        "walkTo",
+        float(ball_pos[0]),
+        float(ball_pos[1]),
+        target_theta,
+    )
+    return f"walkToField({ball_pos[0]:.0f}, {ball_pos[1]:.0f}, {target_theta:.2f})"
 
 
 def wait_for_reset_observation(player_number: int, timeout_ms: int, max_wait_s: float = 30.0) -> dict | None:
@@ -297,7 +306,7 @@ def main() -> None:
                     "provider=({pmotion},calls={pcalls},target=({ptx:.1f},{pty:.1f},{ptt:.2f})) "
                     "skillctl=(skill={sbskill},motion={sbmotion},calls={sbcalls},target=({sbx:.1f},{sby:.1f},{sbt:.2f})) "
                     "engine=(in={mein},eff={meeff},phase={mephase},sit={mesit},gyro={megyro},fall={mefall},imu=({meix:.2f},{meiy:.2f})) "
-                    "{obstacles} {avoid} "
+                    "{obstacles} {avoid} {libwalk} "
                     "motion=({motion},{phase}) speed=({sx:.1f},{sy:.1f},{sr:.2f}) "
                     "legs=({lhp:.2f},{lkp:.2f},{rhp:.2f},{rkp:.2f})".format(
                         step=step + 1,
@@ -332,6 +341,7 @@ def main() -> None:
                         meiy=float(obs.get("motion_engine_inertial_angle_y", 0.0)),
                         obstacles=format_obstacle_debug(obs),
                         avoid=format_avoidance_debug(obs),
+                        libwalk=format_libwalk_debug(obs),
                         motion=int(obs.get("motion_request", -1)),
                         phase=int(obs.get("motion_phase", -1)),
                         sx=float(obs.get("motion_speed_x", 0.0)),
