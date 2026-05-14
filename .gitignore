@@ -15,3 +15,5 @@ settings.local.json
 AGENTS.md
 
 .venv/
+.deps/
+runs/
