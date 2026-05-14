@@ -68,6 +68,8 @@ class RealSimRobotEnvWrapper:
                         "executed_skill_name": info.get("executed_skill_name"),
                         "preferred_skill_name": info.get("preferred_skill_name"),
                         "projection_applied": int(bool(info.get("projection_applied", False))),
+                        "synthetic_pose_observation": int(bool(info.get("synthetic_pose_observation", False))),
+                        "synthetic_ball_observation": int(bool(info.get("synthetic_ball_observation", False))),
                         "takeover_envelope": int(bool(info.get("takeover_envelope", False))),
                         "walk_zone": int(bool(info.get("walk_zone", False))),
                         "dribble_zone": int(bool(info.get("dribble_zone", False))),

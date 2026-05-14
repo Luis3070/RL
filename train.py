@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from types import MethodType
 from typing import Any, Dict, Mapping
 
 import matplotlib.pyplot as plt
@@ -18,7 +19,7 @@ from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
-from action import StructuredSkillAction, action_to_numpy
+from action import SkillType, StructuredSkillAction, action_to_numpy
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
@@ -34,15 +35,22 @@ class ScriptRunConfig:
     simrobot_profile: str = "3d"
     simrobot_launch: bool = False
     smoke_steps: int = TRAIN.smoke_steps
-    train_steps: int = TRAIN.trainer_timesteps
+    train_steps: int = 1024
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
-    stage_id: int = TRAIN.initial_stage_id
-    max_stage_id: int = TRAIN.max_stage_id
+    stage_id: int = 0
+    max_stage_id: int = 0
     save_telemetry: bool = True
     save_plots: bool = True
     capture_eval_steps: bool = True
-    telemetry_tag: str = "ide"
+    telemetry_tag: str = "sanity_stage0_ide"
     experiment_name: str = TRAIN.experiment_name
+    max_episode_steps: int = 160
+    rollout_steps: int = 64
+    learning_epochs: int = 2
+    mini_batches: int = 2
+    eval_interval: int = 256
+    checkpoint_interval: int = 512
+    eval_episodes: int = 2
 
 
 @dataclass(frozen=True)
@@ -57,6 +65,25 @@ class TelemetryPaths:
 
 
 IDE_RUN = ScriptRunConfig()
+
+
+def _coerce_scalar_metric(value: Any) -> float:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return float("nan")
+        return _coerce_scalar_metric(value[-1])
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return float("nan")
+        return _coerce_scalar_metric(value.reshape(-1)[-1].item())
+    if torch.is_tensor(value):
+        if value.numel() == 0:
+            return float("nan")
+        return float(value.detach().reshape(-1)[-1].item())
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 class PolicyNetwork(GaussianMixin, Model):
@@ -77,6 +104,10 @@ class PolicyNetwork(GaussianMixin, Model):
             nn.Linear(hidden_size, self.num_actions),
         )
         self.log_std_parameter = nn.Parameter(torch.full((self.num_actions,), -0.5, dtype=torch.float32))
+        with torch.no_grad():
+            final_linear = self.net[-1]
+            if isinstance(final_linear, nn.Linear) and final_linear.bias is not None and final_linear.bias.numel() > 0:
+                final_linear.bias[0] = float(SkillType.walk)
         self.to(device)
 
     def compute(self, inputs, role=""):
@@ -164,7 +195,7 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
         experiment={
             "directory": str(RUNS_DIR),
             "experiment_name": train_cfg.experiment_name,
-            "write_interval": 0,
+            "write_interval": max(1, min(train_cfg.rollout_steps, train_cfg.eval_interval)),
             "checkpoint_interval": 0,
         },
         rollouts=train_cfg.rollout_steps,
@@ -193,6 +224,30 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
         device=device,
         cfg=cfg,
     )
+    agent._last_tracking_snapshot = {}
+
+    original_write_tracking_data = agent.write_tracking_data
+
+    def _write_tracking_data_with_snapshot(self, *, timestep: int, timesteps: int) -> None:
+        snapshot: Dict[str, float] = {}
+        tracking_data = getattr(self, "tracking_data", {})
+        if isinstance(tracking_data, Mapping):
+            for key, values in tracking_data.items():
+                if isinstance(values, (list, tuple)) and values:
+                    if key.endswith("(min)"):
+                        snapshot[key] = float(np.min(values))
+                    elif key.endswith("(max)"):
+                        snapshot[key] = float(np.max(values))
+                    else:
+                        snapshot[key] = float(np.mean(values))
+                else:
+                    coerced = _coerce_scalar_metric(values)
+                    if np.isfinite(coerced):
+                        snapshot[key] = coerced
+        self._last_tracking_snapshot = snapshot
+        original_write_tracking_data(timestep=timestep, timesteps=timesteps)
+
+    agent.write_tracking_data = MethodType(_write_tracking_data_with_snapshot, agent)
     return agent, {"policy": shared_policy, "value": shared_value}
 
 
@@ -377,7 +432,11 @@ def _extract_tracking_dict(agent: MAPPO) -> Mapping[str, object]:
             except TypeError:
                 continue
         if isinstance(value, Mapping):
-            return value
+            if value:
+                return value
+    snapshot = getattr(agent, "_last_tracking_snapshot", None)
+    if isinstance(snapshot, Mapping) and snapshot:
+        return snapshot
     return {}
 
 
@@ -385,10 +444,9 @@ def _extract_agent_stat(agent: MAPPO, *candidate_keys: str) -> float:
     tracking = _extract_tracking_dict(agent)
     for key in candidate_keys:
         if key in tracking:
-            try:
-                return float(tracking[key])
-            except (TypeError, ValueError):
-                continue
+            value = _coerce_scalar_metric(tracking[key])
+            if np.isfinite(value):
+                return value
     return float("nan")
 
 
@@ -450,6 +508,8 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "ball_progress_post_takeover_mean",
         "stability_score",
         "skill_projection_rate",
+        "synthetic_pose_rate",
+        "synthetic_ball_rate",
         "episode_reward_mean",
         "episode_reward_total",
     ]
@@ -563,6 +623,7 @@ def save_checkpoint(
 
 
 def print_eval_summary(stage_id: int, timestep: int, summary: Mapping[str, object], agent: MAPPO) -> None:
+    agent_id = "player_1"
     reward_mean = float(summary.get("episode_reward_mean", 0.0))
     clean_takeover_rate = float(summary.get("clean_takeover_rate", 0.0))
     clean_finish_rate = float(summary.get("clean_finish_rate", 0.0))
@@ -570,9 +631,15 @@ def print_eval_summary(stage_id: int, timestep: int, summary: Mapping[str, objec
     collision_rate = float(summary.get("collision_rate", 0.0))
     mean_time_to_takeover = float(summary.get("mean_time_to_takeover", 0.0))
     stability_score = float(summary.get("stability_score", 0.0))
-    policy_loss = _extract_agent_stat(agent, "Loss / Policy loss", "policy_loss")
-    value_loss = _extract_agent_stat(agent, "Loss / Value loss", "value_loss")
-    entropy = _extract_agent_stat(agent, "Loss / Entropy loss", "entropy_loss", "entropy")
+    policy_loss = _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss")
+    value_loss = _extract_agent_stat(agent, f"Loss / Value loss ({agent_id})", "Loss / Value loss", "value_loss")
+    entropy = _extract_agent_stat(
+        agent,
+        f"Loss / Entropy loss ({agent_id})",
+        "Loss / Entropy loss",
+        "entropy_loss",
+        "entropy",
+    )
     print(
         "[eval] "
         f"step={timestep} stage={stage_id} "
@@ -597,6 +664,8 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
         "executed_skill_name": step_info.get("executed_skill_name"),
         "preferred_skill_name": step_info.get("preferred_skill_name"),
         "projection_applied": int(bool(step_info.get("projection_applied", False))),
+        "synthetic_pose_observation": int(bool(step_info.get("synthetic_pose_observation", False))),
+        "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),
         "takeover_envelope": int(bool(step_info.get("takeover_envelope", False))),
         "walk_zone": int(bool(step_info.get("walk_zone", False))),
         "dribble_zone": int(bool(step_info.get("dribble_zone", False))),
@@ -621,12 +690,19 @@ def _build_eval_summary_row(
     summary: Mapping[str, object],
     agent: MAPPO,
 ) -> Dict[str, Any]:
+    agent_id = "player_1"
     row = {
         "timestep": int(timestep),
         "stage_id": int(stage_id),
-        "policy_loss": _extract_agent_stat(agent, "Loss / Policy loss", "policy_loss"),
-        "value_loss": _extract_agent_stat(agent, "Loss / Value loss", "value_loss"),
-        "entropy": _extract_agent_stat(agent, "Loss / Entropy loss", "entropy_loss", "entropy"),
+        "policy_loss": _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss"),
+        "value_loss": _extract_agent_stat(agent, f"Loss / Value loss ({agent_id})", "Loss / Value loss", "value_loss"),
+        "entropy": _extract_agent_stat(
+            agent,
+            f"Loss / Entropy loss ({agent_id})",
+            "Loss / Entropy loss",
+            "entropy_loss",
+            "entropy",
+        ),
     }
     for key, value in summary.items():
         if isinstance(value, Mapping):
@@ -683,32 +759,34 @@ def run_smoke(
     )
     env_cfg = make_env_config(stage_id, backend_cfg)
     raw_env, wrapped_env, _ = build_env(env_cfg)
-    observations, infos = wrapped_env.reset()
-    agent, _ = build_mappo(wrapped_env, device, TRAIN)
     total_reward = 0.0
-    for step in range(steps):
-        action = sample_smoke_action(agent, raw_env, wrapped_env, observations, step, steps, device)
-        observations, rewards, terminated, truncated, infos = wrapped_env.step(
-            {"player_1": torch.as_tensor(action_to_numpy(action), device="cpu").view(1, -1)}
-        )
-        reward_value = float(rewards["player_1"].item())
-        total_reward += reward_value
-        step_info = infos["player_1"]
-        if telemetry_paths is not None:
-            _append_csv_row(telemetry_paths.smoke_steps_csv, _build_smoke_step_row(step + 1, reward_value, step_info))
-        print(
-            f"[smoke] step={step + 1} stage={stage_id} "
-            f"policy_skill={step_info.get('policy_skill_name')} "
-            f"exec_skill={step_info.get('executed_skill_name')} "
-            f"reward={reward_value:.3f} takeover={int(step_info.get('takeover_envelope', False))} "
-            f"frame={step_info['bridge_frame']}",
-            flush=True,
-        )
-        if bool(terminated["player_1"].item()) or bool(truncated["player_1"].item()):
-            print(f"[smoke] episode_metrics={step_info.get('episode_metrics', {})}", flush=True)
-            break
-    wrapped_env.close()
-    raw_env.close()
+    try:
+        observations, infos = wrapped_env.reset()
+        agent, _ = build_mappo(wrapped_env, device, TRAIN)
+        for step in range(steps):
+            action = sample_smoke_action(agent, raw_env, wrapped_env, observations, step, steps, device)
+            observations, rewards, terminated, truncated, infos = wrapped_env.step(
+                {"player_1": torch.as_tensor(action_to_numpy(action), device="cpu").view(1, -1)}
+            )
+            reward_value = float(rewards["player_1"].item())
+            total_reward += reward_value
+            step_info = infos["player_1"]
+            if telemetry_paths is not None:
+                _append_csv_row(telemetry_paths.smoke_steps_csv, _build_smoke_step_row(step + 1, reward_value, step_info))
+            print(
+                f"[smoke] step={step + 1} stage={stage_id} "
+                f"policy_skill={step_info.get('policy_skill_name')} "
+                f"exec_skill={step_info.get('executed_skill_name')} "
+                f"reward={reward_value:.3f} takeover={int(step_info.get('takeover_envelope', False))} "
+                f"frame={step_info['bridge_frame']}",
+                flush=True,
+            )
+            if bool(terminated["player_1"].item()) or bool(truncated["player_1"].item()):
+                print(f"[smoke] episode_metrics={step_info.get('episode_metrics', {})}", flush=True)
+                break
+    finally:
+        wrapped_env.close()
+        raw_env.close()
     if telemetry_paths is not None:
         _plot_smoke_steps(telemetry_paths)
     print(f"[smoke] total_reward={total_reward:.3f}", flush=True)
@@ -743,105 +821,117 @@ def run_training(
     agent.init(trainer_cfg=trainer_cfg)
     agent.enable_training_mode(True)
 
-    observations, infos = wrapped_env.reset()
-    stage_history: Dict[int, Dict[str, float]] = {}
-    agent_id = wrapped_env.possible_agents[0]
+    try:
+        observations, infos = wrapped_env.reset()
+        stage_history: Dict[int, Dict[str, float]] = {}
+        agent_id = wrapped_env.possible_agents[0]
 
-    for timestep in range(timesteps):
-        observations_device = _move_to_device(observations, device)
-        states_device = _agent_state_from_env(raw_env, agent_id, device)
-        agent.pre_interaction(timestep=timestep, timesteps=timesteps)
-        with torch.no_grad():
-            actions, _ = agent.act(
-                observations=observations_device,
-                states=states_device,
-                timestep=timestep,
+        for timestep in range(timesteps):
+            observations_device = _move_to_device(observations, device)
+            states_device = _agent_state_from_env(raw_env, agent_id, device)
+            agent.pre_interaction(timestep=timestep, timesteps=timesteps)
+            with torch.no_grad():
+                actions, _ = agent.act(
+                    observations=observations_device,
+                    states=states_device,
+                    timestep=timestep,
+                    timesteps=timesteps,
+                )
+                next_observations, rewards, terminated, truncated, infos = wrapped_env.step(_move_to_device(actions, "cpu"))
+                next_observations_device = _move_to_device(next_observations, device)
+                next_states_device = _agent_state_from_env(raw_env, agent_id, device)
+                agent.record_transition(
+                    observations=observations_device,
+                    states=states_device,
+                    actions=actions,
+                    rewards=_move_to_device(rewards, device),
+                    next_observations=next_observations_device,
+                    next_states=next_states_device,
+                    terminated=_move_to_device(terminated, device),
+                    truncated=_move_to_device(truncated, device),
+                    infos=infos,
+                    timestep=timestep,
+                    timesteps=timesteps,
+                )
+            agent.post_interaction(timestep=timestep, timesteps=timesteps)
+
+            if not wrapped_env.agents:
+                observations, infos = wrapped_env.reset()
+            else:
+                observations = next_observations
+
+            should_eval = (timestep + 1) % TRAIN.eval_interval == 0 or (timestep + 1) == timesteps
+            if not should_eval:
+                continue
+
+            eval_summary, episode_results = evaluate_agent(
+                agent,
+                eval_wrapper,
+                device=device,
+                episodes=TRAIN.eval_episodes,
+                stage_id=current_stage,
+                timestep=timestep + 1,
                 timesteps=timesteps,
             )
-            next_observations, rewards, terminated, truncated, infos = wrapped_env.step(_move_to_device(actions, "cpu"))
-            next_observations_device = _move_to_device(next_observations, device)
-            next_states_device = _agent_state_from_env(raw_env, agent_id, device)
-            agent.record_transition(
-                observations=observations_device,
-                states=states_device,
-                actions=actions,
-                rewards=_move_to_device(rewards, device),
-                next_observations=next_observations_device,
-                next_states=next_states_device,
-                terminated=_move_to_device(terminated, device),
-                truncated=_move_to_device(truncated, device),
-                infos=infos,
-                timestep=timestep,
-                timesteps=timesteps,
-            )
-        agent.post_interaction(timestep=timestep, timesteps=timesteps)
+            print_eval_summary(current_stage, timestep + 1, eval_summary, agent)
+            if telemetry_paths is not None:
+                eval_row = _build_eval_summary_row(
+                    timestep=timestep + 1,
+                    stage_id=current_stage,
+                    summary=eval_summary,
+                    agent=agent,
+                )
+                _append_csv_row(telemetry_paths.eval_summary_csv, eval_row)
+                _append_eval_episode_rows(
+                    telemetry_paths,
+                    timestep=timestep + 1,
+                    stage_id=current_stage,
+                    episode_results=episode_results,
+                )
+                _plot_eval_metrics(telemetry_paths)
 
-        if not wrapped_env.agents:
-            observations, infos = wrapped_env.reset()
-        else:
-            observations = next_observations
+            if (timestep + 1) % TRAIN.checkpoint_interval == 0 or (timestep + 1) == timesteps:
+                checkpoint_path = save_checkpoint(
+                    checkpoint_models,
+                    train_cfg=TRAIN,
+                    timestep=timestep + 1,
+                    stage_id=current_stage,
+                    eval_summary=eval_summary,
+                )
+                print(f"[checkpoint] saved={checkpoint_path}", flush=True)
 
-        should_eval = (timestep + 1) % TRAIN.eval_interval == 0 or (timestep + 1) == timesteps
-        if not should_eval:
-            continue
+            if (timestep + 1) < timesteps:
+                observations, infos = wrapped_env.reset()
 
-        eval_summary, episode_results = evaluate_agent(
-            agent,
-            eval_wrapper,
-            device=device,
-            episodes=TRAIN.eval_episodes,
-            stage_id=current_stage,
-            timestep=timestep + 1,
-            timesteps=timesteps,
-        )
-        print_eval_summary(current_stage, timestep + 1, eval_summary, agent)
-        if telemetry_paths is not None:
-            eval_row = _build_eval_summary_row(
-                timestep=timestep + 1,
-                stage_id=current_stage,
-                summary=eval_summary,
-                agent=agent,
-            )
-            _append_csv_row(telemetry_paths.eval_summary_csv, eval_row)
-            _append_eval_episode_rows(
-                telemetry_paths,
-                timestep=timestep + 1,
-                stage_id=current_stage,
-                episode_results=episode_results,
-            )
-            _plot_eval_metrics(telemetry_paths)
-
-        if (timestep + 1) % TRAIN.checkpoint_interval == 0 or (timestep + 1) == timesteps:
-            checkpoint_path = save_checkpoint(
-                checkpoint_models,
-                train_cfg=TRAIN,
-                timestep=timestep + 1,
-                stage_id=current_stage,
-                eval_summary=eval_summary,
-            )
-            print(f"[checkpoint] saved={checkpoint_path}", flush=True)
-
-        if (timestep + 1) < timesteps:
-            observations, infos = wrapped_env.reset()
-
-        if TRAIN.auto_promote and current_stage < max_stage_id and promote_stage(current_stage, eval_summary, stage_history):
-            stage_history[current_stage] = dict(eval_summary)
-            current_stage += 1
-            print(f"[curriculum] promoted_to_stage={current_stage} at_step={timestep + 1}", flush=True)
-            wrapped_env.close()
-            raw_env.close()
-            env_cfg = make_env_config(current_stage, backend_cfg)
-            raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
-            observations, infos = wrapped_env.reset()
-
-    wrapped_env.close()
-    raw_env.close()
+            if TRAIN.auto_promote and current_stage < max_stage_id and promote_stage(current_stage, eval_summary, stage_history):
+                stage_history[current_stage] = dict(eval_summary)
+                current_stage += 1
+                print(f"[curriculum] promoted_to_stage={current_stage} at_step={timestep + 1}", flush=True)
+                wrapped_env.close()
+                raw_env.close()
+                env_cfg = make_env_config(current_stage, backend_cfg)
+                raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
+                observations, infos = wrapped_env.reset()
+    finally:
+        wrapped_env.close()
+        raw_env.close()
     print(f"[train] completed timesteps={timesteps} final_stage={current_stage}", flush=True)
 
 
 def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
+    effective_train = replace(
+        TRAIN,
+        trainer_timesteps=run_cfg.train_steps,
+        rollout_steps=run_cfg.rollout_steps,
+        learning_epochs=run_cfg.learning_epochs,
+        mini_batches=run_cfg.mini_batches,
+        eval_interval=run_cfg.eval_interval,
+        checkpoint_interval=run_cfg.checkpoint_interval,
+        eval_episodes=run_cfg.eval_episodes,
+    )
+    effective_env = replace(ENV, max_episode_steps=run_cfg.max_episode_steps)
     backend_cfg = replace(
-        ENV.backend,
+        effective_env.backend,
         mode=run_cfg.backend,
         simrobot_profile=run_cfg.simrobot_profile,
         simrobot_launch=run_cfg.simrobot_launch,
@@ -852,31 +942,40 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         print(f"[telemetry] session_dir={telemetry_paths.session_dir}", flush=True)
     print(
         f"[run] mode={run_cfg.mode} learner_device={run_cfg.learner_device} "
-        f"env_backend={run_cfg.backend} simrobot_profile={run_cfg.simrobot_profile} stage={run_cfg.stage_id}",
+        f"env_backend={run_cfg.backend} simrobot_profile={run_cfg.simrobot_profile} stage={run_cfg.stage_id} "
+        f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps}",
         flush=True,
     )
 
-    if run_cfg.mode == "smoke":
-        run_smoke(
-            run_cfg.smoke_steps,
-            backend=run_cfg.backend,
-            device=run_cfg.learner_device,
-            simrobot_profile=run_cfg.simrobot_profile,
-            stage_id=run_cfg.stage_id,
-            simrobot_launch=run_cfg.simrobot_launch,
-            telemetry_paths=telemetry_paths,
-        )
-    else:
-        run_training(
-            run_cfg.train_steps,
-            backend=run_cfg.backend,
-            device=run_cfg.learner_device,
-            simrobot_profile=run_cfg.simrobot_profile,
-            stage_id=run_cfg.stage_id,
-            max_stage_id=run_cfg.max_stage_id,
-            simrobot_launch=run_cfg.simrobot_launch,
-            telemetry_paths=telemetry_paths,
-        )
+    original_train = TRAIN
+    original_env = ENV
+    globals()["TRAIN"] = effective_train
+    globals()["ENV"] = effective_env
+    try:
+        if run_cfg.mode == "smoke":
+            run_smoke(
+                run_cfg.smoke_steps,
+                backend=run_cfg.backend,
+                device=run_cfg.learner_device,
+                simrobot_profile=run_cfg.simrobot_profile,
+                stage_id=run_cfg.stage_id,
+                simrobot_launch=run_cfg.simrobot_launch,
+                telemetry_paths=telemetry_paths,
+            )
+        else:
+            run_training(
+                effective_train.trainer_timesteps,
+                backend=run_cfg.backend,
+                device=run_cfg.learner_device,
+                simrobot_profile=run_cfg.simrobot_profile,
+                stage_id=run_cfg.stage_id,
+                max_stage_id=run_cfg.max_stage_id,
+                simrobot_launch=run_cfg.simrobot_launch,
+                telemetry_paths=telemetry_paths,
+            )
+    finally:
+        globals()["TRAIN"] = original_train
+        globals()["ENV"] = original_env
 
 
 if __name__ == "__main__":

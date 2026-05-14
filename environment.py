@@ -290,6 +290,8 @@ class RealSimRobotEnv(ParallelEnv):
             "corridor_keep_steps": 0,
             "dynamic_updates": 0,
             "post_takeover_progress_sum": 0.0,
+            "synthetic_pose_steps": 0,
+            "synthetic_ball_steps": 0,
         }
 
     def _update_episode_tracker(
@@ -315,6 +317,8 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["skill_projection_count"] += 1
         if dynamic_update_applied:
             tracker["dynamic_updates"] += 1
+        tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
+        tracker["synthetic_ball_steps"] += int(bool(step_ctx.obs.synthetic_ball_observation))
 
         if step_ctx.skill_name == "walk":
             tracker["walk_steps"] += 1
@@ -392,6 +396,8 @@ class RealSimRobotEnv(ParallelEnv):
             "shoot_compat_rate": float(tracker["good_shoot_steps"] / shoot_steps),
             "takeover_entered": float(bool(tracker["takeover_entered"])),
             "takeover_hold_max": float(tracker["takeover_hold_max"]),
+            "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
+            "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
         }
 
     def _finalize_episode_metrics(self) -> Dict[str, float]:
@@ -470,6 +476,8 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_progress_post_takeover_mean": float(tracker["post_takeover_progress_sum"] / steps),
             "stability_score": stability_score,
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
+            "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
+            "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "reward_terms_sum": dict(tracker["reward_terms_sum"]),
             "reward_weighted_terms_sum": dict(tracker["reward_weighted_terms_sum"]),
             "skill_counts": dict(tracker["skill_counts"]),

@@ -655,14 +655,33 @@ class PyBHBackend:
         return obs
 
     def read_obs(self) -> BackendObservation:
-        attempts = 5 if self._uses_embedded_simrobot() else 1
-        for attempt in range(attempts):
-            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms)))
-            if obs.obs_ready:
-                self._last_obs = obs
-                return obs
-            if self._uses_embedded_simrobot():
+        if self._uses_embedded_simrobot():
+            # In embedded mode, waiting a full timeout without advancing SimRobot
+            # can stall observation delivery. Poll briefly and keep stepping.
+            poll_timeout_ms = max(1, min(20, self.obs_timeout_ms // 20 if self.obs_timeout_ms > 0 else 1))
+            max_poll_steps = max(10, self.frames_per_step * 20)
+            last_obs: BackendObservation | None = None
+            for _ in range(max_poll_steps):
+                obs = self._stabilize_obs(
+                    BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, poll_timeout_ms))
+                )
+                last_obs = obs
+                if obs.obs_ready:
+                    self._last_obs = obs
+                    return obs
                 pybh.simrobot_step(1)
+
+            if last_obs is not None and self._last_obs is not None and last_obs.frame == self._last_obs.frame:
+                return self._last_obs
+            raise RuntimeError(
+                "pybh.rl_get_obs timed out in backend=simrobot after progressive polling; "
+                f"max_poll_steps={max_poll_steps} poll_timeout_ms={poll_timeout_ms}"
+            )
+
+        obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms)))
+        if obs.obs_ready:
+            self._last_obs = obs
+            return obs
         raise RuntimeError(f"pybh.rl_get_obs timed out in backend={self.mode}")
 
     def _set_action(self, action: StructuredSkillAction) -> None:
