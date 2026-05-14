@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
@@ -249,6 +249,8 @@ class BackendObservation:
     motion_speed_x: float = 0.0
     motion_speed_y: float = 0.0
     motion_speed_rot: float = 0.0
+    synthetic_pose_observation: bool = False
+    synthetic_ball_observation: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict) -> "BackendObservation":
@@ -655,7 +657,7 @@ class PyBHBackend:
     def read_obs(self) -> BackendObservation:
         attempts = 5 if self._uses_embedded_simrobot() else 1
         for attempt in range(attempts):
-            obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms))
+            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms)))
             if obs.obs_ready:
                 self._last_obs = obs
                 return obs
@@ -771,11 +773,13 @@ class PyBHBackend:
         last_obs: BackendObservation | None = None
         for _ in range(max_steps):
             pybh.simrobot_step(1)
-            obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, max(1, self.obs_timeout_ms // 10)))
+            obs = self._stabilize_obs(
+                BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, max(1, self.obs_timeout_ms // 10)))
+            )
             last_obs = obs
             if not obs.obs_ready:
                 continue
-            if math.hypot(obs.robot_x - expected_x, obs.robot_y - expected_y) <= 150.0:
+            if math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y) <= 150.0:
                 return obs
         if last_obs is not None and last_obs.obs_ready:
             return last_obs
@@ -814,7 +818,7 @@ class PyBHBackend:
         started_at = time.monotonic()
         next_log_at = started_at + min(DEFAULT_VISIBLE_LOG_INTERVAL_S, self.visible_status_log_interval_s or 1e9)
         while time.monotonic() < deadline:
-            obs = BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, per_try_timeout_ms))
+            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, per_try_timeout_ms)))
             last_obs = obs
             now = time.monotonic()
             next_log_at = self._maybe_log_visible_wait(
@@ -856,3 +860,78 @@ class PyBHBackend:
             opponents=self._serialize_players(world_spec.opponents),
             )
         )
+
+    def _stabilize_obs(self, obs: BackendObservation) -> BackendObservation:
+        if not obs.obs_ready:
+            return obs
+
+        updated = obs
+        synthetic_pose = False
+        synthetic_ball = False
+
+        pose_error = math.hypot(obs.robot_x - obs.simrobot_robot_x, obs.robot_y - obs.simrobot_robot_y)
+        if self._uses_embedded_simrobot() and pose_error > 250.0:
+            field_theta = _normalize_angle(float(obs.simrobot_robot_theta) - float(self.simrobot_scene.theta_offset))
+            updated = replace(
+                updated,
+                robot_x=float(obs.simrobot_robot_x),
+                robot_y=float(obs.simrobot_robot_y),
+                robot_theta=field_theta,
+            )
+            synthetic_pose = True
+
+        if self._world_spec is not None:
+            ball_stale = (
+                float(updated.ball_seen_percentage) <= 0.0
+                and float(updated.time_since_ball_seen) >= 1000.0
+            )
+            collapsed_ball = math.hypot(updated.ball_x - updated.robot_x, updated.ball_y - updated.robot_y) <= 1.0
+            if ball_stale or collapsed_ball:
+                truth_ball_x = float(self._world_spec.ball_x)
+                truth_ball_y = float(self._world_spec.ball_y)
+                rel_x, rel_y = _field_to_robot(
+                    float(updated.robot_x),
+                    float(updated.robot_y),
+                    float(updated.robot_theta),
+                    truth_ball_x,
+                    truth_ball_y,
+                )
+                updated = replace(
+                    updated,
+                    ball_x=truth_ball_x,
+                    ball_y=truth_ball_y,
+                    ball_rel_x=float(rel_x),
+                    ball_rel_y=float(rel_y),
+                    ball_end_rel_x=float(rel_x),
+                    ball_end_rel_y=float(rel_y),
+                    ball_vel_x=0.0,
+                    ball_vel_y=0.0,
+                    time_since_ball_seen=0.0,
+                    time_since_ball_disappeared=0.0,
+                    ball_seen_percentage=100.0,
+                    ball_consistent_with_game_state=True,
+                )
+                synthetic_ball = True
+            elif synthetic_pose:
+                rel_x, rel_y = _field_to_robot(
+                    float(updated.robot_x),
+                    float(updated.robot_y),
+                    float(updated.robot_theta),
+                    float(updated.ball_x),
+                    float(updated.ball_y),
+                )
+                updated = replace(
+                    updated,
+                    ball_rel_x=float(rel_x),
+                    ball_rel_y=float(rel_y),
+                    ball_end_rel_x=float(rel_x),
+                    ball_end_rel_y=float(rel_y),
+                )
+
+        if synthetic_pose or synthetic_ball:
+            updated = replace(
+                updated,
+                synthetic_pose_observation=synthetic_pose,
+                synthetic_ball_observation=synthetic_ball,
+            )
+        return updated

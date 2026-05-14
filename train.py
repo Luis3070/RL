@@ -821,6 +821,9 @@ def run_training(
             )
             print(f"[checkpoint] saved={checkpoint_path}", flush=True)
 
+        if (timestep + 1) < timesteps:
+            observations, infos = wrapped_env.reset()
+
         if TRAIN.auto_promote and current_stage < max_stage_id and promote_stage(current_stage, eval_summary, stage_history):
             stage_history[current_stage] = dict(eval_summary)
             current_stage += 1

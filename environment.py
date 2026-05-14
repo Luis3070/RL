@@ -498,6 +498,8 @@ class RealSimRobotEnv(ParallelEnv):
             "stage_skill_mask": stage_skill_mask(self.stage_spec.stage_id),
             "bridge_obs_ready": obs.obs_ready,
             "bridge_frame": obs.frame,
+            "synthetic_pose_observation": bool(obs.synthetic_pose_observation),
+            "synthetic_ball_observation": bool(obs.synthetic_ball_observation),
             "raw_obs": raw_obs,
             "policy_skill_name": None if policy_action is None else policy_action.skill_name,
             "executed_skill_name": None if executed_action is None else executed_action.skill_name,
