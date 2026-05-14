@@ -316,7 +316,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     corridor_keep = 1.0 if step_ctx.stage >= 3 and step_ctx.corridor_open else 0.0
 
     ball_progress_post_takeover = 0.0
-    if step_ctx.stage >= 3 and takeover_envelope:
+    if takeover_envelope:
         prev_goal_dist = goal_ball_distance_mm(prev_obs)
         cur_goal_dist = goal_ball_distance_mm(step_ctx.obs)
         ball_progress_post_takeover = clip((prev_goal_dist - cur_goal_dist) / 300.0, -1.0, 1.0)

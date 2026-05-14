@@ -23,9 +23,7 @@ from reward import (
     StepEvaluation,
     build_fallback_action_targets,
     evaluate_step,
-    features_from_obs,
     goal_scored,
-    preferred_skill,
 )
 
 BALL_VEL_NORM = 3000.0
@@ -200,10 +198,12 @@ class RealSimRobotEnv(ParallelEnv):
         if action.skill_name in self.stage_spec.active_skill_names:
             return action, False
 
-        skill_name = preferred_skill(features_from_obs(obs))
-        fallback_targets = build_fallback_action_targets(skill_name, obs)
+        # Always project to walk (not preferred_skill) so telemetry reflects what
+        # the policy actually learned. Using preferred_skill here caused dribble to
+        # appear as "executed" on policy errors, masking that the policy never emitted it.
+        fallback_targets = build_fallback_action_targets("walk", obs)
         projected = StructuredSkillAction(
-            skill_type=SkillType.from_public_name(skill_name),
+            skill_type=SkillType.from_public_name("walk"),
             target_x=float(fallback_targets["target_x"]),
             target_y=float(fallback_targets["target_y"]),
             target_theta=float(fallback_targets["target_theta"]),

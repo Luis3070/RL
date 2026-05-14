@@ -63,6 +63,7 @@ _STAGE_SPECS = {
             thrash=-0.8,
             goal=4.0,
             timeout=-2.0,
+            ball_progress_post_takeover=0.3,
         ),
     ),
     1: StageSpec(
@@ -88,6 +89,7 @@ _STAGE_SPECS = {
             thrash=-1.0,
             goal=4.0,
             timeout=-2.5,
+            ball_progress_post_takeover=0.5,
         ),
     ),
     2: StageSpec(
@@ -115,6 +117,7 @@ _STAGE_SPECS = {
             thrash=-1.0,
             goal=4.5,
             timeout=-2.5,
+            ball_progress_post_takeover=0.7,
         ),
     ),
     3: StageSpec(

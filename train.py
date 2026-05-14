@@ -229,9 +229,11 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
     original_write_tracking_data = agent.write_tracking_data
 
     def _write_tracking_data_with_snapshot(self, *, timestep: int, timesteps: int) -> None:
-        snapshot: Dict[str, float] = {}
+        # Start from previous snapshot so values persist across skrl's internal clear()
+        snapshot: Dict[str, float] = dict(getattr(self, "_last_tracking_snapshot", {}))
         tracking_data = getattr(self, "tracking_data", {})
         if isinstance(tracking_data, Mapping):
+            fresh_keys: list[str] = []
             for key, values in tracking_data.items():
                 if isinstance(values, (list, tuple)) and values:
                     if key.endswith("(min)"):
@@ -240,10 +242,15 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
                         snapshot[key] = float(np.max(values))
                     else:
                         snapshot[key] = float(np.mean(values))
+                    fresh_keys.append(key)
                 else:
                     coerced = _coerce_scalar_metric(values)
                     if np.isfinite(coerced):
                         snapshot[key] = coerced
+                        fresh_keys.append(key)
+            if fresh_keys and not getattr(self, "_tracking_keys_logged", False):
+                print(f"[tracking] available keys at first update: {sorted(fresh_keys)}", flush=True)
+                self._tracking_keys_logged = True
         self._last_tracking_snapshot = snapshot
         original_write_tracking_data(timestep=timestep, timesteps=timesteps)
 

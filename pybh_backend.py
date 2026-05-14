@@ -29,6 +29,11 @@ WORLD_STATUS_POLL_INTERVAL_S = 0.01
 DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
 SETTINGS_CFG_PATH = BHUMAN_DIR / "Config/settings.cfg"
 
+# Steps post-reset during which synthetic ball injection is allowed.
+# After this window the world_spec ball position diverges from the actual ball,
+# so using it would corrupt the observation with stale data.
+SYNTHETIC_OBS_WARMUP_STEPS = 8
+
 
 def _normalize_angle(theta: float) -> float:
     return math.atan2(math.sin(theta), math.cos(theta))
@@ -405,6 +410,7 @@ class PyBHBackend:
         self._simrobot_process: subprocess.Popen[str] | None = None
         self._settings_backup_text: str | None = None
         self._qt_qpa_backup: str | None = None
+        self._steps_since_reset: int = 0
 
     def _uses_embedded_simrobot(self) -> bool:
         return self.mode == "simrobot"
@@ -536,6 +542,7 @@ class PyBHBackend:
         self._started = False
         self._last_obs = None
         self._world_spec = None
+        self._steps_since_reset = 0
 
     def reset(
         self,
@@ -561,6 +568,7 @@ class PyBHBackend:
         validate_world_spec(world_spec, mode=self.mode)
         self._world_spec = world_spec
 
+        self._steps_since_reset = 0
         if self._uses_embedded_simrobot():
             self._simrobot_reset(world_spec)
             self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
@@ -652,6 +660,7 @@ class PyBHBackend:
                 break
         obs = self.read_obs()
         self._last_obs = obs
+        self._steps_since_reset += 1
         return obs
 
     def read_obs(self) -> BackendObservation:
@@ -903,6 +912,7 @@ class PyBHBackend:
             ball_stale = (
                 float(updated.ball_seen_percentage) <= 0.0
                 and float(updated.time_since_ball_seen) >= 1000.0
+                and self._steps_since_reset < SYNTHETIC_OBS_WARMUP_STEPS
             )
             collapsed_ball = math.hypot(updated.ball_x - updated.robot_x, updated.ball_y - updated.robot_y) <= 1.0
             if ball_stale or collapsed_ball:
