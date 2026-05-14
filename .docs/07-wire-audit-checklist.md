@@ -25,30 +25,31 @@ otros que todavía requieren evidencia manual o runtime externo.
 - [ ] revalidación end-to-end de `simrobot_visible` `3d`
 - [ ] PASS documentado para reset extendido visible
 - [ ] PASS documentado para dynamic world visible
-- [ ] revalidación del runtime embebido `3d` donde hoy puede caer en init
-  gráfica / Mesa / OpenGL
+- [x] revalidación del runtime embebido `3d` con prueba mínima de
+  `simrobot_load_scene(...)` y smoke alto
 
 ### Evidencia ya reunida para `simrobot` embebido `3d`
 
-- el 14 de mayo de 2026 se probó el preflight nuevo con estas plataformas Qt:
-  `xcb`, `offscreen`, `minimalegl`, `eglfs`, `vnc`, `linuxfb`, `minimal`
-- ninguna levantó la escena `3d` en este host:
-  - `xcb`: no conecta a `DISPLAY :0`
-  - `offscreen`: termina en `SIGSEGV`
-  - `minimalegl`: no inicializa `EGL`
-  - `eglfs`: no encuentra dispositivo `DRM`
-  - `vnc` y `minimal`: no crean contexto OpenGL
-  - `linuxfb`: no encuentra framebuffer válido
-- además se reprodujo el bootstrap histórico para descartar regresión reciente:
-  - con `DISPLAY`: `legacy-display-xcb`, abort `134`
-  - sin `DISPLAY`: `legacy-host-default`, `SIGSEGV` `139`
+- el 14 de mayo de 2026 se rehizo el aislamiento con la prueba mínima real:
+  `import pybh.controller` + `pybh.simrobot_load_scene(scene)`
+- con esa prueba:
+  - `RL1v0.ros2d`: PASS
+  - `RL1v0_3D.ros2`: crash si el host fuerza `offscreen`
+  - `BH.ros2`: mismo crash, así que no era un bug específico de RL
+- luego se probó el mismo `3d` forzando plataforma Qt:
+  - `QT_QPA_PLATFORM=offscreen`: crash
+  - `QT_QPA_PLATFORM=xcb`: PASS cuando hay `DISPLAY`
+- el fix final fue mover esa decisión al host embebido:
+  - con `DISPLAY`, usar `xcb`
+  - sin `DISPLAY`, dejar `offscreen` como fallback
 
 Lectura correcta:
 
-- el preflight nuevo no empeoró el caso `3d`; solo lo hace observable sin matar
-  tan temprano el proceso principal;
-- el pendiente real sigue siendo host/nativo y debe resolverse fuera de este
-  repo o con cambios en el stack gráfico de `SabanaHerons2026`.
+- el problema real no estaba en PPO ni en `env.reset()`, sino en la carga
+  mínima de escena embebida `3d`;
+- el fallo tampoco era de escena RL, porque aparecía igual en `BH.ros2`;
+- el punto de quiebre era la plataforma Qt elegida por defecto en el host;
+- hoy la ruta mínima y el smoke alto vuelven a pasar en `2d` y `3d`.
 
 ## Gates automáticos del wire
 
@@ -98,10 +99,9 @@ Nota operativa:
   SimRobot fue lanzado por el propio backend;
 - si la GUI ya estaba abierta aparte, el gate sigue siendo útil porque detecta
   el modo realmente observado aunque Python no pueda cambiarlo retroactivamente.
-- en `simrobot` embebido `3d`, el backend ahora prueba plataformas Qt
-  candidatas en un subprocess antes de cargar la escena real; eso reduce el
-  riesgo de matar el proceso principal, pero no sustituye arreglos nativos si el
-  core sigue cayendo en Mesa/OpenGL.
+- en `simrobot` embebido `3d`, el backend sigue teniendo preflight defensivo,
+  pero el fix determinante quedó en el host C++: ya no fuerza `offscreen` si
+  existe `DISPLAY`.
 
 ## Siguiente cierre real
 

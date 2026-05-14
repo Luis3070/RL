@@ -790,9 +790,7 @@ class PyBHBackend:
         if self._uses_embedded_simrobot():
             self._simrobot_reset(world_spec)
             self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-            obs = self._wait_for_embedded_reset_obs(
-                np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
-            )
+            obs = self._wait_for_embedded_reset_obs(world_spec)
             self._last_obs = obs
             return obs
         elif self._uses_visible_simrobot():
@@ -1013,9 +1011,11 @@ class PyBHBackend:
                     raise RuntimeError(f"simrobot_set_robot_pose failed for opponent robot {player.number}")
         pybh.simrobot_step(1)
 
-    def _wait_for_embedded_reset_obs(self, robot_pos: np.ndarray, *, max_steps: int = 80) -> BackendObservation:
-        expected_x = float(robot_pos[0])
-        expected_y = float(robot_pos[1])
+    def _wait_for_embedded_reset_obs(self, world_spec: WorldSpec, *, max_steps: int = 80) -> BackendObservation:
+        expected_x = float(world_spec.robot_x)
+        expected_y = float(world_spec.robot_y)
+        expected_ball_x = float(world_spec.ball_x)
+        expected_ball_y = float(world_spec.ball_y)
         last_obs: BackendObservation | None = None
         for _ in range(max_steps):
             pybh.simrobot_step(1)
@@ -1023,13 +1023,29 @@ class PyBHBackend:
                 BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, max(1, self.obs_timeout_ms // 10)))
             )
             last_obs = obs
-            if not obs.obs_ready:
+            if not obs.obs_ready or obs.frame <= 0:
                 continue
-            if math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y) <= 150.0:
+            simrobot_pose_error = math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y)
+            exported_pose_error = math.hypot(obs.robot_x - expected_x, obs.robot_y - expected_y)
+            exported_ball_error = math.hypot(obs.ball_x - expected_ball_x, obs.ball_y - expected_ball_y)
+            if simrobot_pose_error <= 150.0 and exported_pose_error <= 150.0 and exported_ball_error <= 150.0:
                 return obs
-        if last_obs is not None and last_obs.obs_ready:
-            return last_obs
-        raise RuntimeError("pybh.rl_get_obs timed out while waiting for embedded SimRobot reset")
+        details = "no observation received"
+        if last_obs is not None:
+            details = (
+                f"last_frame={last_obs.frame} obs_ready={int(last_obs.obs_ready)} "
+                f"robot=({last_obs.robot_x:.1f},{last_obs.robot_y:.1f},{last_obs.robot_theta:.2f}) "
+                f"simrobot=({last_obs.simrobot_robot_x:.1f},{last_obs.simrobot_robot_y:.1f},{last_obs.simrobot_robot_theta:.2f}) "
+                f"ball=({last_obs.ball_x:.1f},{last_obs.ball_y:.1f}) "
+                f"corrected_pose={int(last_obs.corrected_exported_robot_pose)} "
+                f"corrected_ball={int(last_obs.corrected_exported_ball)}"
+            )
+        raise RuntimeError(
+            "Embedded SimRobot reset observation did not converge within timeout: "
+            f"expected_robot=({expected_x:.1f},{expected_y:.1f}) "
+            f"expected_ball=({expected_ball_x:.1f},{expected_ball_y:.1f}) "
+            f"max_steps={max_steps} {details}"
+        )
 
     def _wait_for_visible_world_request(self, *, request_id: int, timeout_ms: int | None = None) -> None:
         effective_timeout_ms = self.visible_request_timeout_ms if timeout_ms is None else max(1, int(timeout_ms))
@@ -1133,16 +1149,21 @@ class PyBHBackend:
 
         ball_stale = False
         collapsed_ball = False
+        ball_truth_mismatch = False
         if self._world_spec is not None:
+            truth_ball_x = float(self._world_spec.ball_x)
+            truth_ball_y = float(self._world_spec.ball_y)
             ball_stale = (
                 float(updated.ball_seen_percentage) <= 0.0
                 and float(updated.time_since_ball_seen) >= 1000.0
             )
             collapsed_ball = math.hypot(updated.ball_x - updated.robot_x, updated.ball_y - updated.robot_y) <= 1.0
+            ball_truth_mismatch = (
+                bool(updated.corrected_exported_ball)
+                and math.hypot(updated.ball_x - truth_ball_x, updated.ball_y - truth_ball_y) > 150.0
+            )
             ball_synth_allowed = self._steps_since_reset < SYNTHETIC_BALL_WARMUP_STEPS
-            if ball_synth_allowed and (ball_stale or collapsed_ball):
-                truth_ball_x = float(self._world_spec.ball_x)
-                truth_ball_y = float(self._world_spec.ball_y)
+            if ball_synth_allowed and (ball_stale or collapsed_ball or ball_truth_mismatch):
                 rel_x, rel_y = _field_to_robot(
                     float(updated.robot_x),
                     float(updated.robot_y),
@@ -1166,7 +1187,12 @@ class PyBHBackend:
                     ball_consistent_with_game_state=True,
                 )
                 synthetic_ball = True
-                synthetic_ball_reason = "warmup_ball_stale" if ball_stale else "warmup_ball_collapsed"
+                if ball_stale:
+                    synthetic_ball_reason = "warmup_ball_stale"
+                elif collapsed_ball:
+                    synthetic_ball_reason = "warmup_ball_collapsed"
+                else:
+                    synthetic_ball_reason = "warmup_ball_mismatch"
             elif synthetic_pose:
                 rel_x, rel_y = _field_to_robot(
                     float(updated.robot_x),

@@ -296,36 +296,49 @@ Validación ejecutada:
     `pose_alignment_warning_rate≈0.01875`, `ball_stale_rate=1.0`,
     `ball_collapsed_rate≈0.98125`, `corrected_exported_* = 0`.
 
-Limitación actual del entorno:
+Revalidación de runtime embebido ejecutada el 14 de mayo de 2026:
 
-- el perfil `3d` embebido no quedó revalidado en este entorno porque el core
-  nativo cae en inicialización gráfica:
-  - con sandbox normal, aborta por `DISPLAY`/`xcb` o por creación de sockets;
-  - fuera del sandbox, el core `3d` termina en `SIGSEGV` dentro del stack
-    Mesa/OpenGL al cargar la escena.
-- esa caída ocurre en `simrobot_load_scene()` antes del reset RL, así que no
-  invalida la corrección del wire observacional; sí deja pendiente la
-  revalidación específica del runtime gráfico `3d`.
+- se volvió a aislar el problema con la prueba mínima real:
+  - importar `pybh.controller`;
+  - llamar `pybh.simrobot_load_scene(...)`;
+  - sin `env.reset()`, sin PPO, sin reward, sin curriculum.
+- resultado mínimo:
+  - `RL1v0.ros2d`: `ok=True`, `loaded=True`;
+  - `RL1v0_3D.ros2`: caída del proceso durante `simrobot_load_scene(...)`;
+  - `BH.ros2`: misma caída, así que no era un bug específico de escena RL.
+- después se forzaron variantes de plataforma Qt:
+  - `QT_QPA_PLATFORM=offscreen`: el `3d` seguía cayendo;
+  - `QT_QPA_PLATFORM=xcb`: el `3d` cargaba bien en esta máquina cuando había
+    `DISPLAY`.
 
-Revalidación adicional ejecutada el 14 de mayo de 2026:
+Causa real confirmada:
 
-- se reprodujo explícitamente la ruta embebida "vieja" para `simrobot 3d`,
-  desactivando el preflight y dejando solo el bootstrap histórico:
-  - con `DISPLAY`, forzar `QT_QPA_PLATFORM=xcb`;
-  - sin `DISPLAY`, no tocar la plataforma y dejar que el host use su default
-    (`offscreen` en `SimRobotHost.cpp`).
-- resultado:
-  - `legacy-display-xcb`: abort `134`, `qt.qpa.xcb: could not connect to
-    display :0`, `Could not load the Qt platform plugin "xcb"`;
-  - `legacy-host-default`: `SIGSEGV` `139` al cargar la escena.
+- el host embebido estaba forzando `offscreen` por default;
+- en este host, el core `3d` embebido no es estable por `offscreen`;
+- con `DISPLAY=:0`, la ruta estable es `xcb` sobre X11/XWayland.
 
-Conclusión actualizada:
+Fix aplicado:
 
-- el camino legacy tampoco levanta `simrobot 3d` embebido en esta máquina;
-- por tanto, el problema no fue introducido por el preflight nuevo de
-  `pybh_backend.py`;
-- el bloqueo sigue estando en el runtime gráfico/nativo del host
-  (`Qt`/`Mesa`/`OpenGL`), no en el wire Python del bridge.
+- `SimRobotHost.cpp` ahora elige `QT_QPA_PLATFORM=xcb` si hay `DISPLAY`;
+- `offscreen` queda como fallback solo cuando no hay display;
+- se mantuvo el saneamiento previo de locale numérico y bootstrap OpenGL.
+
+Estado actualizado:
+
+- la prueba mínima vuelve a pasar:
+  - `simrobot_load_scene(RL1v0.ros2d)`: PASS
+  - `simrobot_load_scene(RL1v0_3D.ros2)`: PASS
+  - `simrobot_load_scene(BH.ros2)`: PASS
+- además volvió a pasar el smoke embebido alto:
+  - `smoke_test_skill_requests.py --backend simrobot --simrobot-profile 2d`
+  - `smoke_test_skill_requests.py --backend simrobot --simrobot-profile 3d`
+
+Pendiente residual:
+
+- el runtime `3d` embebido ya no está roto en carga de escena;
+- lo que sigue siendo frágil es la capa de observación warmup, por eso
+  `pybh_backend.py` endurece ahora el wait de reset y sintetiza pelota de
+  warmup cuando el export corregido sale desalineado.
 
 ## Cómo corre ahora el smoke
 

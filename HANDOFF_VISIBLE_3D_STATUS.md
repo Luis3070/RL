@@ -12,8 +12,8 @@ Estado actual:
 - `invalid_slot` visible `3d`: PASS
 - `dynamic_world` visible `3d`: PASS
 
-El backend embebido `simrobot` en `3d` no quedó cerrado y hoy sigue roto al
-intentar cargar escena desde `pybh.simrobot_load_scene(...)`.
+El backend embebido `simrobot` en `3d` ya volvió a quedar funcional tanto en la
+prueba mínima `pybh.simrobot_load_scene(...)` como en el smoke alto.
 
 ## Qué se resolvió
 
@@ -128,9 +128,17 @@ Eso significa:
 
 ### Embebido `simrobot` `3d`
 
-No quedó sano.
+Quedó sano otra vez.
 
-Comando que falla:
+Prueba mínima que se usó para aislarlo:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+python3 -c "import os; os.chdir('/home/rafael/Documentos/Robocup2026/SabanaHerons2026'); import pybh.controller as pybh; scene='/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RL1v0_3D.ros2'; ok=pybh.simrobot_load_scene(scene); print(ok, pybh.simrobot_is_loaded(), pybh.simrobot_last_error()); pybh.simrobot_unload_scene()"
+```
+
+Comando de smoke alto:
 
 ```bash
 cd /home/rafael/Documentos/Robocup2026/RL
@@ -138,26 +146,39 @@ PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
 python3 smoke_test_skill_requests.py --backend simrobot --simrobot-profile 3d
 ```
 
-Falla actual observada:
+Resultado actual:
 
-- `simrobot_load_scene failed`
-- errores de parseo de floats/units dentro de `RL1v0_3D.ros2` y `NaoV6H25.rsi2`
-- al forzar locale `C`, también apareció `Segmentation fault`
+- `simrobot_load_scene(RL1v0_3D.ros2)`: PASS
+- `simrobot_load_scene(BH.ros2)`: PASS
+- `smoke_test_skill_requests.py --backend simrobot --simrobot-profile 3d`:
+  PASS
+
+Causa que se confirmó en el camino:
+
+- el crash mínimo ya no venía del wire RL ni del reset;
+- el problema estaba en el host embebido `3d` cuando forzaba
+  `QT_QPA_PLATFORM=offscreen`;
+- en esta máquina, con `DISPLAY=:0`, el core `3d` carga bien por `xcb` y se
+  cae por `offscreen`.
 
 Interpretación actual:
 
-- la ruta embebida `simrobot` `3d` sigue rota en carga/inicialización de escena
-- no es un problema del `simrobot_visible`
-- no es un problema principal de telemetría
+- la ruta embebida `simrobot` `3d` ya no está rota en
+  carga/inicialización de escena;
+- el fix real quedó en `SimRobotHost.cpp`: usar `xcb` con `DISPLAY` y dejar
+  `offscreen` solo como fallback sin display;
+- además se endureció el warmup del backend Python para no aceptar resets con
+  observaciones `frame=0` o pelota desalineada.
 
 ## Qué falta
 
 ### Pendiente técnico real
 
-1. Depurar y corregir `simrobot` embebido `3d`
-2. Volver a correr smoke embebido `3d`
-3. Confirmar que la telemetría nueva no rompió el backend embebido una vez ese
-   path vuelva a cargar escenas
+1. Mantener documentada la prueba mínima `simrobot_load_scene(...)` como primer
+   smoke cuando `3d` vuelva a romperse
+2. Si aparece una regresión nueva en otra máquina, revisar primero
+   `QT_QPA_PLATFORM` efectivo y presencia de `DISPLAY`
+3. Seguir cerrando documentación operativa y probes de observación
 
 ### Pendiente documental
 
@@ -203,4 +224,3 @@ En `SabanaHerons2026/`:
 - `Src/Libs/Python/Controller/RLSharedState.h`
 - `Src/Libs/Python/Controller/RLSharedState.cpp`
 - `Src/Libs/Python/Controller/Module.cpp`
-

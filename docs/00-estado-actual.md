@@ -113,7 +113,13 @@ Verificado en esta sesión:
 - `py_compile` de scripts principales de `RL`: OK
 - rebuild de `pybh/controller`: OK
 - el binding ya no expone funciones antiguas de simulación interna
-- smoke embebido `simrobot` fuera del sandbox: `obs_ready=True`
+- prueba mínima embebida `pybh.simrobot_load_scene(...)`:
+  - `RL1v0.ros2d`: OK
+  - `RL1v0_3D.ros2`: OK
+  - `BH.ros2`: OK
+- smoke embebido `simrobot` fuera del sandbox:
+  - `2d`: `obs_ready=True`, `frame` avanza, pelota consistente con reset
+  - `3d`: `obs_ready=True`, `frame` avanza, pelota consistente con reset
 
 Limitación honesta:
 

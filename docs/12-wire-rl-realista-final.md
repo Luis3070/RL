@@ -97,5 +97,6 @@ Interpretación práctica:
 
 - el bridge estructural está listo;
 - el wire observacional quedó en estado auditado, no en estado incuestionable.
-- el runtime embebido `simrobot 3d` sigue pendiente por razones gráficas del
-  host, y la ruta legacy anterior tampoco levanta en esta máquina.
+- el runtime embebido `simrobot 3d` ya volvió a cargar escena en esta máquina
+  con prueba mínima y smoke alto; la clave fue dejar de forzar `offscreen`
+  cuando existe `DISPLAY` y usar `xcb` en el host embebido.
