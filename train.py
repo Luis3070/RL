@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
+import importlib
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import MethodType
 from typing import Any, Dict, Mapping
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -24,6 +23,7 @@ from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
 from wrapper import RealSimRobotEnvWrapper
+from wire_audit import build_wire_audit
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
 
@@ -32,8 +32,11 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 class ScriptRunConfig:
     mode: str = "train"
     backend: str = "simrobot"
+    obs_mode: str = ENV.backend.obs_mode
     simrobot_profile: str = "3d"
     simrobot_launch: bool = False
+    embedded_qt_platform: str | None = ENV.backend.embedded_qt_platform
+    embedded_3d_preflight: bool = ENV.backend.embedded_3d_preflight
     smoke_steps: int = TRAIN.smoke_steps
     train_steps: int = 1024
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -51,6 +54,7 @@ class ScriptRunConfig:
     eval_interval: int = 256
     checkpoint_interval: int = 512
     eval_episodes: int = 2
+    abort_on_wire_fail: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,11 +64,20 @@ class TelemetryPaths:
     plots_dir: Path
     run_config_path: Path
     smoke_steps_csv: Path
+    smoke_summary_csv: Path
     eval_summary_csv: Path
     eval_episodes_csv: Path
 
 
 IDE_RUN = ScriptRunConfig()
+
+
+def _pd():
+    return importlib.import_module("pandas")
+
+
+def _plt():
+    return importlib.import_module("matplotlib.pyplot")
 
 
 def _coerce_scalar_metric(value: Any) -> float:
@@ -297,16 +310,23 @@ def _prepare_telemetry_paths(run_cfg: ScriptRunConfig) -> TelemetryPaths:
         plots_dir=plots_dir,
         run_config_path=session_dir / "run_config.json",
         smoke_steps_csv=csv_dir / "smoke_steps.csv",
+        smoke_summary_csv=csv_dir / "smoke_summary.csv",
         eval_summary_csv=csv_dir / "eval_summary.csv",
         eval_episodes_csv=csv_dir / "eval_episodes.csv",
     )
 
 
-def _write_run_config(paths: TelemetryPaths, run_cfg: ScriptRunConfig, backend_cfg: BackendConfig) -> None:
+def _write_run_config(
+    paths: TelemetryPaths,
+    run_cfg: ScriptRunConfig,
+    backend_cfg: BackendConfig,
+    train_cfg: TrainConfig,
+) -> None:
     payload = {
         "run": asdict(run_cfg),
         "backend": {
             "mode": backend_cfg.mode,
+            "obs_mode": backend_cfg.obs_mode,
             "frames_per_step": backend_cfg.frames_per_step,
             "obs_timeout_ms": backend_cfg.obs_timeout_ms,
             "simrobot_profile": backend_cfg.simrobot_profile,
@@ -314,13 +334,17 @@ def _write_run_config(paths: TelemetryPaths, run_cfg: ScriptRunConfig, backend_c
             "simrobot_robot_name": backend_cfg.simrobot_robot_name,
             "simrobot_theta_offset": backend_cfg.simrobot_theta_offset,
             "simrobot_launch": backend_cfg.simrobot_launch,
+            "embedded_qt_platform": backend_cfg.embedded_qt_platform,
+            "embedded_3d_preflight": backend_cfg.embedded_3d_preflight,
             "simrobot_bin": str(backend_cfg.simrobot_bin),
         },
+        "wire_audit": asdict(train_cfg.wire_audit),
     }
     paths.run_config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _append_csv_row(path: Path, row: Mapping[str, Any]) -> None:
+    pd = _pd()
     new_df = pd.DataFrame([dict(row)])
     if path.exists():
         existing = pd.read_csv(path)
@@ -333,6 +357,8 @@ def _append_csv_row(path: Path, row: Mapping[str, Any]) -> None:
 def _plot_smoke_steps(paths: TelemetryPaths) -> None:
     if not paths.smoke_steps_csv.exists():
         return
+    pd = _pd()
+    plt = _plt()
     df = pd.read_csv(paths.smoke_steps_csv)
     if df.empty:
         return
@@ -376,6 +402,8 @@ def _plot_smoke_steps(paths: TelemetryPaths) -> None:
 def _plot_eval_metrics(paths: TelemetryPaths) -> None:
     if not paths.eval_summary_csv.exists():
         return
+    pd = _pd()
+    plt = _plt()
     df = pd.read_csv(paths.eval_summary_csv)
     if df.empty:
         return
@@ -517,6 +545,13 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "skill_projection_rate",
         "synthetic_pose_rate",
         "synthetic_ball_rate",
+        "obs_mode_estimated_rate",
+        "obs_mode_corrected_rate",
+        "pose_alignment_warning_rate",
+        "ball_stale_rate",
+        "ball_collapsed_rate",
+        "corrected_exported_robot_pose_rate",
+        "corrected_exported_ball_rate",
         "episode_reward_mean",
         "episode_reward_total",
     ]
@@ -629,7 +664,14 @@ def save_checkpoint(
     return checkpoint_path
 
 
-def print_eval_summary(stage_id: int, timestep: int, summary: Mapping[str, object], agent: MAPPO) -> None:
+def print_eval_summary(
+    stage_id: int,
+    timestep: int,
+    summary: Mapping[str, object],
+    agent: MAPPO,
+    *,
+    wire_audit: Mapping[str, object],
+) -> None:
     agent_id = "player_1"
     reward_mean = float(summary.get("episode_reward_mean", 0.0))
     clean_takeover_rate = float(summary.get("clean_takeover_rate", 0.0))
@@ -654,7 +696,8 @@ def print_eval_summary(stage_id: int, timestep: int, summary: Mapping[str, objec
         f"takeover={clean_takeover_rate:.3f} finish={clean_finish_rate:.3f} "
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
         f"time_to_takeover={mean_time_to_takeover:.1f} stability={stability_score:.3f} "
-        f"policy_loss={policy_loss:.4f} value_loss={value_loss:.4f} entropy={entropy:.4f}",
+        f"policy_loss={policy_loss:.4f} value_loss={value_loss:.4f} entropy={entropy:.4f} "
+        f"wire={wire_audit.get('wire_audit_status', 'UNKNOWN')}",
         flush=True,
     )
 
@@ -666,6 +709,7 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
     return {
         "step": int(step),
         "stage_id": int(step_info.get("stage_id", 0)),
+        "configured_obs_mode": step_info.get("configured_obs_mode"),
         "reward": float(reward_value),
         "policy_skill_name": step_info.get("policy_skill_name"),
         "executed_skill_name": step_info.get("executed_skill_name"),
@@ -673,6 +717,19 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
         "projection_applied": int(bool(step_info.get("projection_applied", False))),
         "synthetic_pose_observation": int(bool(step_info.get("synthetic_pose_observation", False))),
         "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),
+        "synthetic_pose_reason": step_info.get("synthetic_pose_reason"),
+        "synthetic_ball_reason": step_info.get("synthetic_ball_reason"),
+        "obs_export_mode": int(step_info.get("obs_export_mode", 0)),
+        "corrected_exported_robot_pose": int(bool(step_info.get("corrected_exported_robot_pose", False))),
+        "corrected_exported_ball": int(bool(step_info.get("corrected_exported_ball", False))),
+        "pose_alignment_error_mm": float(step_info.get("pose_alignment_error_mm", 0.0)),
+        "pose_alignment_warning": int(bool(step_info.get("pose_alignment_warning", False))),
+        "ball_observation_stale": int(bool(step_info.get("ball_observation_stale", False))),
+        "ball_observation_collapsed": int(bool(step_info.get("ball_observation_collapsed", False))),
+        "estimated_robot_x": float(step_info.get("estimated_robot_x", 0.0)),
+        "estimated_robot_y": float(step_info.get("estimated_robot_y", 0.0)),
+        "estimated_ball_x": float(step_info.get("estimated_ball_x", 0.0)),
+        "estimated_ball_y": float(step_info.get("estimated_ball_y", 0.0)),
         "takeover_envelope": int(bool(step_info.get("takeover_envelope", False))),
         "walk_zone": int(bool(step_info.get("walk_zone", False))),
         "dribble_zone": int(bool(step_info.get("dribble_zone", False))),
@@ -696,6 +753,7 @@ def _build_eval_summary_row(
     stage_id: int,
     summary: Mapping[str, object],
     agent: MAPPO,
+    wire_audit: Mapping[str, object],
 ) -> Dict[str, Any]:
     agent_id = "player_1"
     row = {
@@ -716,6 +774,29 @@ def _build_eval_summary_row(
             row.update(_flatten_mapping(key, value))
         else:
             row[key] = value
+    row.update(dict(wire_audit))
+    return row
+
+
+def _build_smoke_summary_row(
+    *,
+    steps: int,
+    total_reward: float,
+    final_info: Mapping[str, object],
+    wire_audit: Mapping[str, object],
+) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "steps": int(steps),
+        "total_reward": float(total_reward),
+        "configured_obs_mode": final_info.get("configured_obs_mode"),
+        "backend_mode": final_info.get("backend_mode"),
+        "stage_id": int(final_info.get("stage_id", 0)),
+    }
+    for prefix in ("running_metrics", "episode_metrics"):
+        value = final_info.get(prefix, {})
+        if isinstance(value, Mapping):
+            row.update(_flatten_mapping(prefix, value))
+    row.update(dict(wire_audit))
     return row
 
 
@@ -753,20 +834,30 @@ def run_smoke(
     steps: int,
     backend: str,
     device: str,
+    obs_mode: str,
     simrobot_profile: str,
     stage_id: int,
     simrobot_launch: bool = False,
+    embedded_qt_platform: str | None = None,
+    embedded_3d_preflight: bool = True,
     telemetry_paths: TelemetryPaths | None = None,
+    save_plots: bool = True,
+    abort_on_wire_fail: bool = False,
 ) -> None:
     backend_cfg = replace(
         ENV.backend,
         mode=backend,
+        obs_mode=obs_mode,
         simrobot_profile=simrobot_profile,
         simrobot_launch=simrobot_launch,
+        embedded_qt_platform=embedded_qt_platform,
+        embedded_3d_preflight=embedded_3d_preflight,
     )
     env_cfg = make_env_config(stage_id, backend_cfg)
     raw_env, wrapped_env, _ = build_env(env_cfg)
     total_reward = 0.0
+    completed_steps = 0
+    final_step_info: Mapping[str, object] = {}
     try:
         observations, infos = wrapped_env.reset()
         agent, _ = build_mappo(wrapped_env, device, TRAIN)
@@ -777,7 +868,9 @@ def run_smoke(
             )
             reward_value = float(rewards["player_1"].item())
             total_reward += reward_value
+            completed_steps = step + 1
             step_info = infos["player_1"]
+            final_step_info = step_info
             if telemetry_paths is not None:
                 _append_csv_row(telemetry_paths.smoke_steps_csv, _build_smoke_step_row(step + 1, reward_value, step_info))
             print(
@@ -794,8 +887,35 @@ def run_smoke(
     finally:
         wrapped_env.close()
         raw_env.close()
-    if telemetry_paths is not None:
+    smoke_metrics = {}
+    if isinstance(final_step_info.get("episode_metrics"), Mapping):
+        smoke_metrics.update(final_step_info["episode_metrics"])
+    elif isinstance(final_step_info.get("running_metrics"), Mapping):
+        smoke_metrics.update(final_step_info["running_metrics"])
+    wire_audit = build_wire_audit(smoke_metrics, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
+    if telemetry_paths is not None and final_step_info:
+        _append_csv_row(
+            telemetry_paths.smoke_summary_csv,
+            _build_smoke_summary_row(
+                steps=completed_steps,
+                total_reward=total_reward,
+                final_info=final_step_info,
+                wire_audit=wire_audit,
+            ),
+        )
+    print(
+        f"[wire] mode={backend_cfg.obs_mode} status={wire_audit['wire_audit_status']} "
+        f"failures={wire_audit['wire_audit_failure_count']} warnings={wire_audit['wire_audit_warning_count']}",
+        flush=True,
+    )
+    if wire_audit["wire_audit_failures"]:
+        print(f"[wire] fail_details={wire_audit['wire_audit_failures']}", flush=True)
+    if wire_audit["wire_audit_warnings"]:
+        print(f"[wire] warn_details={wire_audit['wire_audit_warnings']}", flush=True)
+    if telemetry_paths is not None and save_plots:
         _plot_smoke_steps(telemetry_paths)
+    if abort_on_wire_fail and wire_audit["wire_audit_status"] == "FAIL":
+        raise RuntimeError(f"Wire audit failed in smoke run: {wire_audit['wire_audit_failures']}")
     print(f"[smoke] total_reward={total_reward:.3f}", flush=True)
 
 
@@ -803,17 +923,25 @@ def run_training(
     timesteps: int,
     backend: str,
     device: str,
+    obs_mode: str,
     simrobot_profile: str,
     stage_id: int,
     max_stage_id: int,
     simrobot_launch: bool = False,
+    embedded_qt_platform: str | None = None,
+    embedded_3d_preflight: bool = True,
     telemetry_paths: TelemetryPaths | None = None,
+    save_plots: bool = True,
+    abort_on_wire_fail: bool = False,
 ) -> None:
     backend_cfg = replace(
         ENV.backend,
         mode=backend,
+        obs_mode=obs_mode,
         simrobot_profile=simrobot_profile,
         simrobot_launch=simrobot_launch,
+        embedded_qt_platform=embedded_qt_platform,
+        embedded_3d_preflight=embedded_3d_preflight,
     )
     current_stage = stage_id
     env_cfg = make_env_config(current_stage, backend_cfg)
@@ -880,13 +1008,15 @@ def run_training(
                 timestep=timestep + 1,
                 timesteps=timesteps,
             )
-            print_eval_summary(current_stage, timestep + 1, eval_summary, agent)
+            wire_audit = build_wire_audit(eval_summary, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
+            print_eval_summary(current_stage, timestep + 1, eval_summary, agent, wire_audit=wire_audit)
             if telemetry_paths is not None:
                 eval_row = _build_eval_summary_row(
                     timestep=timestep + 1,
                     stage_id=current_stage,
                     summary=eval_summary,
                     agent=agent,
+                    wire_audit=wire_audit,
                 )
                 _append_csv_row(telemetry_paths.eval_summary_csv, eval_row)
                 _append_eval_episode_rows(
@@ -895,7 +1025,8 @@ def run_training(
                     stage_id=current_stage,
                     episode_results=episode_results,
                 )
-                _plot_eval_metrics(telemetry_paths)
+                if save_plots:
+                    _plot_eval_metrics(telemetry_paths)
 
             if (timestep + 1) % TRAIN.checkpoint_interval == 0 or (timestep + 1) == timesteps:
                 checkpoint_path = save_checkpoint(
@@ -903,9 +1034,12 @@ def run_training(
                     train_cfg=TRAIN,
                     timestep=timestep + 1,
                     stage_id=current_stage,
-                    eval_summary=eval_summary,
+                    eval_summary={**dict(eval_summary), **dict(wire_audit)},
                 )
                 print(f"[checkpoint] saved={checkpoint_path}", flush=True)
+
+            if abort_on_wire_fail and wire_audit["wire_audit_status"] == "FAIL":
+                raise RuntimeError(f"Wire audit failed at timestep {timestep + 1}: {wire_audit['wire_audit_failures']}")
 
             if (timestep + 1) < timesteps:
                 observations, infos = wrapped_env.reset()
@@ -940,16 +1074,22 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
     backend_cfg = replace(
         effective_env.backend,
         mode=run_cfg.backend,
+        obs_mode=run_cfg.obs_mode,
         simrobot_profile=run_cfg.simrobot_profile,
         simrobot_launch=run_cfg.simrobot_launch,
+        embedded_qt_platform=run_cfg.embedded_qt_platform,
+        embedded_3d_preflight=run_cfg.embedded_3d_preflight,
     )
     telemetry_paths = _prepare_telemetry_paths(run_cfg) if run_cfg.save_telemetry else None
     if telemetry_paths is not None:
-        _write_run_config(telemetry_paths, run_cfg, backend_cfg)
+        _write_run_config(telemetry_paths, run_cfg, backend_cfg, effective_train)
         print(f"[telemetry] session_dir={telemetry_paths.session_dir}", flush=True)
     print(
         f"[run] mode={run_cfg.mode} learner_device={run_cfg.learner_device} "
-        f"env_backend={run_cfg.backend} simrobot_profile={run_cfg.simrobot_profile} stage={run_cfg.stage_id} "
+        f"env_backend={run_cfg.backend} obs_mode={run_cfg.obs_mode} "
+        f"simrobot_profile={run_cfg.simrobot_profile} stage={run_cfg.stage_id} "
+        f"embedded_qt_platform={run_cfg.embedded_qt_platform or 'auto'} "
+        f"embedded_3d_preflight={int(bool(run_cfg.embedded_3d_preflight))} "
         f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps}",
         flush=True,
     )
@@ -964,21 +1104,31 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 run_cfg.smoke_steps,
                 backend=run_cfg.backend,
                 device=run_cfg.learner_device,
+                obs_mode=run_cfg.obs_mode,
                 simrobot_profile=run_cfg.simrobot_profile,
                 stage_id=run_cfg.stage_id,
                 simrobot_launch=run_cfg.simrobot_launch,
+                embedded_qt_platform=run_cfg.embedded_qt_platform,
+                embedded_3d_preflight=run_cfg.embedded_3d_preflight,
                 telemetry_paths=telemetry_paths,
+                save_plots=run_cfg.save_plots,
+                abort_on_wire_fail=run_cfg.abort_on_wire_fail,
             )
         else:
             run_training(
                 effective_train.trainer_timesteps,
                 backend=run_cfg.backend,
                 device=run_cfg.learner_device,
+                obs_mode=run_cfg.obs_mode,
                 simrobot_profile=run_cfg.simrobot_profile,
                 stage_id=run_cfg.stage_id,
                 max_stage_id=run_cfg.max_stage_id,
                 simrobot_launch=run_cfg.simrobot_launch,
+                embedded_qt_platform=run_cfg.embedded_qt_platform,
+                embedded_3d_preflight=run_cfg.embedded_3d_preflight,
                 telemetry_paths=telemetry_paths,
+                save_plots=run_cfg.save_plots,
+                abort_on_wire_fail=run_cfg.abort_on_wire_fail,
             )
     finally:
         globals()["TRAIN"] = original_train

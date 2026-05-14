@@ -78,5 +78,24 @@ Lo siguiente ya no es wiring puro:
 
 ## Conclusión
 
-El wire ya está listo para que el equipo de RL trabaje encima sin seguir
-tocando estructura base del bridge.
+La estructura base del bridge sí quedó cerrada para trabajar en RL:
+
+- skill request canónico
+- publicador único de observaciones
+- backends `simrobot` y `simrobot_visible`
+- reset extendido y dynamic world
+
+Pero el wire observacional ya no conviene tratarlo como "cerrado" sin más.
+
+Queda una segunda capa de cierre que hoy se audita aparte:
+
+- validar `corrected` vs `estimated` en corridas reales
+- exigir métricas sanas de `synthetic_*`, `ball_stale` y alineación de pose
+- cerrar PASS manual/documentado para `simrobot_visible`
+
+Interpretación práctica:
+
+- el bridge estructural está listo;
+- el wire observacional quedó en estado auditado, no en estado incuestionable.
+- el runtime embebido `simrobot 3d` sigue pendiente por razones gráficas del
+  host, y la ruta legacy anterior tampoco levanta en esta máquina.

@@ -143,6 +143,8 @@ Sin eso, el binding `pybh` o los imports del repo pueden fallar.
 Se corrigieron y estabilizaron varios puntos:
 
 - arranque embebido de SimRobot 3D,
+- preflight en subprocess para elegir `QT_QPA_PLATFORM` antes de cargar escena
+  `3d` en el proceso principal,
 - override temporal de `settings.cfg` a `team=24`, `player=1`,
 - restauración limpia al cerrar,
 - soporte efectivo de:
@@ -165,6 +167,165 @@ La lección práctica:
 
 - si el stack vuelve a comportarse raro tras cambios en C++ o bridge,
   sospecha primero de binarios desalineados.
+
+### 3. Fix del wire de observación RL <-> SimRobot
+
+Después de revalidar `simrobot` embebido y `simrobot_visible`, apareció un
+problema más fino:
+
+- `rl_set_action(...)` y `rl_get_obs(...)` sí funcionaban,
+- pero `robot_x/y/theta` y `ball_x/y` exportados a Python podían quedar muy
+  desalineados respecto al estado real del simulador después de un reset RL.
+
+La causa práctica fue esta:
+
+- `simrobot_robot_x/y/theta` salían del cuerpo real en SimRobot desde
+  `LocalConsole`,
+- mientras que `robot_x/y/theta` y `ball_x/y` salían de `theRobotPose` y
+  `theFieldBall` en `SkillBehaviorControl`,
+- y esas representaciones podían quedar stale después del teleport/reset RL.
+
+Síntoma observado antes del fix:
+
+- error de pose de ~`2.8 m` entre `robot_*` y `simrobot_robot_*`,
+- `ball_seen_percentage = 0`,
+- y colapso de `ball_x` al robot cuando se apagaba la corrección sintética
+  del backend Python.
+
+Fix aplicado en `SabanaHerons2026`:
+
+- en el export de `SkillBehaviorControl` hacia `RLSharedState`,
+- si la pose estimada de B-Human se desvía demasiado de `simRobotX/Y`, se
+  exporta la pose real del simulador;
+- si la pelota está stale, se exporta la pelota del último reset/dynamic world
+  RL y se recalculan sus coordenadas relativas.
+- además, el modo quedó explícito vía `PYBH_RL_OBS_MODE`:
+  - `corrected` (default): aplica estas correcciones,
+  - `estimated`: exporta la observación estimada de B-Human sin corregir.
+
+Resultado de las sondas cortas:
+
+- en `simrobot_visible`, `pose_err_mm` bajó de ~`2800` a `0`,
+- en `simrobot` embebido, `pose_err_mm` quedó en el orden de `0-2 mm`,
+- y `synthetic_pose_observation` / `synthetic_ball_observation` quedaron en `0`
+  en los probes dirigidos del backend.
+
+### 4. Impacto sobre entrenamiento
+
+Este fix mejora el wire, pero no es neutral para aprendizaje.
+
+Con esta exportación:
+
+- RL deja de ver la estimación rota/stale de B-Human,
+- y pasa a ver una observación corregida que está más cerca del estado real del
+  simulador.
+
+Eso significa:
+
+- es bueno para depurar bridge, reward y reset,
+- pero reduce realismo perceptual si se usa como observación final de training.
+
+Interpretación operativa:
+
+- para smoke tests, validación del wire y depuración Stage 0, el fix es útil;
+- para entrenamiento orientado a transferencia, no conviene olvidar que esta
+  observación ya no representa puramente “lo que cree B-Human”.
+
+Recomendación:
+
+- tratar este modo como `oracle/corrected observation`,
+- y más adelante separar explícitamente:
+  - observación estimada de B-Human,
+  - observación real del simulador,
+  - observación exportada a RL.
+- la telemetría ahora también expone:
+  - `obs_export_mode`,
+  - `corrected_exported_robot_pose`,
+  - `corrected_exported_ball`,
+  - y las variantes `estimated_*` de pose/ball para auditoría.
+
+### 5. Qué falta validar del wire
+
+Después del fix, todavía no conviene dar el wire por cerrado. Falta validar:
+
+- smoke y sanity completos de `train.py` en un entorno con `torch`, `skrl`,
+  `pettingzoo` y `matplotlib`, para confirmar que `synthetic_*_rate` cae
+  también en el pipeline completo y no solo en probes directos;
+- que `pose_alignment_warning_rate`, `ball_stale_rate` y
+  `ball_collapsed_rate` se mantengan bajos en episodios largos, no solo en
+  resets cortos;
+- que resets y dynamic world updates de Stage 2-3 no vuelvan a desalinear pose
+  u observación;
+- que `collision` siga siendo razonable después del cambio, porque parte de la
+  observación consumida por reward ahora está más cerca de ground truth;
+- que el comportamiento visible del robot siga siendo coherente con las actions
+  RL en `simrobot_visible`, no solo con `obs_ready=1`;
+- decidir si el export corregido debe quedar permanente para train o quedar
+  detrás de un flag/configuración explícita.
+
+### 6. Revalidación posterior del fix
+
+Después de cerrar las inconsistencias internas del export corregido, se
+revalidó lo siguiente:
+
+- `SkillBehaviorControl` ahora recompone `ballRel*` y `ballEndRel*` con la pose
+  realmente exportada cuando se corrige la pose del robot;
+- `shotQualityNoObstacles`, `shotOpeningWithObstacles` y `canScoreNow` ahora se
+  calculan con la pelota efectivamente exportada a RL, no con la pelota
+  estimada stale;
+- `eval_summary.csv` volvió a quedar alineado con la auditoría del wire y ahora
+  agrega:
+  - `pose_alignment_warning_rate`,
+  - `ball_stale_rate`,
+  - `ball_collapsed_rate`,
+  - `corrected_exported_robot_pose_rate`,
+  - `corrected_exported_ball_rate`.
+
+Validación ejecutada:
+
+- probe directo `simrobot` en perfil `2d`, fuera del sandbox:
+  - `corrected`: `obs_ready=1`, `pose_alignment_error_mm=0`, error geométrico
+    de `ballRel` = `0`, `corrected_exported_ball=1`;
+  - `estimated`: `obs_ready=1`, `pose_alignment_error_mm≈2843.7 mm`,
+    `corrected_exported_* = 0`.
+- sanity corta de `train.py` en perfil `2d`, fuera del sandbox:
+  - `corrected`: `reward_mean≈-0.333`, `stability≈0.407`,
+    `pose_alignment_warning_rate=0`, `ball_stale_rate=0`,
+    `ball_collapsed_rate=0`, `corrected_exported_ball_rate=1.0`;
+  - `estimated`: `reward_mean≈-0.594`, `stability≈0.325`,
+    `pose_alignment_warning_rate≈0.01875`, `ball_stale_rate=1.0`,
+    `ball_collapsed_rate≈0.98125`, `corrected_exported_* = 0`.
+
+Limitación actual del entorno:
+
+- el perfil `3d` embebido no quedó revalidado en este entorno porque el core
+  nativo cae en inicialización gráfica:
+  - con sandbox normal, aborta por `DISPLAY`/`xcb` o por creación de sockets;
+  - fuera del sandbox, el core `3d` termina en `SIGSEGV` dentro del stack
+    Mesa/OpenGL al cargar la escena.
+- esa caída ocurre en `simrobot_load_scene()` antes del reset RL, así que no
+  invalida la corrección del wire observacional; sí deja pendiente la
+  revalidación específica del runtime gráfico `3d`.
+
+Revalidación adicional ejecutada el 14 de mayo de 2026:
+
+- se reprodujo explícitamente la ruta embebida "vieja" para `simrobot 3d`,
+  desactivando el preflight y dejando solo el bootstrap histórico:
+  - con `DISPLAY`, forzar `QT_QPA_PLATFORM=xcb`;
+  - sin `DISPLAY`, no tocar la plataforma y dejar que el host use su default
+    (`offscreen` en `SimRobotHost.cpp`).
+- resultado:
+  - `legacy-display-xcb`: abort `134`, `qt.qpa.xcb: could not connect to
+    display :0`, `Could not load the Qt platform plugin "xcb"`;
+  - `legacy-host-default`: `SIGSEGV` `139` al cargar la escena.
+
+Conclusión actualizada:
+
+- el camino legacy tampoco levanta `simrobot 3d` embebido en esta máquina;
+- por tanto, el problema no fue introducido por el preflight nuevo de
+  `pybh_backend.py`;
+- el bloqueo sigue estando en el runtime gráfico/nativo del host
+  (`Qt`/`Mesa`/`OpenGL`), no en el wire Python del bridge.
 
 ## Cómo corre ahora el smoke
 

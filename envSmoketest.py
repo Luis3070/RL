@@ -10,8 +10,10 @@ SMOKE_RUN = replace(
     mode="smoke",
     telemetry_tag="ide_smoke",
     smoke_steps=8,
+    obs_mode="corrected",
     stage_id=0,
     max_stage_id=0,
+    abort_on_wire_fail=True,
 )
 
 

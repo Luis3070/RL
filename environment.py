@@ -43,6 +43,7 @@ class RealSimRobotEnv(ParallelEnv):
         self.agents = list(self.possible_agents)
         self.backend = PyBHBackend(
             mode=self.cfg.backend.mode,
+            obs_mode=self.cfg.backend.obs_mode,
             frames_per_step=self.cfg.backend.frames_per_step,
             obs_timeout_ms=self.cfg.backend.obs_timeout_ms,
             simrobot_profile=self.cfg.backend.simrobot_profile,
@@ -50,6 +51,8 @@ class RealSimRobotEnv(ParallelEnv):
             simrobot_robot_name=self.cfg.backend.simrobot_robot_name,
             simrobot_theta_offset=self.cfg.backend.simrobot_theta_offset,
             simrobot_launch=self.cfg.backend.simrobot_launch,
+            embedded_qt_platform=self.cfg.backend.embedded_qt_platform,
+            embedded_3d_preflight=self.cfg.backend.embedded_3d_preflight,
             simrobot_bin=self.cfg.backend.simrobot_bin,
         )
         self.observation_spaces = {
@@ -292,6 +295,13 @@ class RealSimRobotEnv(ParallelEnv):
             "post_takeover_progress_sum": 0.0,
             "synthetic_pose_steps": 0,
             "synthetic_ball_steps": 0,
+            "obs_mode_estimated_steps": 0,
+            "obs_mode_corrected_steps": 0,
+            "pose_alignment_warning_steps": 0,
+            "ball_stale_steps": 0,
+            "ball_collapsed_steps": 0,
+            "corrected_exported_robot_pose_steps": 0,
+            "corrected_exported_ball_steps": 0,
         }
 
     def _update_episode_tracker(
@@ -319,6 +329,13 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["dynamic_updates"] += 1
         tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
         tracker["synthetic_ball_steps"] += int(bool(step_ctx.obs.synthetic_ball_observation))
+        tracker["obs_mode_estimated_steps"] += int(int(step_ctx.obs.obs_export_mode) == 0)
+        tracker["obs_mode_corrected_steps"] += int(int(step_ctx.obs.obs_export_mode) == 1)
+        tracker["pose_alignment_warning_steps"] += int(bool(step_ctx.obs.pose_alignment_warning))
+        tracker["ball_stale_steps"] += int(bool(step_ctx.obs.ball_observation_stale))
+        tracker["ball_collapsed_steps"] += int(bool(step_ctx.obs.ball_observation_collapsed))
+        tracker["corrected_exported_robot_pose_steps"] += int(bool(step_ctx.obs.corrected_exported_robot_pose))
+        tracker["corrected_exported_ball_steps"] += int(bool(step_ctx.obs.corrected_exported_ball))
 
         if step_ctx.skill_name == "walk":
             tracker["walk_steps"] += 1
@@ -398,6 +415,13 @@ class RealSimRobotEnv(ParallelEnv):
             "takeover_hold_max": float(tracker["takeover_hold_max"]),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
+            "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
+            "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
+            "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
+            "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
+            "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
+            "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
         }
 
     def _finalize_episode_metrics(self) -> Dict[str, float]:
@@ -478,6 +502,13 @@ class RealSimRobotEnv(ParallelEnv):
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
+            "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
+            "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
+            "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
+            "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
+            "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
+            "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
             "reward_terms_sum": dict(tracker["reward_terms_sum"]),
             "reward_weighted_terms_sum": dict(tracker["reward_weighted_terms_sum"]),
             "skill_counts": dict(tracker["skill_counts"]),
@@ -500,14 +531,29 @@ class RealSimRobotEnv(ParallelEnv):
             "state": self.get_global_state(),
             "obs_feature_names": OBS_FEATURE_NAMES,
             "backend_mode": self.cfg.backend.mode,
+            "configured_obs_mode": self.cfg.backend.obs_mode,
             "stage_id": self.stage_spec.stage_id,
             "stage_name": self.stage_spec.name,
             "active_skill_mask": skill_mask(self.stage_spec.active_skill_names),
             "stage_skill_mask": stage_skill_mask(self.stage_spec.stage_id),
             "bridge_obs_ready": obs.obs_ready,
             "bridge_frame": obs.frame,
+            "obs_export_mode": int(obs.obs_export_mode),
+            "corrected_exported_robot_pose": bool(obs.corrected_exported_robot_pose),
+            "corrected_exported_ball": bool(obs.corrected_exported_ball),
             "synthetic_pose_observation": bool(obs.synthetic_pose_observation),
             "synthetic_ball_observation": bool(obs.synthetic_ball_observation),
+            "synthetic_pose_reason": obs.synthetic_pose_reason,
+            "synthetic_ball_reason": obs.synthetic_ball_reason,
+            "pose_alignment_error_mm": float(obs.pose_alignment_error_mm),
+            "pose_alignment_warning": bool(obs.pose_alignment_warning),
+            "ball_observation_stale": bool(obs.ball_observation_stale),
+            "ball_observation_collapsed": bool(obs.ball_observation_collapsed),
+            "estimated_robot_x": float(obs.estimated_robot_x),
+            "estimated_robot_y": float(obs.estimated_robot_y),
+            "estimated_robot_theta": float(obs.estimated_robot_theta),
+            "estimated_ball_x": float(obs.estimated_ball_x),
+            "estimated_ball_y": float(obs.estimated_ball_y),
             "raw_obs": raw_obs,
             "policy_skill_name": None if policy_action is None else policy_action.skill_name,
             "executed_skill_name": None if executed_action is None else executed_action.skill_name,

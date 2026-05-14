@@ -4,6 +4,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -28,11 +29,14 @@ MAX_WORLD_PLAYERS_PER_TEAM = 20
 WORLD_STATUS_POLL_INTERVAL_S = 0.01
 DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
 SETTINGS_CFG_PATH = BHUMAN_DIR / "Config/settings.cfg"
+SUPPORTED_OBS_EXPORT_MODES = {"estimated", "corrected"}
+EMBEDDED_QT_PLATFORM_OVERRIDE_ENV = "PYBH_SIMROBOT_QT_PLATFORM"
 
-# Steps post-reset during which synthetic ball injection is allowed.
-# After this window the world_spec ball position diverges from the actual ball,
-# so using it would corrupt the observation with stale data.
-SYNTHETIC_OBS_WARMUP_STEPS = 8
+# Synthetic corrections are only allowed during a short post-reset warmup.
+# After that point the training stack should consume what the wire is actually
+# delivering instead of silently masking bridge/runtime issues with ground truth.
+SYNTHETIC_POSE_WARMUP_STEPS = 6
+SYNTHETIC_BALL_WARMUP_STEPS = 12
 
 
 def _normalize_angle(theta: float) -> float:
@@ -210,6 +214,14 @@ class BackendObservation:
     simrobot_robot_theta: float
     frame: int
     obs_ready: bool
+    estimated_ball_x: float = 0.0
+    estimated_ball_y: float = 0.0
+    estimated_robot_x: float = 0.0
+    estimated_robot_y: float = 0.0
+    estimated_robot_theta: float = 0.0
+    obs_export_mode: int = 0
+    corrected_exported_robot_pose: bool = False
+    corrected_exported_ball: bool = False
     requested_skill: str = ""
     requested_pass_target: int = -1
     ball_rel_x: float = 0.0
@@ -254,8 +266,14 @@ class BackendObservation:
     motion_speed_x: float = 0.0
     motion_speed_y: float = 0.0
     motion_speed_rot: float = 0.0
+    pose_alignment_error_mm: float = 0.0
+    pose_alignment_warning: bool = False
+    ball_observation_stale: bool = False
+    ball_observation_collapsed: bool = False
     synthetic_pose_observation: bool = False
     synthetic_ball_observation: bool = False
+    synthetic_pose_reason: str = ""
+    synthetic_ball_reason: str = ""
 
     @classmethod
     def from_payload(cls, payload: dict) -> "BackendObservation":
@@ -277,8 +295,16 @@ class BackendObservation:
             simrobot_robot_x=simrobot_robot_x,
             simrobot_robot_y=simrobot_robot_y,
             simrobot_robot_theta=simrobot_robot_theta,
+            estimated_ball_x=float(payload.get("estimated_ball_x", ball_x)),
+            estimated_ball_y=float(payload.get("estimated_ball_y", ball_y)),
+            estimated_robot_x=float(payload.get("estimated_robot_x", robot_x)),
+            estimated_robot_y=float(payload.get("estimated_robot_y", robot_y)),
+            estimated_robot_theta=float(payload.get("estimated_robot_theta", robot_theta)),
             frame=int(payload.get("frame", 0)),
             obs_ready=bool(payload.get("obs_ready", False)),
+            obs_export_mode=int(payload.get("obs_export_mode", 0)),
+            corrected_exported_robot_pose=bool(payload.get("corrected_exported_robot_pose", False)),
+            corrected_exported_ball=bool(payload.get("corrected_exported_ball", False)),
             requested_skill=str(payload.get("requested_skill", "")),
             requested_pass_target=int(payload.get("requested_pass_target", -1)),
             ball_rel_x=float(payload.get("ball_rel_x", fallback_rel_x)),
@@ -366,6 +392,7 @@ class PyBHBackend:
         self,
         *,
         mode: str = "simrobot",
+        obs_mode: str = "corrected",
         frames_per_step: int = 1,
         obs_timeout_ms: int = 1000,
         visible_request_timeout_ms: int | None = None,
@@ -376,11 +403,17 @@ class PyBHBackend:
         simrobot_robot_name: str | None = None,
         simrobot_theta_offset: float | None = None,
         simrobot_launch: bool = False,
+        embedded_qt_platform: str | None = None,
+        embedded_3d_preflight: bool = True,
         simrobot_bin: Path | None = None,
     ):
         if mode not in {"simrobot", "simrobot_visible"}:
             raise ValueError(f"Unsupported backend mode {mode!r}. Expected one of: simrobot, simrobot_visible")
+        if obs_mode not in SUPPORTED_OBS_EXPORT_MODES:
+            valid_modes = ", ".join(sorted(SUPPORTED_OBS_EXPORT_MODES))
+            raise ValueError(f"Unsupported obs_mode {obs_mode!r}. Expected one of: {valid_modes}")
         self.mode = mode
+        self.obs_mode = obs_mode
         self.frames_per_step = max(1, int(frames_per_step))
         self.obs_timeout_ms = int(obs_timeout_ms)
         self.visible_request_timeout_ms = (
@@ -406,10 +439,15 @@ class PyBHBackend:
         self._last_obs: Optional[BackendObservation] = None
         self._world_spec: Optional[WorldSpec] = None
         self._simrobot_launch = bool(simrobot_launch)
+        self._embedded_qt_platform = None if embedded_qt_platform is None else str(embedded_qt_platform)
+        self._embedded_3d_preflight = bool(embedded_3d_preflight)
         self._simrobot_bin = Path(simrobot_bin).resolve() if simrobot_bin is not None else None
         self._simrobot_process: subprocess.Popen[str] | None = None
         self._settings_backup_text: str | None = None
         self._qt_qpa_backup: str | None = None
+        self._qt_opengl_backup: str | None = None
+        self._libgl_software_backup: str | None = None
+        self._obs_mode_backup: str | None = None
         self._steps_since_reset: int = 0
 
     def _uses_embedded_simrobot(self) -> bool:
@@ -421,19 +459,192 @@ class PyBHBackend:
     def _prepare_embedded_qt_platform(self) -> None:
         if self.simrobot_scene.profile != "3d":
             return
-        if os.environ.get("QT_QPA_PLATFORM"):
-            return
-        if not os.environ.get("DISPLAY"):
-            return
-        self._qt_qpa_backup = None
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        label, selected_profile = self._select_embedded_qt_profile()
+        self._apply_embedded_3d_env_profile(selected_profile)
+        print(f"[embedded 3d preflight] selected_profile={label}", flush=True)
 
     def _restore_embedded_qt_platform(self) -> None:
         if self._qt_qpa_backup is not None:
             os.environ["QT_QPA_PLATFORM"] = self._qt_qpa_backup
             self._qt_qpa_backup = None
-        elif os.environ.get("QT_QPA_PLATFORM") == "xcb":
+        elif "QT_QPA_PLATFORM" in os.environ:
             os.environ.pop("QT_QPA_PLATFORM", None)
+
+        if self._qt_opengl_backup is not None:
+            os.environ["QT_OPENGL"] = self._qt_opengl_backup
+            self._qt_opengl_backup = None
+        elif "QT_OPENGL" in os.environ:
+            os.environ.pop("QT_OPENGL", None)
+
+        if self._libgl_software_backup is not None:
+            os.environ["LIBGL_ALWAYS_SOFTWARE"] = self._libgl_software_backup
+            self._libgl_software_backup = None
+        elif "LIBGL_ALWAYS_SOFTWARE" in os.environ:
+            os.environ.pop("LIBGL_ALWAYS_SOFTWARE", None)
+
+    def _apply_embedded_3d_env_profile(self, profile: Mapping[str, str | None]) -> None:
+        for env_name, backup_attr in (
+            ("QT_QPA_PLATFORM", "_qt_qpa_backup"),
+            ("QT_OPENGL", "_qt_opengl_backup"),
+            ("LIBGL_ALWAYS_SOFTWARE", "_libgl_software_backup"),
+        ):
+            if getattr(self, backup_attr) is None:
+                setattr(self, backup_attr, os.environ.get(env_name))
+            value = profile.get(env_name)
+            if value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = value
+
+    def _embedded_3d_env_profiles(self) -> list[tuple[str, dict[str, str | None]]]:
+        explicit_platform = self._embedded_qt_platform or os.environ.get(EMBEDDED_QT_PLATFORM_OVERRIDE_ENV) or os.environ.get("QT_QPA_PLATFORM")
+        explicit_qt_opengl = os.environ.get("QT_OPENGL")
+        explicit_libgl = os.environ.get("LIBGL_ALWAYS_SOFTWARE")
+
+        def profile(label: str, *, platform: str | None, qt_opengl: str | None = None, libgl_software: str | None = None) -> tuple[str, dict[str, str | None]]:
+            return (
+                label,
+                {
+                    "QT_QPA_PLATFORM": platform,
+                    "QT_OPENGL": qt_opengl,
+                    "LIBGL_ALWAYS_SOFTWARE": libgl_software,
+                },
+            )
+
+        if explicit_platform:
+            profiles = [
+                profile(
+                    f"platform={explicit_platform},opengl={explicit_qt_opengl or 'default'},libgl={explicit_libgl or 'default'}",
+                    platform=explicit_platform,
+                    qt_opengl=explicit_qt_opengl,
+                    libgl_software=explicit_libgl,
+                ),
+                profile(
+                    f"platform={explicit_platform},opengl=software,libgl=1",
+                    platform=explicit_platform,
+                    qt_opengl="software",
+                    libgl_software="1",
+                ),
+            ]
+        elif os.environ.get("DISPLAY"):
+            profiles = [
+                profile("platform=xcb,opengl=default", platform="xcb"),
+                profile("platform=xcb,opengl=software,libgl=1", platform="xcb", qt_opengl="software", libgl_software="1"),
+                profile("platform=offscreen,opengl=default", platform="offscreen"),
+                profile("platform=offscreen,opengl=software,libgl=1", platform="offscreen", qt_opengl="software", libgl_software="1"),
+                profile("platform=minimalegl,opengl=default", platform="minimalegl"),
+                profile("platform=eglfs,opengl=default", platform="eglfs"),
+                profile("platform=vnc,opengl=software,libgl=1", platform="vnc", qt_opengl="software", libgl_software="1"),
+                profile("platform=linuxfb,opengl=software,libgl=1", platform="linuxfb", qt_opengl="software", libgl_software="1"),
+                profile("platform=minimal,opengl=default", platform="minimal"),
+            ]
+        else:
+            profiles = [
+                profile("platform=offscreen,opengl=software,libgl=1", platform="offscreen", qt_opengl="software", libgl_software="1"),
+                profile("platform=offscreen,opengl=default", platform="offscreen"),
+                profile("platform=minimalegl,opengl=default", platform="minimalegl"),
+                profile("platform=eglfs,opengl=default", platform="eglfs"),
+                profile("platform=vnc,opengl=software,libgl=1", platform="vnc", qt_opengl="software", libgl_software="1"),
+                profile("platform=linuxfb,opengl=software,libgl=1", platform="linuxfb", qt_opengl="software", libgl_software="1"),
+                profile("platform=minimal,opengl=default", platform="minimal"),
+            ]
+
+        deduped: list[tuple[str, dict[str, str | None]]] = []
+        seen: set[tuple[tuple[str, str | None], ...]] = set()
+        for label, env_profile in profiles:
+            key = tuple(sorted(env_profile.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((label, env_profile))
+        return deduped
+
+    def _run_embedded_3d_preflight(self, env_profile: Mapping[str, str | None]) -> tuple[bool, str]:
+        env = os.environ.copy()
+        for key, value in env_profile.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        probe_code = (
+            "import os, sys\n"
+            f"os.chdir({str(BHUMAN_DIR)!r})\n"
+            "import pybh.controller as pybh\n"
+            "scene = sys.argv[1]\n"
+            "ok = pybh.simrobot_load_scene(scene)\n"
+            "err = pybh.simrobot_last_error() if not ok else ''\n"
+            "if ok:\n"
+            "    pybh.simrobot_unload_scene()\n"
+            "if err:\n"
+            "    print(err, file=sys.stderr)\n"
+            "raise SystemExit(0 if ok else 2)\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe_code, str(self.simrobot_scene.scene_path)],
+            cwd=BHUMAN_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=max(10, self.obs_timeout_ms // 50),
+        )
+        if completed.returncode == 0:
+            return True, ""
+
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        detail = stderr or stdout or f"returncode={completed.returncode}"
+        if completed.returncode < 0:
+            detail = f"signal={-completed.returncode} {detail}".strip()
+        return False, detail
+
+    def _select_embedded_qt_profile(self) -> tuple[str, Mapping[str, str | None]]:
+        explicit_platform = self._embedded_qt_platform or os.environ.get(EMBEDDED_QT_PLATFORM_OVERRIDE_ENV) or os.environ.get("QT_QPA_PLATFORM")
+        if not self._embedded_3d_preflight and not explicit_platform:
+            if os.environ.get("DISPLAY"):
+                return (
+                    "legacy-display-xcb",
+                    {
+                        "QT_QPA_PLATFORM": "xcb",
+                        "QT_OPENGL": None,
+                        "LIBGL_ALWAYS_SOFTWARE": None,
+                    },
+                )
+            return (
+                "legacy-host-default",
+                {
+                    "QT_QPA_PLATFORM": None,
+                    "QT_OPENGL": None,
+                    "LIBGL_ALWAYS_SOFTWARE": None,
+                },
+            )
+
+        profiles = self._embedded_3d_env_profiles()
+        if not self._embedded_3d_preflight:
+            return profiles[0]
+
+        failures: list[str] = []
+        for label, env_profile in profiles:
+            ok, detail = self._run_embedded_3d_preflight(env_profile)
+            if ok:
+                return label, env_profile
+            failures.append(f"{label}: {detail}")
+
+        raise RuntimeError(
+            "Embedded SimRobot 3D preflight failed for all QT platforms. "
+            + " | ".join(failures)
+        )
+
+    def _apply_obs_mode_override(self) -> None:
+        if self._obs_mode_backup is None:
+            self._obs_mode_backup = os.environ.get("PYBH_RL_OBS_MODE")
+        os.environ["PYBH_RL_OBS_MODE"] = self.obs_mode
+
+    def _restore_obs_mode_override(self) -> None:
+        if self._obs_mode_backup is None:
+            os.environ.pop("PYBH_RL_OBS_MODE", None)
+            return
+        os.environ["PYBH_RL_OBS_MODE"] = self._obs_mode_backup
+        self._obs_mode_backup = None
 
     def _apply_bridge_settings_override(self) -> None:
         if self._settings_backup_text is not None:
@@ -490,11 +701,13 @@ class PyBHBackend:
     def start(self) -> None:
         if self._started:
             return
+        self._apply_obs_mode_override()
         if self._uses_embedded_simrobot():
             self._qt_qpa_backup = os.environ.get("QT_QPA_PLATFORM")
             self._prepare_embedded_qt_platform()
             self._apply_bridge_settings_override()
             if not pybh.simrobot_load_scene(str(self.simrobot_scene.scene_path)):
+                self._restore_obs_mode_override()
                 self._restore_bridge_settings_override()
                 self._restore_embedded_qt_platform()
                 raise RuntimeError(f"simrobot_load_scene failed: {pybh.simrobot_last_error()}")
@@ -503,9 +716,11 @@ class PyBHBackend:
             if self._simrobot_launch:
                 self._apply_bridge_settings_override()
                 if self._simrobot_bin is None or not self._simrobot_bin.exists():
+                    self._restore_obs_mode_override()
                     self._restore_bridge_settings_override()
                     raise FileNotFoundError(f"SimRobot binary not found: {self._simrobot_bin}")
                 if not self.simrobot_scene.scene_path.exists():
+                    self._restore_obs_mode_override()
                     self._restore_bridge_settings_override()
                     raise FileNotFoundError(f"SimRobot scene not found: {self.simrobot_scene.scene_path}")
                 self._simrobot_process = subprocess.Popen(
@@ -520,9 +735,11 @@ class PyBHBackend:
                     self._simrobot_process.terminate()
                     self._simrobot_process.wait(timeout=5)
                 self._simrobot_process = None
+                self._restore_obs_mode_override()
                 self._restore_bridge_settings_override()
                 raise
         else:
+            self._restore_obs_mode_override()
             raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
         self._started = True
 
@@ -539,6 +756,7 @@ class PyBHBackend:
                 self._simrobot_process.wait(timeout=5)
             self._simrobot_process = None
             self._restore_bridge_settings_override()
+        self._restore_obs_mode_override()
         self._started = False
         self._last_obs = None
         self._world_spec = None
@@ -896,9 +1114,13 @@ class PyBHBackend:
         updated = obs
         synthetic_pose = False
         synthetic_ball = False
+        synthetic_pose_reason = ""
+        synthetic_ball_reason = ""
 
         pose_error = math.hypot(obs.robot_x - obs.simrobot_robot_x, obs.robot_y - obs.simrobot_robot_y)
-        if self._uses_embedded_simrobot() and pose_error > 250.0:
+        pose_error_large = pose_error > 250.0
+        pose_synth_allowed = self._steps_since_reset < SYNTHETIC_POSE_WARMUP_STEPS
+        if self._uses_embedded_simrobot() and pose_error_large and pose_synth_allowed:
             field_theta = _normalize_angle(float(obs.simrobot_robot_theta) - float(self.simrobot_scene.theta_offset))
             updated = replace(
                 updated,
@@ -907,15 +1129,18 @@ class PyBHBackend:
                 robot_theta=field_theta,
             )
             synthetic_pose = True
+            synthetic_pose_reason = "warmup_pose_mismatch"
 
+        ball_stale = False
+        collapsed_ball = False
         if self._world_spec is not None:
             ball_stale = (
                 float(updated.ball_seen_percentage) <= 0.0
                 and float(updated.time_since_ball_seen) >= 1000.0
-                and self._steps_since_reset < SYNTHETIC_OBS_WARMUP_STEPS
             )
             collapsed_ball = math.hypot(updated.ball_x - updated.robot_x, updated.ball_y - updated.robot_y) <= 1.0
-            if ball_stale or collapsed_ball:
+            ball_synth_allowed = self._steps_since_reset < SYNTHETIC_BALL_WARMUP_STEPS
+            if ball_synth_allowed and (ball_stale or collapsed_ball):
                 truth_ball_x = float(self._world_spec.ball_x)
                 truth_ball_y = float(self._world_spec.ball_y)
                 rel_x, rel_y = _field_to_robot(
@@ -941,6 +1166,7 @@ class PyBHBackend:
                     ball_consistent_with_game_state=True,
                 )
                 synthetic_ball = True
+                synthetic_ball_reason = "warmup_ball_stale" if ball_stale else "warmup_ball_collapsed"
             elif synthetic_pose:
                 rel_x, rel_y = _field_to_robot(
                     float(updated.robot_x),
@@ -957,10 +1183,14 @@ class PyBHBackend:
                     ball_end_rel_y=float(rel_y),
                 )
 
-        if synthetic_pose or synthetic_ball:
-            updated = replace(
-                updated,
-                synthetic_pose_observation=synthetic_pose,
-                synthetic_ball_observation=synthetic_ball,
-            )
-        return updated
+        return replace(
+            updated,
+            pose_alignment_error_mm=float(pose_error),
+            pose_alignment_warning=bool(pose_error_large),
+            ball_observation_stale=bool(ball_stale),
+            ball_observation_collapsed=bool(collapsed_ball),
+            synthetic_pose_observation=synthetic_pose,
+            synthetic_ball_observation=synthetic_ball,
+            synthetic_pose_reason=synthetic_pose_reason,
+            synthetic_ball_reason=synthetic_ball_reason,
+        )

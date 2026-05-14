@@ -86,6 +86,7 @@ ACTION = ActionConfig()
 @dataclass(frozen=True)
 class BackendConfig:
     mode: str = "simrobot"
+    obs_mode: str = "corrected"
     frames_per_step: int = 3
     obs_timeout_ms: int = 1000
     simrobot_profile: str = "3d"
@@ -93,6 +94,8 @@ class BackendConfig:
     simrobot_robot_name: str | None = None
     simrobot_theta_offset: float | None = None
     simrobot_launch: bool = False
+    embedded_qt_platform: str | None = None
+    embedded_3d_preflight: bool = True
     simrobot_bin: Path = SIMROBOT_BIN
 
 
@@ -126,6 +129,19 @@ class EnvConfig:
 
 
 @dataclass(frozen=True)
+class WireAuditConfig:
+    min_expected_obs_mode_rate: float = 0.99
+    max_synthetic_pose_rate: float = 0.25
+    max_synthetic_ball_rate: float = 0.40
+    max_pose_alignment_warning_rate: float = 0.10
+    max_ball_stale_rate: float = 0.10
+    max_ball_collapsed_rate: float = 0.10
+    max_estimated_mode_corrected_pose_rate: float = 0.01
+    max_estimated_mode_corrected_ball_rate: float = 0.01
+    max_collision_rate_warning: float = 0.25
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     seed: int = 42
     smoke_steps: int = 32
@@ -149,6 +165,7 @@ class TrainConfig:
     max_stage_id: int = 3
     auto_promote: bool = True
     experiment_name: str = "pybh_mappo_takeover_ppo"
+    wire_audit: WireAuditConfig = field(default_factory=WireAuditConfig)
 
 
 ENV = EnvConfig()
