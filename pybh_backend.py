@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from config import (
     BackendConfig,
     BHUMAN_DIR,
     PLAYER_NUMBER,
+    TEAM_NUMBER,
     resolve_simrobot_scene_config,
 )
 
@@ -25,10 +27,34 @@ import pybh.controller as pybh
 MAX_WORLD_PLAYERS_PER_TEAM = 20
 WORLD_STATUS_POLL_INTERVAL_S = 0.01
 DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
+SETTINGS_CFG_PATH = BHUMAN_DIR / "Config/settings.cfg"
 
 
 def _normalize_angle(theta: float) -> float:
     return math.atan2(math.sin(theta), math.cos(theta))
+
+
+def _read_bridge_settings(settings_path: Path = SETTINGS_CFG_PATH) -> dict[str, int] | None:
+    if not settings_path.exists():
+        return None
+
+    text = settings_path.read_text(encoding="utf-8", errors="ignore")
+    result: dict[str, int] = {}
+    for key in ("teamNumber", "playerNumber", "magicNumber"):
+        match = re.search(rf"{key}\s*=\s*(-?\d+)\s*;", text)
+        if match:
+            result[key] = int(match.group(1))
+    return result
+
+
+def _rewrite_settings_values(text: str, replacements: Mapping[str, int]) -> str:
+    updated = text
+    for key, value in replacements.items():
+        pattern = rf"({key}\s*=\s*)(-?\d+)(\s*;)"
+        updated, count = re.subn(pattern, rf"\g<1>{int(value)}\g<3>", updated, count=1)
+        if count == 0:
+            raise RuntimeError(f"Could not find {key} in {SETTINGS_CFG_PATH}")
+    return updated
 
 
 def _field_to_robot(robot_x: float, robot_y: float, robot_theta: float, target_x: float, target_y: float) -> tuple[float, float]:
@@ -201,6 +227,28 @@ class BackendObservation:
     nearest_teammate_front_dist: float = 0.0
     nearest_opponent_front_dist: float = 0.0
     nearest_uncertain_front_dist: float = 0.0
+    obstacle_count: int = 0
+    obstacle_teammate_count: int = 0
+    obstacle_opponent_count: int = 0
+    obstacle_uncertain_count: int = 0
+    obstacle_front_count: int = 0
+    nearest_obstacle_dist: float = 0.0
+    nearest_obstacle_angle: float = 0.0
+    nearest_front_obstacle_dist: float = 0.0
+    nearest_opponent_angle: float = 0.0
+    obstacle_arm_contact: bool = False
+    obstacle_foot_contact: bool = False
+    zweikampf_active: bool = False
+    zweikampf_call_count: int = 0
+    motion_obstacle_path_count: int = 0
+    walk_to_pose_path_count: int = 0
+    libwalk_active_obstacle_count: int = 0
+    libwalk_disable_obstacle_avoidance: bool = False
+    motion_engine_ground_contact: bool = False
+    motion_engine_fall_state: int = -1
+    motion_speed_x: float = 0.0
+    motion_speed_y: float = 0.0
+    motion_speed_rot: float = 0.0
 
     @classmethod
     def from_payload(cls, payload: dict) -> "BackendObservation":
@@ -246,6 +294,28 @@ class BackendObservation:
             nearest_teammate_front_dist=float(payload.get("nearest_teammate_front_dist", 0.0)),
             nearest_opponent_front_dist=float(payload.get("nearest_opponent_front_dist", 0.0)),
             nearest_uncertain_front_dist=float(payload.get("nearest_uncertain_front_dist", 0.0)),
+            obstacle_count=int(payload.get("obstacle_count", 0)),
+            obstacle_teammate_count=int(payload.get("obstacle_teammate_count", 0)),
+            obstacle_opponent_count=int(payload.get("obstacle_opponent_count", 0)),
+            obstacle_uncertain_count=int(payload.get("obstacle_uncertain_count", 0)),
+            obstacle_front_count=int(payload.get("obstacle_front_count", 0)),
+            nearest_obstacle_dist=float(payload.get("nearest_obstacle_dist", 0.0)),
+            nearest_obstacle_angle=float(payload.get("nearest_obstacle_angle", 0.0)),
+            nearest_front_obstacle_dist=float(payload.get("nearest_front_obstacle_dist", 0.0)),
+            nearest_opponent_angle=float(payload.get("nearest_opponent_angle", 0.0)),
+            obstacle_arm_contact=bool(payload.get("obstacle_arm_contact", False)),
+            obstacle_foot_contact=bool(payload.get("obstacle_foot_contact", False)),
+            zweikampf_active=bool(payload.get("zweikampf_active", False)),
+            zweikampf_call_count=int(payload.get("zweikampf_call_count", 0)),
+            motion_obstacle_path_count=int(payload.get("motion_obstacle_path_count", 0)),
+            walk_to_pose_path_count=int(payload.get("walk_to_pose_path_count", 0)),
+            libwalk_active_obstacle_count=int(payload.get("libwalk_active_obstacle_count", 0)),
+            libwalk_disable_obstacle_avoidance=bool(payload.get("libwalk_disable_obstacle_avoidance", False)),
+            motion_engine_ground_contact=bool(payload.get("motion_engine_ground_contact", False)),
+            motion_engine_fall_state=int(payload.get("motion_engine_fall_state", -1)),
+            motion_speed_x=float(payload.get("motion_speed_x", 0.0)),
+            motion_speed_y=float(payload.get("motion_speed_y", 0.0)),
+            motion_speed_rot=float(payload.get("motion_speed_rot", 0.0)),
         )
 
 
@@ -331,6 +401,8 @@ class PyBHBackend:
         self._simrobot_launch = bool(simrobot_launch)
         self._simrobot_bin = Path(simrobot_bin).resolve() if simrobot_bin is not None else None
         self._simrobot_process: subprocess.Popen[str] | None = None
+        self._settings_backup_text: str | None = None
+        self._qt_qpa_backup: str | None = None
 
     def _uses_embedded_simrobot(self) -> bool:
         return self.mode == "simrobot"
@@ -338,23 +410,110 @@ class PyBHBackend:
     def _uses_visible_simrobot(self) -> bool:
         return self.mode == "simrobot_visible"
 
+    def _prepare_embedded_qt_platform(self) -> None:
+        if self.simrobot_scene.profile != "3d":
+            return
+        if os.environ.get("QT_QPA_PLATFORM"):
+            return
+        if not os.environ.get("DISPLAY"):
+            return
+        self._qt_qpa_backup = None
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+    def _restore_embedded_qt_platform(self) -> None:
+        if self._qt_qpa_backup is not None:
+            os.environ["QT_QPA_PLATFORM"] = self._qt_qpa_backup
+            self._qt_qpa_backup = None
+        elif os.environ.get("QT_QPA_PLATFORM") == "xcb":
+            os.environ.pop("QT_QPA_PLATFORM", None)
+
+    def _apply_bridge_settings_override(self) -> None:
+        if self._settings_backup_text is not None:
+            return
+        if not SETTINGS_CFG_PATH.exists():
+            raise FileNotFoundError(f"SimRobot settings file not found: {SETTINGS_CFG_PATH}")
+
+        original_text = SETTINGS_CFG_PATH.read_text(encoding="utf-8")
+        original_settings = _read_bridge_settings(SETTINGS_CFG_PATH) or {}
+        if (
+            original_settings.get("teamNumber") == TEAM_NUMBER
+            and original_settings.get("playerNumber") == PLAYER_NUMBER
+        ):
+            return
+
+        updated_text = _rewrite_settings_values(
+            original_text,
+            {
+                "teamNumber": TEAM_NUMBER,
+                "playerNumber": PLAYER_NUMBER,
+                "magicNumber": TEAM_NUMBER,
+            },
+        )
+        SETTINGS_CFG_PATH.write_text(updated_text, encoding="utf-8")
+        self._settings_backup_text = original_text
+
+    def _restore_bridge_settings_override(self) -> None:
+        if self._settings_backup_text is None:
+            return
+        SETTINGS_CFG_PATH.write_text(self._settings_backup_text, encoding="utf-8")
+        self._settings_backup_text = None
+
+    def _validate_bridge_settings(self) -> None:
+        settings = _read_bridge_settings()
+        if not settings:
+            return
+
+        actual_team = settings.get("teamNumber")
+        actual_player = settings.get("playerNumber")
+        problems: list[str] = []
+        if actual_team is not None and actual_team != TEAM_NUMBER:
+            problems.append(f"teamNumber={actual_team}")
+        if actual_player is not None and actual_player != PLAYER_NUMBER:
+            problems.append(f"playerNumber={actual_player}")
+
+        if problems:
+            raise RuntimeError(
+                "SimRobot bridge settings are misaligned with the RL shared-state bridge. "
+                f"Expected teamNumber={TEAM_NUMBER}, playerNumber={PLAYER_NUMBER} in {SETTINGS_CFG_PATH}, "
+                f"but found {', '.join(problems)}. "
+                "This leaves RLSharedState disconnected because LocalConsole listens on a different slot."
+            )
+
     def start(self) -> None:
         if self._started:
             return
         if self._uses_embedded_simrobot():
+            self._qt_qpa_backup = os.environ.get("QT_QPA_PLATFORM")
+            self._prepare_embedded_qt_platform()
+            self._apply_bridge_settings_override()
             if not pybh.simrobot_load_scene(str(self.simrobot_scene.scene_path)):
+                self._restore_bridge_settings_override()
+                self._restore_embedded_qt_platform()
                 raise RuntimeError(f"simrobot_load_scene failed: {pybh.simrobot_last_error()}")
+            self._validate_bridge_settings()
         elif self._uses_visible_simrobot():
             if self._simrobot_launch:
+                self._apply_bridge_settings_override()
                 if self._simrobot_bin is None or not self._simrobot_bin.exists():
+                    self._restore_bridge_settings_override()
                     raise FileNotFoundError(f"SimRobot binary not found: {self._simrobot_bin}")
                 if not self.simrobot_scene.scene_path.exists():
+                    self._restore_bridge_settings_override()
                     raise FileNotFoundError(f"SimRobot scene not found: {self.simrobot_scene.scene_path}")
                 self._simrobot_process = subprocess.Popen(
                     [str(self._simrobot_bin), str(self.simrobot_scene.scene_path)],
                     cwd=BHUMAN_DIR,
                     env=os.environ.copy(),
                 )
+            try:
+                self._validate_bridge_settings()
+            except Exception:
+                if self._simrobot_process is not None and self._simrobot_process.poll() is None:
+                    self._simrobot_process.terminate()
+                    self._simrobot_process.wait(timeout=5)
+                self._simrobot_process = None
+                self._restore_bridge_settings_override()
+                raise
         else:
             raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
         self._started = True
@@ -364,11 +523,14 @@ class PyBHBackend:
             return
         if self._uses_embedded_simrobot():
             pybh.simrobot_unload_scene()
+            self._restore_embedded_qt_platform()
+            self._restore_bridge_settings_override()
         elif self._uses_visible_simrobot():
             if self._simrobot_process is not None and self._simrobot_process.poll() is None:
                 self._simrobot_process.terminate()
                 self._simrobot_process.wait(timeout=5)
             self._simrobot_process = None
+            self._restore_bridge_settings_override()
         self._started = False
         self._last_obs = None
         self._world_spec = None

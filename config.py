@@ -86,9 +86,9 @@ ACTION = ActionConfig()
 @dataclass(frozen=True)
 class BackendConfig:
     mode: str = "simrobot"
-    frames_per_step: int = 1
+    frames_per_step: int = 3
     obs_timeout_ms: int = 1000
-    simrobot_profile: str = "2d"
+    simrobot_profile: str = "3d"
     simrobot_scene_path: Path | None = None
     simrobot_robot_name: str | None = None
     simrobot_theta_offset: float | None = None
@@ -117,8 +117,9 @@ def resolve_simrobot_scene_config(backend: BackendConfig) -> SimRobotSceneConfig
 class EnvConfig:
     seed: int = 42
     max_episode_steps: int = MAX_EPISODE_STEPS
+    stage_id: int = 0
     backend: BackendConfig = field(default_factory=BackendConfig)
-    active_skill_names: tuple[str, ...] = ACTION.train_skill_names
+    active_skill_names: tuple[str, ...] = ("walk", "dribble", "shoot")
     reward_goal_bonus: float = 5.0
     reward_progress_scale: float = 0.003
     reward_step_penalty: float = 0.01
@@ -128,12 +129,26 @@ class EnvConfig:
 class TrainConfig:
     seed: int = 42
     smoke_steps: int = 32
-    trainer_timesteps: int = 64
-    rollout_steps: int = 16
-    learning_epochs: int = 2
-    mini_batches: int = 2
+    trainer_timesteps: int = 20000
+    rollout_steps: int = 256
+    learning_epochs: int = 4
+    mini_batches: int = 4
+    learning_rate: float = 1e-4
+    discount_factor: float = 0.99
+    gae_lambda: float = 0.95
+    entropy_loss_scale: float = 0.001
+    value_loss_scale: float = 1.0
+    ratio_clip: float = 0.2
+    grad_norm_clip: float = 0.5
     hidden_size: int = 128
-    device: str = "cpu"
+    device: str = "cuda:0"
+    checkpoint_interval: int = 5000
+    eval_interval: int = 5000
+    eval_episodes: int = 4
+    initial_stage_id: int = 0
+    max_stage_id: int = 3
+    auto_promote: bool = True
+    experiment_name: str = "pybh_mappo_takeover_ppo"
 
 
 ENV = EnvConfig()
