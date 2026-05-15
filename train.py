@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import os
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,8 @@ from action import SkillType, StructuredSkillAction, action_to_numpy
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
+from parallel_environment import ParallelSlotSimRobotEnv
+from visible_parallel_runtime import VisibleParallelRuntime
 from wrapper import RealSimRobotEnvWrapper
 from wire_audit import build_wire_audit
 
@@ -31,9 +34,9 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 @dataclass(frozen=True)
 class ScriptRunConfig:
     mode: str = "train"
-    backend: str = "simrobot"
+    backend: str = "simrobot_visible"
     obs_mode: str = ENV.backend.obs_mode
-    simrobot_profile: str = "3d"
+    simrobot_profile: str = "3d_visible"
     simrobot_launch: bool = False
     embedded_qt_platform: str | None = ENV.backend.embedded_qt_platform
     embedded_3d_preflight: bool = ENV.backend.embedded_3d_preflight
@@ -55,6 +58,8 @@ class ScriptRunConfig:
     checkpoint_interval: int = 512
     eval_episodes: int = 2
     abort_on_wire_fail: bool = False
+    parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
+    visible_parallel_display_base: int = 410
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,36 @@ class TelemetryPaths:
 
 
 IDE_RUN = ScriptRunConfig()
+
+
+def _parse_player_numbers(value: str | None, fallback: tuple[int, ...]) -> tuple[int, ...]:
+    if not value:
+        return fallback
+    return tuple(int(part.strip()) for part in value.split(",") if part.strip())
+
+
+def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
+    cfg = base
+    if mode := os.environ.get("RL_RUN_MODE"):
+        cfg = replace(cfg, mode=mode)
+    if train_steps := os.environ.get("RL_TRAIN_STEPS"):
+        cfg = replace(cfg, train_steps=int(train_steps))
+    if stage_id := os.environ.get("RL_STAGE_ID"):
+        cfg = replace(cfg, stage_id=int(stage_id))
+    if max_stage_id := os.environ.get("RL_MAX_STAGE_ID"):
+        cfg = replace(cfg, max_stage_id=int(max_stage_id))
+    if telemetry_tag := os.environ.get("RL_TELEMETRY_TAG"):
+        cfg = replace(cfg, telemetry_tag=telemetry_tag)
+    cfg = replace(
+        cfg,
+        parallel_player_numbers=_parse_player_numbers(
+            os.environ.get("RL_PARALLEL_PLAYER_NUMBERS"),
+            cfg.parallel_player_numbers,
+        ),
+    )
+    if display_base := os.environ.get("RL_VISIBLE_DISPLAY_BASE"):
+        cfg = replace(cfg, visible_parallel_display_base=int(display_base))
+    return cfg
 
 
 def _pd():
@@ -168,7 +203,10 @@ def make_env_config(stage_id: int, backend_cfg: BackendConfig) -> EnvConfig:
 
 
 def build_env(env_cfg: EnvConfig):
-    env = RealSimRobotEnv(env_cfg=env_cfg)
+    if len(env_cfg.parallel_player_numbers) > 1:
+        env = ParallelSlotSimRobotEnv(env_cfg=env_cfg)
+    else:
+        env = RealSimRobotEnv(env_cfg=env_cfg)
     wrapped_env = wrap_env(env, wrapper="pettingzoo")
     if hasattr(wrapped_env, "_device"):
         wrapped_env._device = torch.device("cpu")
@@ -176,6 +214,18 @@ def build_env(env_cfg: EnvConfig):
         wrapped_env._seed = int(env_cfg.seed)
     eval_wrapper = RealSimRobotEnvWrapper(env)
     return env, wrapped_env, eval_wrapper
+
+
+def _visible_runtime_for_run(run_cfg: ScriptRunConfig, env_cfg: EnvConfig) -> VisibleParallelRuntime | None:
+    if env_cfg.backend.mode != "simrobot_visible" or len(env_cfg.parallel_player_numbers) <= 1:
+        return None
+    shm_name = os.environ.get("PYBH_RL_SHM_NAME", "/pybh_rl_shared_state_v3")
+    return VisibleParallelRuntime(
+        player_numbers=env_cfg.parallel_player_numbers,
+        shm_name=shm_name,
+        display_base=run_cfg.visible_parallel_display_base,
+        simrobot_bin=env_cfg.backend.simrobot_bin,
+    )
 
 
 def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[str, torch.nn.Module]]:
@@ -204,6 +254,8 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
         for uid in env.possible_agents
     }
 
+    empty_agent_kwargs = {uid: ({}, {}) for uid in env.possible_agents}
+    empty_preprocessor_kwargs = {uid: {} for uid in env.possible_agents}
     cfg = MAPPO_CFG(
         experiment={
             "directory": str(RUNS_DIR),
@@ -215,12 +267,12 @@ def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[s
         learning_epochs=train_cfg.learning_epochs,
         mini_batches=train_cfg.mini_batches,
         learning_rate=train_cfg.learning_rate,
-        learning_rate_scheduler_kwargs={agent_id: ({}, {})},
+        learning_rate_scheduler_kwargs=empty_agent_kwargs,
         discount_factor=train_cfg.discount_factor,
         gae_lambda=train_cfg.gae_lambda,
-        observation_preprocessor_kwargs={agent_id: {}},
-        state_preprocessor_kwargs={agent_id: {}},
-        value_preprocessor_kwargs={agent_id: {}},
+        observation_preprocessor_kwargs=empty_preprocessor_kwargs,
+        state_preprocessor_kwargs=empty_preprocessor_kwargs,
+        value_preprocessor_kwargs=empty_preprocessor_kwargs,
         entropy_loss_scale=train_cfg.entropy_loss_scale,
         value_loss_scale=train_cfg.value_loss_scale,
         grad_norm_clip=train_cfg.grad_norm_clip,
@@ -282,7 +334,8 @@ def _move_to_device(value: Any, device: str):
 
 
 def _agent_state_from_env(raw_env: RealSimRobotEnv, agent_id: str, device: str) -> Dict[str, torch.Tensor]:
-    return {agent_id: _tensorize_eval_state(raw_env.state(), device=device)}
+    state = _tensorize_eval_state(raw_env.state(), device=device)
+    return {agent: state for agent in raw_env.possible_agents}
 
 
 def _flatten_mapping(prefix: str, data: Mapping[str, Any]) -> Dict[str, Any]:
@@ -327,6 +380,7 @@ def _write_run_config(
         "backend": {
             "mode": backend_cfg.mode,
             "obs_mode": backend_cfg.obs_mode,
+            "player_number": backend_cfg.player_number,
             "frames_per_step": backend_cfg.frames_per_step,
             "obs_timeout_ms": backend_cfg.obs_timeout_ms,
             "simrobot_profile": backend_cfg.simrobot_profile,
@@ -338,6 +392,7 @@ def _write_run_config(
             "embedded_3d_preflight": backend_cfg.embedded_3d_preflight,
             "simrobot_bin": str(backend_cfg.simrobot_bin),
         },
+        "parallel_player_numbers": list(run_cfg.parallel_player_numbers),
         "wire_audit": asdict(train_cfg.wire_audit),
     }
     paths.run_config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -362,7 +417,7 @@ def _plot_smoke_steps(paths: TelemetryPaths) -> None:
     df = pd.read_csv(paths.smoke_steps_csv)
     if df.empty:
         return
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12))
     axes = axes.ravel()
 
     axes[0].plot(df["step"], df["reward"], marker="o")
@@ -394,6 +449,24 @@ def _plot_smoke_steps(paths: TelemetryPaths) -> None:
     axes[3].set_xlabel("Step")
     axes[3].legend()
 
+    if "ball_confidence_score" in df.columns:
+        axes[4].plot(df["step"], df["ball_confidence_score"], marker="o", color="tab:red")
+        axes[4].set_title("Ball Confidence")
+        axes[4].set_xlabel("Step")
+        axes[4].set_ylabel("score")
+    else:
+        axes[4].axis("off")
+
+    if "ball_trusted_mask" in df.columns:
+        axes[5].step(df["step"], df["ball_trusted_mask"], where="post", label="trusted")
+        if "ball_rescued_mask" in df.columns:
+            axes[5].step(df["step"], df["ball_rescued_mask"], where="post", label="rescued")
+        axes[5].set_title("Ball Masks")
+        axes[5].set_xlabel("Step")
+        axes[5].legend()
+    else:
+        axes[5].axis("off")
+
     fig.tight_layout()
     fig.savefig(paths.plots_dir / "smoke_overview.png", dpi=150)
     plt.close(fig)
@@ -415,6 +488,9 @@ def _plot_eval_metrics(paths: TelemetryPaths) -> None:
         "thrash_rate",
         "collision_rate",
         "stability_score",
+        "ball_trusted_rate",
+        "ball_rescued_rate",
+        "misleading_seen_synthetic_rate",
     ]
     available = [column for column in metric_columns if column in df.columns]
     if not available:
@@ -511,9 +587,10 @@ def sample_smoke_action(
         target_theta=float(action_tensor[3]),
         pass_target=int(round(float(action_tensor[4]))),
     )
-    if raw_env._last_backend_obs is None:
+    single_env = next(iter(raw_env._envs.values())) if isinstance(raw_env, ParallelSlotSimRobotEnv) else raw_env
+    if single_env._last_backend_obs is None:
         return proposed_action
-    projected_action, _ = raw_env.project_action(proposed_action, obs=raw_env._last_backend_obs)
+    projected_action, _ = single_env.project_action(proposed_action, obs=single_env._last_backend_obs)
     return projected_action
 
 
@@ -552,6 +629,25 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "ball_collapsed_rate",
         "corrected_exported_robot_pose_rate",
         "corrected_exported_ball_rate",
+        "ball_export_fresh_rate",
+        "ball_export_source_estimated_rate",
+        "ball_export_source_reset_rate",
+        "ball_export_source_dynamic_rate",
+        "natural_ball_seen_rate",
+        "natural_ball_consistent_rate",
+        "ball_visible_rate",
+        "ball_trusted_rate",
+        "ball_semi_trusted_rate",
+        "ball_degraded_rate",
+        "ball_rescued_rate",
+        "ball_lost_rate",
+        "misleading_seen_synthetic_rate",
+        "ball_confidence_score_mean",
+        "first_ball_seen_after_reset_ms",
+        "first_fresh_export_after_reset_ms",
+        "first_non_synthetic_ball_after_reset_ms",
+        "first_trusted_ball_after_reset_ms",
+        "first_natural_ball_seen_after_reset_ms",
         "episode_reward_mean",
         "episode_reward_total",
     ]
@@ -605,9 +701,9 @@ def evaluate_agent(
 
     def policy_fn(obs, infos):
         del infos
-        agent_id = eval_env.possible_agents[0]
         obs_tensor = _tensorize_eval_obs(obs, device=device)
-        state_tensor = {agent_id: _tensorize_eval_state(eval_env._env.state(), device=device)}
+        state_value = _tensorize_eval_state(eval_env._env.state(), device=device)
+        state_tensor = {agent_id: state_value for agent_id in eval_env.possible_agents}
         with torch.no_grad():
             actions, _ = agent.act(
                 observations=obs_tensor,
@@ -615,7 +711,6 @@ def evaluate_agent(
                 timestep=timestep,
                 timesteps=timesteps,
             )
-        action_tensor = actions[agent_id].detach().cpu().reshape(-1).numpy()
         return {
             agent_id: StructuredSkillAction(
                 skill_type=int(round(float(action_tensor[0]))),
@@ -623,6 +718,10 @@ def evaluate_agent(
                 target_y=float(action_tensor[2]),
                 target_theta=float(action_tensor[3]),
                 pass_target=int(round(float(action_tensor[4]))),
+            )
+            for agent_id, action_tensor in (
+                (uid, actions[uid].detach().cpu().reshape(-1).numpy())
+                for uid in eval_env.possible_agents
             )
         }
 
@@ -719,9 +818,26 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
         "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),
         "synthetic_pose_reason": step_info.get("synthetic_pose_reason"),
         "synthetic_ball_reason": step_info.get("synthetic_ball_reason"),
+        "ball_regime": step_info.get("ball_regime"),
+        "ball_confidence_score": float(step_info.get("ball_confidence_score", 0.0)),
+        "ball_visible_mask": int(bool(step_info.get("ball_visible_mask", False))),
+        "ball_trusted_mask": int(bool(step_info.get("ball_trusted_mask", False))),
+        "ball_semi_trusted_mask": int(bool(step_info.get("ball_semi_trusted_mask", False))),
+        "ball_degraded_mask": int(bool(step_info.get("ball_degraded_mask", False))),
+        "ball_rescued_mask": int(bool(step_info.get("ball_rescued_mask", False))),
+        "ball_lost_mask": int(bool(step_info.get("ball_lost_mask", False))),
         "obs_export_mode": int(step_info.get("obs_export_mode", 0)),
         "corrected_exported_robot_pose": int(bool(step_info.get("corrected_exported_robot_pose", False))),
         "corrected_exported_ball": int(bool(step_info.get("corrected_exported_ball", False))),
+        "ball_export_source": int(step_info.get("ball_export_source", 0)),
+        "ball_export_fresh": int(bool(step_info.get("ball_export_fresh", False))),
+        "natural_time_since_ball_seen": float(step_info.get("natural_time_since_ball_seen", 0.0)),
+        "natural_ball_seen_percentage": float(step_info.get("natural_ball_seen_percentage", 0.0)),
+        "natural_ball_consistent_with_game_state": int(bool(step_info.get("natural_ball_consistent_with_game_state", False))),
+        "reset_applied_frame": int(step_info.get("reset_applied_frame", 0)),
+        "dynamic_applied_frame": int(step_info.get("dynamic_applied_frame", 0)),
+        "reset_applied_age_ms": int(step_info.get("reset_applied_age_ms", -1)),
+        "dynamic_applied_age_ms": int(step_info.get("dynamic_applied_age_ms", -1)),
         "pose_alignment_error_mm": float(step_info.get("pose_alignment_error_mm", 0.0)),
         "pose_alignment_warning": int(bool(step_info.get("pose_alignment_warning", False))),
         "ball_observation_stale": int(bool(step_info.get("ball_observation_stale", False))),
@@ -861,15 +977,18 @@ def run_smoke(
     try:
         observations, infos = wrapped_env.reset()
         agent, _ = build_mappo(wrapped_env, device, TRAIN)
+        primary_agent = wrapped_env.possible_agents[0]
+        all_agents = wrapped_env.possible_agents
         for step in range(steps):
             action = sample_smoke_action(agent, raw_env, wrapped_env, observations, step, steps, device)
+            action_tensor = torch.as_tensor(action_to_numpy(action), device="cpu").view(1, -1)
             observations, rewards, terminated, truncated, infos = wrapped_env.step(
-                {"player_1": torch.as_tensor(action_to_numpy(action), device="cpu").view(1, -1)}
+                {a: action_tensor for a in all_agents}
             )
-            reward_value = float(rewards["player_1"].item())
+            reward_value = float(rewards[primary_agent].item())
             total_reward += reward_value
             completed_steps = step + 1
-            step_info = infos["player_1"]
+            step_info = infos[primary_agent]
             final_step_info = step_info
             if telemetry_paths is not None:
                 _append_csv_row(telemetry_paths.smoke_steps_csv, _build_smoke_step_row(step + 1, reward_value, step_info))
@@ -881,7 +1000,7 @@ def run_smoke(
                 f"frame={step_info['bridge_frame']}",
                 flush=True,
             )
-            if bool(terminated["player_1"].item()) or bool(truncated["player_1"].item()):
+            if bool(terminated[primary_agent].item()) or bool(truncated[primary_agent].item()):
                 print(f"[smoke] episode_metrics={step_info.get('episode_metrics', {})}", flush=True)
                 break
     finally:
@@ -1070,7 +1189,11 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         checkpoint_interval=run_cfg.checkpoint_interval,
         eval_episodes=run_cfg.eval_episodes,
     )
-    effective_env = replace(ENV, max_episode_steps=run_cfg.max_episode_steps)
+    effective_env = replace(
+        ENV,
+        max_episode_steps=run_cfg.max_episode_steps,
+        parallel_player_numbers=run_cfg.parallel_player_numbers,
+    )
     backend_cfg = replace(
         effective_env.backend,
         mode=run_cfg.backend,
@@ -1080,6 +1203,7 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         embedded_qt_platform=run_cfg.embedded_qt_platform,
         embedded_3d_preflight=run_cfg.embedded_3d_preflight,
     )
+    effective_env = replace(effective_env, backend=backend_cfg)
     telemetry_paths = _prepare_telemetry_paths(run_cfg) if run_cfg.save_telemetry else None
     if telemetry_paths is not None:
         _write_run_config(telemetry_paths, run_cfg, backend_cfg, effective_train)
@@ -1099,6 +1223,9 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
     globals()["TRAIN"] = effective_train
     globals()["ENV"] = effective_env
     try:
+        runtime = _visible_runtime_for_run(run_cfg, effective_env)
+        if runtime is not None:
+            runtime.start()
         if run_cfg.mode == "smoke":
             run_smoke(
                 run_cfg.smoke_steps,
@@ -1131,9 +1258,11 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 abort_on_wire_fail=run_cfg.abort_on_wire_fail,
             )
     finally:
+        if "runtime" in locals() and runtime is not None:
+            runtime.close()
         globals()["TRAIN"] = original_train
         globals()["ENV"] = original_env
 
 
 if __name__ == "__main__":
-    main()
+    main(_run_cfg_from_env())

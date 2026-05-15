@@ -57,6 +57,46 @@ def build_wire_audit(metrics: Mapping[str, object], *, backend_cfg: BackendConfi
                 f"{audit_cfg.max_estimated_mode_corrected_ball_rate:.3f}"
             )
 
+    if backend_cfg.mode == "simrobot_visible":
+        ball_visible_rate = _coerce_rate(metrics, "ball_visible_rate")
+        ball_trusted_rate = _coerce_rate(metrics, "ball_trusted_rate")
+        ball_rescued_rate = _coerce_rate(metrics, "ball_rescued_rate")
+        misleading_seen_synthetic_rate = _coerce_rate(metrics, "misleading_seen_synthetic_rate")
+        ball_confidence_score_mean = _coerce_rate(metrics, "ball_confidence_score_mean")
+
+        if ball_visible_rate < audit_cfg.min_visible_ball_visible_rate:
+            failures.append(
+                f"ball_visible_rate={ball_visible_rate:.3f} < {audit_cfg.min_visible_ball_visible_rate:.3f}"
+            )
+        if ball_rescued_rate > audit_cfg.max_visible_ball_rescued_rate:
+            failures.append(
+                f"ball_rescued_rate={ball_rescued_rate:.3f} > {audit_cfg.max_visible_ball_rescued_rate:.3f}"
+            )
+        if misleading_seen_synthetic_rate > audit_cfg.max_visible_misleading_seen_synthetic_rate:
+            failures.append(
+                "misleading_seen_synthetic_rate="
+                f"{misleading_seen_synthetic_rate:.3f} > {audit_cfg.max_visible_misleading_seen_synthetic_rate:.3f}"
+            )
+
+        if ball_trusted_rate < audit_cfg.min_visible_ball_trusted_rate_warning:
+            warnings.append(
+                f"ball_trusted_rate={ball_trusted_rate:.3f} < {audit_cfg.min_visible_ball_trusted_rate_warning:.3f}"
+            )
+        if ball_rescued_rate > audit_cfg.max_visible_ball_rescued_rate_warning:
+            warnings.append(
+                f"ball_rescued_rate={ball_rescued_rate:.3f} > {audit_cfg.max_visible_ball_rescued_rate_warning:.3f}"
+            )
+        if misleading_seen_synthetic_rate > audit_cfg.max_visible_misleading_seen_synthetic_rate_warning:
+            warnings.append(
+                "misleading_seen_synthetic_rate="
+                f"{misleading_seen_synthetic_rate:.3f} > {audit_cfg.max_visible_misleading_seen_synthetic_rate_warning:.3f}"
+            )
+        if ball_confidence_score_mean < audit_cfg.min_visible_ball_confidence_score_mean_warning:
+            warnings.append(
+                "ball_confidence_score_mean="
+                f"{ball_confidence_score_mean:.3f} < {audit_cfg.min_visible_ball_confidence_score_mean_warning:.3f}"
+            )
+
     collision_rate = _coerce_rate(metrics, "collision_rate")
     if collision_rate <= 0.0:
         collision_rate = _coerce_rate(metrics, "collision_step_rate")

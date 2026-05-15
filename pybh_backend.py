@@ -22,6 +22,10 @@ from config import (
     resolve_simrobot_scene_config,
 )
 
+PYBH_MAKE_PYTHON = BHUMAN_DIR / "Make/Python"
+if PYBH_MAKE_PYTHON.exists() and str(PYBH_MAKE_PYTHON) not in sys.path:
+    sys.path.insert(0, str(PYBH_MAKE_PYTHON))
+
 os.chdir(BHUMAN_DIR)
 import pybh.controller as pybh
 
@@ -31,6 +35,9 @@ DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
 SETTINGS_CFG_PATH = BHUMAN_DIR / "Config/settings.cfg"
 SUPPORTED_OBS_EXPORT_MODES = {"estimated", "corrected"}
 EMBEDDED_QT_PLATFORM_OVERRIDE_ENV = "PYBH_SIMROBOT_QT_PLATFORM"
+# Shared memory name must match RLSharedState.cpp shmName (leading slash = POSIX name,
+# file lives at /dev/shm/<name without slash>).
+_RL_SHM_FILE = Path("/dev/shm/pybh_rl_shared_state_v3")
 
 # Synthetic corrections are only allowed during a short post-reset warmup.
 # After that point the training stack should consume what the wire is actually
@@ -214,6 +221,8 @@ class BackendObservation:
     simrobot_robot_theta: float
     frame: int
     obs_ready: bool
+    reset_applied_frame: int = 0
+    dynamic_applied_frame: int = 0
     estimated_ball_x: float = 0.0
     estimated_ball_y: float = 0.0
     estimated_robot_x: float = 0.0
@@ -222,6 +231,11 @@ class BackendObservation:
     obs_export_mode: int = 0
     corrected_exported_robot_pose: bool = False
     corrected_exported_ball: bool = False
+    ball_export_source: int = 0
+    ball_export_fresh: bool = True
+    natural_time_since_ball_seen: float = 0.0
+    natural_ball_seen_percentage: float = 0.0
+    natural_ball_consistent_with_game_state: bool = False
     requested_skill: str = ""
     requested_pass_target: int = -1
     ball_rel_x: float = 0.0
@@ -301,10 +315,17 @@ class BackendObservation:
             estimated_robot_y=float(payload.get("estimated_robot_y", robot_y)),
             estimated_robot_theta=float(payload.get("estimated_robot_theta", robot_theta)),
             frame=int(payload.get("frame", 0)),
+            reset_applied_frame=int(payload.get("reset_applied_frame", 0)),
+            dynamic_applied_frame=int(payload.get("dynamic_applied_frame", 0)),
             obs_ready=bool(payload.get("obs_ready", False)),
             obs_export_mode=int(payload.get("obs_export_mode", 0)),
             corrected_exported_robot_pose=bool(payload.get("corrected_exported_robot_pose", False)),
             corrected_exported_ball=bool(payload.get("corrected_exported_ball", False)),
+            ball_export_source=int(payload.get("ball_export_source", 0)),
+            ball_export_fresh=bool(payload.get("ball_export_fresh", True)),
+            natural_time_since_ball_seen=float(payload.get("natural_time_since_ball_seen", 0.0)),
+            natural_ball_seen_percentage=float(payload.get("natural_ball_seen_percentage", 0.0)),
+            natural_ball_consistent_with_game_state=bool(payload.get("natural_ball_consistent_with_game_state", False)),
             requested_skill=str(payload.get("requested_skill", "")),
             requested_pass_target=int(payload.get("requested_pass_target", -1)),
             ball_rel_x=float(payload.get("ball_rel_x", fallback_rel_x)),
@@ -393,6 +414,7 @@ class PyBHBackend:
         *,
         mode: str = "simrobot",
         obs_mode: str = "corrected",
+        player_number: int = PLAYER_NUMBER,
         frames_per_step: int = 1,
         obs_timeout_ms: int = 1000,
         visible_request_timeout_ms: int | None = None,
@@ -414,13 +436,15 @@ class PyBHBackend:
             raise ValueError(f"Unsupported obs_mode {obs_mode!r}. Expected one of: {valid_modes}")
         self.mode = mode
         self.obs_mode = obs_mode
+        self.player_number = int(player_number)
         self.frames_per_step = max(1, int(frames_per_step))
         self.obs_timeout_ms = int(obs_timeout_ms)
+        default_visible_timeout_ms = max(self.obs_timeout_ms, 25000) if mode == "simrobot_visible" else self.obs_timeout_ms
         self.visible_request_timeout_ms = (
-            self.obs_timeout_ms if visible_request_timeout_ms is None else max(1, int(visible_request_timeout_ms))
+            default_visible_timeout_ms if visible_request_timeout_ms is None else max(1, int(visible_request_timeout_ms))
         )
         self.visible_reset_obs_timeout_ms = (
-            self.obs_timeout_ms
+            default_visible_timeout_ms
             if visible_reset_obs_timeout_ms is None
             else max(1, int(visible_reset_obs_timeout_ms))
         )
@@ -527,16 +551,19 @@ class PyBHBackend:
                 ),
             ]
         elif os.environ.get("DISPLAY"):
+            # offscreen+software first: xcb conflicts with CUDA/torch in the training
+            # process (GLX vs CUDA share the GPU driver → segfault).  xcb is kept as
+            # last fallback for environments where Mesa is not available.
             profiles = [
-                profile("platform=xcb,opengl=default", platform="xcb"),
-                profile("platform=xcb,opengl=software,libgl=1", platform="xcb", qt_opengl="software", libgl_software="1"),
-                profile("platform=offscreen,opengl=default", platform="offscreen"),
                 profile("platform=offscreen,opengl=software,libgl=1", platform="offscreen", qt_opengl="software", libgl_software="1"),
+                profile("platform=offscreen,opengl=default", platform="offscreen"),
                 profile("platform=minimalegl,opengl=default", platform="minimalegl"),
                 profile("platform=eglfs,opengl=default", platform="eglfs"),
                 profile("platform=vnc,opengl=software,libgl=1", platform="vnc", qt_opengl="software", libgl_software="1"),
                 profile("platform=linuxfb,opengl=software,libgl=1", platform="linuxfb", qt_opengl="software", libgl_software="1"),
                 profile("platform=minimal,opengl=default", platform="minimal"),
+                profile("platform=xcb,opengl=software,libgl=1", platform="xcb", qt_opengl="software", libgl_software="1"),
+                profile("platform=xcb,opengl=default", platform="xcb"),
             ]
         else:
             profiles = [
@@ -656,7 +683,7 @@ class PyBHBackend:
         original_settings = _read_bridge_settings(SETTINGS_CFG_PATH) or {}
         if (
             original_settings.get("teamNumber") == TEAM_NUMBER
-            and original_settings.get("playerNumber") == PLAYER_NUMBER
+            and original_settings.get("playerNumber") == self.player_number
         ):
             return
 
@@ -664,7 +691,7 @@ class PyBHBackend:
             original_text,
             {
                 "teamNumber": TEAM_NUMBER,
-                "playerNumber": PLAYER_NUMBER,
+                "playerNumber": self.player_number,
                 "magicNumber": TEAM_NUMBER,
             },
         )
@@ -687,13 +714,13 @@ class PyBHBackend:
         problems: list[str] = []
         if actual_team is not None and actual_team != TEAM_NUMBER:
             problems.append(f"teamNumber={actual_team}")
-        if actual_player is not None and actual_player != PLAYER_NUMBER:
+        if actual_player is not None and actual_player != self.player_number:
             problems.append(f"playerNumber={actual_player}")
 
         if problems:
             raise RuntimeError(
                 "SimRobot bridge settings are misaligned with the RL shared-state bridge. "
-                f"Expected teamNumber={TEAM_NUMBER}, playerNumber={PLAYER_NUMBER} in {SETTINGS_CFG_PATH}, "
+                f"Expected teamNumber={TEAM_NUMBER}, playerNumber={self.player_number} in {SETTINGS_CFG_PATH}, "
                 f"but found {', '.join(problems)}. "
                 "This leaves RLSharedState disconnected because LocalConsole listens on a different slot."
             )
@@ -703,6 +730,13 @@ class PyBHBackend:
             return
         self._apply_obs_mode_override()
         if self._uses_embedded_simrobot():
+            # Remove stale shared memory left by a previous crash.  RLSharedState checks
+            # magic+version before calling initializeBlock(), so a leftover segment with
+            # matching magic hands back a corrupt pthread_mutex → segfault on first lock.
+            try:
+                _RL_SHM_FILE.unlink()
+            except FileNotFoundError:
+                pass
             self._qt_qpa_backup = os.environ.get("QT_QPA_PLATFORM")
             self._prepare_embedded_qt_platform()
             self._apply_bridge_settings_override()
@@ -728,16 +762,17 @@ class PyBHBackend:
                     cwd=BHUMAN_DIR,
                     env=os.environ.copy(),
                 )
-            try:
-                self._validate_bridge_settings()
-            except Exception:
-                if self._simrobot_process is not None and self._simrobot_process.poll() is None:
-                    self._simrobot_process.terminate()
-                    self._simrobot_process.wait(timeout=5)
-                self._simrobot_process = None
-                self._restore_obs_mode_override()
-                self._restore_bridge_settings_override()
-                raise
+            if self._simrobot_launch:
+                try:
+                    self._validate_bridge_settings()
+                except Exception:
+                    if self._simrobot_process is not None and self._simrobot_process.poll() is None:
+                        self._simrobot_process.terminate()
+                        self._simrobot_process.wait(timeout=5)
+                    self._simrobot_process = None
+                    self._restore_obs_mode_override()
+                    self._restore_bridge_settings_override()
+                    raise
         else:
             self._restore_obs_mode_override()
             raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
@@ -823,9 +858,9 @@ class PyBHBackend:
         opponent_specs = None if opponents is None else _coerce_world_players(opponents)
         if teammate_specs is not None:
             _validate_world_players(teammate_specs, label="teammates", allow_non_upright=False)
-            if any(player.number == PLAYER_NUMBER for player in teammate_specs):
+            if any(player.number == self.player_number for player in teammate_specs):
                 raise ValueError(
-                    f"teammates must not include the controlled robot number {PLAYER_NUMBER}; use robot_pose for the RL robot"
+                    f"teammates must not include the controlled robot number {self.player_number}; use robot_pose for the RL robot"
                 )
         if opponent_specs is not None:
             _validate_world_players(opponent_specs, label="opponents", allow_non_upright=False)
@@ -846,7 +881,7 @@ class PyBHBackend:
         assert self._uses_visible_simrobot()
         request_id = int(
             pybh.rl_set_dynamic_world(
-                PLAYER_NUMBER,
+                self.player_number,
                 ball=None if ball_pos is None else (float(ball_pos[0]), float(ball_pos[1])),
                 own_pose=None
                 if robot_pos is None or robot_theta is None
@@ -877,7 +912,28 @@ class PyBHBackend:
         obs = self.read_obs()
         self._last_obs = obs
         self._steps_since_reset += 1
+        if self._uses_embedded_simrobot():
+            self._sync_sim_ball_to_context()
         return obs
+
+    def _sync_sim_ball_to_context(self) -> None:
+        """Read SimRobot physics ball position and feed it back to both _world_spec
+        and C++ dynamic context so synthetic injection always uses the current ball
+        position, not the stale reset position."""
+        if self._world_spec is None:
+            return
+        ball_state = pybh.simrobot_get_ball_state()
+        if ball_state is None:
+            return
+        scale = self.simrobot_scene.position_scale
+        if scale == 0.0:
+            return
+        sim_ball_x = float(ball_state["x"]) / scale
+        sim_ball_y = float(ball_state["y"]) / scale
+        if math.isnan(sim_ball_x) or math.isnan(sim_ball_y):
+            return
+        self._world_spec = replace(self._world_spec, ball_x=sim_ball_x, ball_y=sim_ball_y)
+        pybh.rl_mark_embedded_dynamic_context(self.player_number, (sim_ball_x, sim_ball_y))
 
     def read_obs(self) -> BackendObservation:
         if self._uses_embedded_simrobot():
@@ -888,7 +944,7 @@ class PyBHBackend:
             last_obs: BackendObservation | None = None
             for _ in range(max_poll_steps):
                 obs = self._stabilize_obs(
-                    BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, poll_timeout_ms))
+                    BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, poll_timeout_ms))
                 )
                 last_obs = obs
                 if obs.obs_ready:
@@ -903,7 +959,7 @@ class PyBHBackend:
                 f"max_poll_steps={max_poll_steps} poll_timeout_ms={poll_timeout_ms}"
             )
 
-        obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, self.obs_timeout_ms)))
+        obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, self.obs_timeout_ms)))
         if obs.obs_ready:
             self._last_obs = obs
             return obs
@@ -913,7 +969,7 @@ class PyBHBackend:
         skill_name = action.skill_name
         pybh_name = "walkTo" if skill_name == "walk" else skill_name
         kwargs = dict(
-            player_number=PLAYER_NUMBER,
+            player_number=self.player_number,
             skill=pybh_name,
             target_x=float(action.target_x),
             target_y=float(action.target_y),
@@ -931,7 +987,7 @@ class PyBHBackend:
         return [player.as_tuple() for player in players]
 
     def _read_world_status(self) -> WorldUpdateStatus:
-        return WorldUpdateStatus.from_payload(pybh.rl_get_world_status(PLAYER_NUMBER))
+        return WorldUpdateStatus.from_payload(pybh.rl_get_world_status(self.player_number))
 
     def _maybe_log_visible_wait(self, message: str, *, next_log_at: float, now: float) -> float:
         if self.visible_status_log_interval_s <= 0.0 or now < next_log_at:
@@ -948,6 +1004,7 @@ class PyBHBackend:
         scene_robot_theta = float(_normalize_angle(world_spec.robot_theta + self.simrobot_scene.theta_offset))
         if not pybh.simrobot_set_ball_state(scene_ball_x, scene_ball_y, 0.0, 0.0):
             raise RuntimeError("simrobot_set_ball_state failed")
+        pybh.rl_mark_embedded_reset_context(self.player_number, float(world_spec.ball_x), float(world_spec.ball_y))
         if not pybh.simrobot_set_robot_pose(
             self.simrobot_scene.robot_name, scene_robot_x, scene_robot_y, scene_robot_theta
         ):
@@ -980,6 +1037,9 @@ class PyBHBackend:
         if ball_pos is not None:
             if not pybh.simrobot_set_ball_state(float(ball_pos[0] * scale), float(ball_pos[1] * scale), 0.0, 0.0):
                 raise RuntimeError("simrobot_set_ball_state failed during dynamic world update")
+            pybh.rl_mark_embedded_dynamic_context(self.player_number, (float(ball_pos[0]), float(ball_pos[1])))
+        else:
+            pybh.rl_mark_embedded_dynamic_context(self.player_number, None)
         if robot_pos is not None:
             if robot_theta is None:
                 raise ValueError("robot_theta is required when robot_pos is provided")
@@ -1020,7 +1080,7 @@ class PyBHBackend:
         for _ in range(max_steps):
             pybh.simrobot_step(1)
             obs = self._stabilize_obs(
-                BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, max(1, self.obs_timeout_ms // 10)))
+                BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, max(1, self.obs_timeout_ms // 10)))
             )
             last_obs = obs
             if not obs.obs_ready or obs.frame <= 0:
@@ -1080,7 +1140,7 @@ class PyBHBackend:
         started_at = time.monotonic()
         next_log_at = started_at + min(DEFAULT_VISIBLE_LOG_INTERVAL_S, self.visible_status_log_interval_s or 1e9)
         while time.monotonic() < deadline:
-            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(PLAYER_NUMBER, per_try_timeout_ms)))
+            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, per_try_timeout_ms)))
             last_obs = obs
             now = time.monotonic()
             next_log_at = self._maybe_log_visible_wait(
@@ -1112,7 +1172,7 @@ class PyBHBackend:
     def _visible_simrobot_reset(self, world_spec: WorldSpec) -> int:
         return int(
             pybh.rl_reset_world_extended(
-            PLAYER_NUMBER,
+            self.player_number,
             float(world_spec.ball_x),
             float(world_spec.ball_y),
             float(world_spec.robot_x),
@@ -1209,14 +1269,19 @@ class PyBHBackend:
                     ball_end_rel_y=float(rel_y),
                 )
 
+        # Include C++-side injection in the synthetic flags so telemetry
+        # (synthetic_ball_rate, synthetic_pose_rate) is honest regardless of
+        # which layer injected the data.
+        cpp_pose = bool(updated.corrected_exported_robot_pose)
+        cpp_ball = bool(updated.corrected_exported_ball)
         return replace(
             updated,
             pose_alignment_error_mm=float(pose_error),
             pose_alignment_warning=bool(pose_error_large),
             ball_observation_stale=bool(ball_stale),
             ball_observation_collapsed=bool(collapsed_ball),
-            synthetic_pose_observation=synthetic_pose,
-            synthetic_ball_observation=synthetic_ball,
-            synthetic_pose_reason=synthetic_pose_reason,
-            synthetic_ball_reason=synthetic_ball_reason,
+            synthetic_pose_observation=synthetic_pose or cpp_pose,
+            synthetic_ball_observation=synthetic_ball or cpp_ball,
+            synthetic_pose_reason=synthetic_pose_reason or ("cpp_corrected" if cpp_pose else ""),
+            synthetic_ball_reason=synthetic_ball_reason or ("cpp_corrected" if cpp_ball else ""),
         )

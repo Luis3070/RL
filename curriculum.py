@@ -34,6 +34,10 @@ def _scene_path(stage_id: int, simrobot_profile: str) -> Path:
         if stage_id >= 2:
             return BHUMAN_DIR / "Config/Scenes/RLFull.ros2d"
         return BHUMAN_DIR / "Config/Scenes/RL1v0.ros2d"
+    if simrobot_profile == "3d_visible":
+        if stage_id >= 2:
+            return BHUMAN_DIR / "Config/Scenes/RLFull_3D.ros2"
+        return BHUMAN_DIR / "Config/Scenes/RL1v0_3D_visible.ros2"
     if stage_id >= 2:
         return BHUMAN_DIR / "Config/Scenes/RLFull_3D.ros2"
     return BHUMAN_DIR / "Config/Scenes/RL1v0_3D.ros2"
@@ -59,6 +63,7 @@ _STAGE_SPECS = {
             bad_dribble=-1.2,
             good_shoot=1.2,
             bad_shoot=-1.8,
+            projection_penalty=-0.10,
             skill_switch=-0.15,
             thrash=-0.8,
             goal=4.0,
@@ -85,6 +90,7 @@ _STAGE_SPECS = {
             bad_dribble=-1.2,
             good_shoot=1.3,
             bad_shoot=-2.0,
+            projection_penalty=-0.15,
             skill_switch=-0.2,
             thrash=-1.0,
             goal=4.0,
@@ -111,6 +117,7 @@ _STAGE_SPECS = {
             bad_dribble=-1.3,
             good_shoot=1.4,
             bad_shoot=-2.0,
+            projection_penalty=-0.20,
             collision=-3.0,
             clearance_gain=1.0,
             skill_switch=-0.2,
@@ -139,6 +146,7 @@ _STAGE_SPECS = {
             bad_dribble=-1.4,
             good_shoot=1.5,
             bad_shoot=-2.2,
+            projection_penalty=-0.20,
             collision=-3.2,
             clearance_gain=1.0,
             corridor_keep=1.1,

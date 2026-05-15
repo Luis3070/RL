@@ -26,6 +26,7 @@ class RewardWeights:
     bad_dribble: float = 0.0
     good_shoot: float = 0.0
     bad_shoot: float = 0.0
+    projection_penalty: float = 0.0
     skill_switch: float = 0.0
     thrash: float = 0.0
     goal: float = 0.0
@@ -49,6 +50,7 @@ class RewardWeights:
             "bad_dribble": self.bad_dribble,
             "good_shoot": self.good_shoot,
             "bad_shoot": self.bad_shoot,
+            "projection_penalty": self.projection_penalty,
             "skill_switch": self.skill_switch,
             "thrash": self.thrash,
             "goal": self.goal,
@@ -84,6 +86,7 @@ class StepContext:
     obs: BackendObservation
     skill_name: str
     policy_skill_name: str
+    projection_applied: bool
     prev_skill_name: str | None
     skill_history: tuple[str, ...] = ()
     goal_scored: bool = False
@@ -103,6 +106,7 @@ class StepEvaluation:
     walk_zone: bool
     dribble_zone: bool
     shoot_zone: bool
+    ball_confident: bool
     preferred_skill_name: str
     heuristic_bias: Dict[str, float]
     terms: Dict[str, float]
@@ -116,6 +120,7 @@ class StepEvaluation:
             "walk_zone": self.walk_zone,
             "dribble_zone": self.dribble_zone,
             "shoot_zone": self.shoot_zone,
+            "ball_confident": self.ball_confident,
             "preferred_skill_name": self.preferred_skill_name,
             "heuristic_bias": dict(self.heuristic_bias),
             "reward_terms": dict(self.terms),
@@ -278,6 +283,16 @@ def build_fallback_action_targets(skill_name: str, obs: BackendObservation) -> D
     }
 
 
+def is_ball_confident(step_ctx: StepContext) -> bool:
+    obs = step_ctx.obs
+    return (
+        not bool(obs.synthetic_ball_observation)
+        and not bool(obs.ball_observation_stale)
+        and not bool(obs.ball_observation_collapsed)
+        and bool(obs.ball_export_fresh)
+    )
+
+
 def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluation:
     prev_obs = step_ctx.prev_obs or step_ctx.obs
     prev_features = features_from_obs(prev_obs)
@@ -288,20 +303,39 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     walk_zone = is_walk_zone(cur_features)
     shoot_zone = is_shoot_zone(cur_features)
     dribble_zone = is_dribble_zone(cur_features)
+    ball_confident = is_ball_confident(step_ctx)
 
     progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0)
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0)
-    enter_takeover = 1.0 if takeover_envelope and not prev_takeover_envelope else 0.0
-    hold_takeover = 1.0 if takeover_envelope else 0.0
+    enter_takeover = 1.0 if ball_confident and takeover_envelope and not prev_takeover_envelope else 0.0
+    hold_takeover = 1.0 if ball_confident and takeover_envelope else 0.0
 
-    good_walk = 1.0 if step_ctx.skill_name == "walk" and walk_zone and (progress_ball > 0.0 or align_ball > 0.0) else 0.0
-    bad_walk = 1.0 if step_ctx.skill_name == "walk" and (shoot_zone or dribble_zone) else 0.0
+    good_walk = (
+        1.0
+        if (
+            step_ctx.skill_name == "walk"
+            and not step_ctx.projection_applied
+            and walk_zone
+            and (progress_ball > 0.0 or align_ball > 0.0)
+        )
+        else 0.0
+    )
+    bad_walk = (
+        1.0
+        if step_ctx.skill_name == "walk" and not step_ctx.projection_applied and (shoot_zone or dribble_zone)
+        else 0.0
+    )
 
-    good_dribble = 1.0 if step_ctx.skill_name == "dribble" and dribble_zone else 0.0
+    good_dribble = (
+        1.0
+        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and dribble_zone
+        else 0.0
+    )
     bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not dribble_zone else 0.0
 
-    good_shoot = 1.0 if step_ctx.skill_name == "shoot" and shoot_zone else 0.0
+    good_shoot = 1.0 if step_ctx.skill_name == "shoot" and ball_confident and shoot_zone else 0.0
     bad_shoot = 1.0 if step_ctx.skill_name == "shoot" and not shoot_zone else 0.0
+    projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
 
     skill_switch = 1.0 if step_ctx.prev_skill_name is not None and step_ctx.skill_name != step_ctx.prev_skill_name else 0.0
     thrash = 1.0 if is_local_thrash(step_ctx.skill_history) else 0.0
@@ -316,7 +350,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     corridor_keep = 1.0 if step_ctx.stage >= 3 and step_ctx.corridor_open else 0.0
 
     ball_progress_post_takeover = 0.0
-    if takeover_envelope:
+    if ball_confident and takeover_envelope:
         prev_goal_dist = goal_ball_distance_mm(prev_obs)
         cur_goal_dist = goal_ball_distance_mm(step_ctx.obs)
         ball_progress_post_takeover = clip((prev_goal_dist - cur_goal_dist) / 300.0, -1.0, 1.0)
@@ -335,6 +369,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "bad_dribble": bad_dribble,
         "good_shoot": good_shoot,
         "bad_shoot": bad_shoot,
+        "projection_penalty": projection_penalty,
         "skill_switch": skill_switch,
         "thrash": thrash,
         "goal": goal_reward,
@@ -358,6 +393,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         walk_zone=walk_zone,
         dribble_zone=dribble_zone,
         shoot_zone=shoot_zone,
+        ball_confident=ball_confident,
         preferred_skill_name=preferred_skill(cur_features),
         heuristic_bias=heuristic_bias(step_ctx),
         terms=terms,

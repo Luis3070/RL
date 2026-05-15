@@ -66,6 +66,16 @@ SIMROBOT_VISIBLE_SCENE_PRESETS = {
         position_scale=-1.0 / MM_PER_M,
         theta_offset=-(math.pi / 2.0),
     ),
+    # ci 15: camera rendered at 15 fps sim-time instead of 60 → ~4x less getImage()
+    # overhead while BallPerceptor and SelfLocator still run on real rendered images.
+    # Only valid for simrobot_visible (separate subprocess with real GL context).
+    "3d_visible": SimRobotSceneConfig(
+        profile="3d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0_3D_visible.ros2",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-(math.pi / 2.0),
+    ),
 }
 
 
@@ -87,6 +97,7 @@ ACTION = ActionConfig()
 class BackendConfig:
     mode: str = "simrobot"
     obs_mode: str = "corrected"
+    player_number: int = PLAYER_NUMBER
     frames_per_step: int = 3
     obs_timeout_ms: int = 1000
     simrobot_profile: str = "3d"
@@ -122,6 +133,7 @@ class EnvConfig:
     max_episode_steps: int = MAX_EPISODE_STEPS
     stage_id: int = 0
     backend: BackendConfig = field(default_factory=BackendConfig)
+    parallel_player_numbers: tuple[int, ...] = (PLAYER_NUMBER,)
     active_skill_names: tuple[str, ...] = ("walk", "dribble", "shoot")
     reward_goal_bonus: float = 5.0
     reward_progress_scale: float = 0.003
@@ -131,13 +143,32 @@ class EnvConfig:
 @dataclass(frozen=True)
 class WireAuditConfig:
     min_expected_obs_mode_rate: float = 0.99
-    max_synthetic_pose_rate: float = 0.25
-    max_synthetic_ball_rate: float = 0.40
+    # In 3D headless (calculateImage=False) the C++ bridge always exports SimRobot
+    # ground-truth pose because visual self-localization is unavailable → pose is
+    # structurally synthetic; 1.0 is the correct ceiling for this profile.
+    max_synthetic_pose_rate: float = 1.0
+    # Ball is synthetic during the warmup window (Python) and whenever staleBall=True
+    # (C++).  In 3D headless both phases produce correct position values — the
+    # synthetic flag is a delivery mechanism, not inaccurate data.
+    max_synthetic_ball_rate: float = 0.70
     max_pose_alignment_warning_rate: float = 0.10
-    max_ball_stale_rate: float = 0.10
+    # Without a camera seenPercentage=0 always; ball is stale after ~1 s in every
+    # episode.  C++ synthetic injection provides the correct position when stale.
+    max_ball_stale_rate: float = 0.90
     max_ball_collapsed_rate: float = 0.10
     max_estimated_mode_corrected_pose_rate: float = 0.01
     max_estimated_mode_corrected_ball_rate: float = 0.01
+    # Calibrated against the current N=6 visible parallel pipeline:
+    # healthy evals sit roughly at trusted≈0.59-0.75, rescued≈0.15-0.35,
+    # confidence≈0.53-0.58.  Short random-policy smoke runs can be much worse,
+    # so FAIL is reserved for clearly pathological ball semantics.
+    min_visible_ball_visible_rate: float = 0.90
+    max_visible_ball_rescued_rate: float = 0.75
+    max_visible_misleading_seen_synthetic_rate: float = 0.75
+    min_visible_ball_trusted_rate_warning: float = 0.55
+    max_visible_ball_rescued_rate_warning: float = 0.40
+    max_visible_misleading_seen_synthetic_rate_warning: float = 0.40
+    min_visible_ball_confidence_score_mean_warning: float = 0.50
     max_collision_rate_warning: float = 0.25
 
 

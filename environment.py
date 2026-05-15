@@ -30,6 +30,59 @@ BALL_VEL_NORM = 3000.0
 TIME_NORM_MS = 5000.0
 PASS_COUNT_NORM = 5.0
 UPRIGHT_MAX_FALL_STATE = 2
+BALL_VISIBLE_SEEN_PCT_MIN = 5.0
+BALL_VISIBLE_MAX_AGE_MS = 1200.0
+BALL_TRUSTED_SEEN_PCT_MIN = 20.0
+BALL_TRUSTED_MAX_AGE_MS = 600.0
+BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
+
+
+def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
+    seen_pct = float(obs.ball_seen_percentage)
+    time_since_seen = float(obs.time_since_ball_seen)
+    rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
+    visible = bool(seen_pct > BALL_VISIBLE_SEEN_PCT_MIN or time_since_seen <= BALL_VISIBLE_MAX_AGE_MS)
+    trusted = bool(
+        (not rescued)
+        and seen_pct >= BALL_TRUSTED_SEEN_PCT_MIN
+        and time_since_seen <= BALL_TRUSTED_MAX_AGE_MS
+    )
+    semi_trusted = bool(
+        (not rescued)
+        and seen_pct > 0.0
+        and time_since_seen <= BALL_SEMI_TRUSTED_MAX_AGE_MS
+    )
+    lost = bool((not rescued) and seen_pct <= 0.0 and time_since_seen > BALL_SEMI_TRUSTED_MAX_AGE_MS)
+    degraded = bool((not rescued) and visible and (not trusted))
+    confidence = 0.0
+    if visible:
+        seen_term = float(np.clip(seen_pct / 100.0, 0.0, 1.0))
+        age_term = float(np.clip(1.0 - (time_since_seen / BALL_VISIBLE_MAX_AGE_MS), 0.0, 1.0))
+        confidence = 0.5 * seen_term + 0.5 * age_term
+        if rescued:
+            confidence *= 0.25
+
+    if rescued:
+        regime = "rescued"
+    elif trusted:
+        regime = "trusted"
+    elif semi_trusted:
+        regime = "semi_trusted"
+    elif degraded:
+        regime = "degraded"
+    else:
+        regime = "lost"
+
+    return {
+        "ball_visible_mask": visible,
+        "ball_trusted_mask": trusted,
+        "ball_semi_trusted_mask": semi_trusted,
+        "ball_degraded_mask": degraded,
+        "ball_rescued_mask": rescued,
+        "ball_lost_mask": lost,
+        "ball_confidence_score": float(confidence),
+        "ball_regime": regime,
+    }
 
 
 class RealSimRobotEnv(ParallelEnv):
@@ -44,6 +97,7 @@ class RealSimRobotEnv(ParallelEnv):
         self.backend = PyBHBackend(
             mode=self.cfg.backend.mode,
             obs_mode=self.cfg.backend.obs_mode,
+            player_number=self.cfg.backend.player_number,
             frames_per_step=self.cfg.backend.frames_per_step,
             obs_timeout_ms=self.cfg.backend.obs_timeout_ms,
             simrobot_profile=self.cfg.backend.simrobot_profile,
@@ -160,6 +214,7 @@ class RealSimRobotEnv(ParallelEnv):
             obs=obs,
             skill_name=executed_action.skill_name,
             policy_skill_name=policy_action.skill_name,
+            projection_applied=projection_applied,
             prev_skill_name=prev_skill_name,
             skill_history=skill_history,
             goal_scored=scored,
@@ -302,6 +357,25 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_collapsed_steps": 0,
             "corrected_exported_robot_pose_steps": 0,
             "corrected_exported_ball_steps": 0,
+            "ball_export_fresh_steps": 0,
+            "ball_export_source_estimated_steps": 0,
+            "ball_export_source_reset_steps": 0,
+            "ball_export_source_dynamic_steps": 0,
+            "natural_ball_seen_steps": 0,
+            "natural_ball_consistent_steps": 0,
+            "ball_visible_steps": 0,
+            "ball_trusted_steps": 0,
+            "ball_semi_trusted_steps": 0,
+            "ball_degraded_steps": 0,
+            "ball_rescued_steps": 0,
+            "ball_lost_steps": 0,
+            "misleading_seen_synthetic_steps": 0,
+            "ball_confidence_score_sum": 0.0,
+            "first_ball_seen_after_reset_ms": None,
+            "first_fresh_export_after_reset_ms": None,
+            "first_non_synthetic_ball_after_reset_ms": None,
+            "first_trusted_ball_after_reset_ms": None,
+            "first_natural_ball_seen_after_reset_ms": None,
         }
 
     def _update_episode_tracker(
@@ -336,6 +410,47 @@ class RealSimRobotEnv(ParallelEnv):
         tracker["ball_collapsed_steps"] += int(bool(step_ctx.obs.ball_observation_collapsed))
         tracker["corrected_exported_robot_pose_steps"] += int(bool(step_ctx.obs.corrected_exported_robot_pose))
         tracker["corrected_exported_ball_steps"] += int(bool(step_ctx.obs.corrected_exported_ball))
+        tracker["ball_export_fresh_steps"] += int(bool(step_ctx.obs.ball_export_fresh))
+        tracker["natural_ball_seen_steps"] += int(
+            bool(step_ctx.obs.natural_ball_seen_percentage > 0.0 or step_ctx.obs.natural_time_since_ball_seen <= 1000.0)
+        )
+        tracker["natural_ball_consistent_steps"] += int(bool(step_ctx.obs.natural_ball_consistent_with_game_state))
+        masks = _ball_observation_masks(step_ctx.obs)
+        tracker["ball_visible_steps"] += int(bool(masks["ball_visible_mask"]))
+        tracker["ball_trusted_steps"] += int(bool(masks["ball_trusted_mask"]))
+        tracker["ball_semi_trusted_steps"] += int(bool(masks["ball_semi_trusted_mask"]))
+        tracker["ball_degraded_steps"] += int(bool(masks["ball_degraded_mask"]))
+        tracker["ball_rescued_steps"] += int(bool(masks["ball_rescued_mask"]))
+        tracker["ball_lost_steps"] += int(bool(masks["ball_lost_mask"]))
+        tracker["misleading_seen_synthetic_steps"] += int(
+            bool(float(step_ctx.obs.ball_seen_percentage) > 0.0 and bool(step_ctx.obs.synthetic_ball_observation))
+        )
+        tracker["ball_confidence_score_sum"] += float(masks["ball_confidence_score"])
+        if int(step_ctx.obs.ball_export_source) == 0:
+            tracker["ball_export_source_estimated_steps"] += 1
+        elif int(step_ctx.obs.ball_export_source) == 1:
+            tracker["ball_export_source_reset_steps"] += 1
+        elif int(step_ctx.obs.ball_export_source) == 2:
+            tracker["ball_export_source_dynamic_steps"] += 1
+
+        reset_frame = int(step_ctx.obs.reset_applied_frame)
+        delay_since_reset_ms = int(step_ctx.obs.frame - reset_frame) if reset_frame > 0 and step_ctx.obs.frame >= reset_frame else None
+        if delay_since_reset_ms is not None:
+            if tracker["first_ball_seen_after_reset_ms"] is None and (
+                float(step_ctx.obs.ball_seen_percentage) > 0.0 or float(step_ctx.obs.time_since_ball_seen) <= 1000.0
+            ):
+                tracker["first_ball_seen_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_fresh_export_after_reset_ms"] is None and bool(step_ctx.obs.ball_export_fresh):
+                tracker["first_fresh_export_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_non_synthetic_ball_after_reset_ms"] is None and not bool(step_ctx.obs.synthetic_ball_observation):
+                tracker["first_non_synthetic_ball_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_trusted_ball_after_reset_ms"] is None and bool(masks["ball_trusted_mask"]):
+                tracker["first_trusted_ball_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_natural_ball_seen_after_reset_ms"] is None and (
+                float(step_ctx.obs.natural_ball_seen_percentage) > 0.0
+                or float(step_ctx.obs.natural_time_since_ball_seen) <= 1000.0
+            ):
+                tracker["first_natural_ball_seen_after_reset_ms"] = float(delay_since_reset_ms)
 
         if step_ctx.skill_name == "walk":
             tracker["walk_steps"] += 1
@@ -422,6 +537,25 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
             "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
             "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
+            "ball_export_fresh_rate": float(tracker["ball_export_fresh_steps"] / steps),
+            "ball_export_source_estimated_rate": float(tracker["ball_export_source_estimated_steps"] / steps),
+            "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
+            "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
+            "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
+            "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
+            "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),
+            "ball_semi_trusted_rate": float(tracker["ball_semi_trusted_steps"] / steps),
+            "ball_degraded_rate": float(tracker["ball_degraded_steps"] / steps),
+            "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
+            "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
+            "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
+            "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
+            "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
+            "first_non_synthetic_ball_after_reset_ms": float(tracker["first_non_synthetic_ball_after_reset_ms"] or 0.0),
+            "first_trusted_ball_after_reset_ms": float(tracker["first_trusted_ball_after_reset_ms"] or 0.0),
+            "first_natural_ball_seen_after_reset_ms": float(tracker["first_natural_ball_seen_after_reset_ms"] or 0.0),
         }
 
     def _finalize_episode_metrics(self) -> Dict[str, float]:
@@ -509,6 +643,25 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
             "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
             "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
+            "ball_export_fresh_rate": float(tracker["ball_export_fresh_steps"] / steps),
+            "ball_export_source_estimated_rate": float(tracker["ball_export_source_estimated_steps"] / steps),
+            "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
+            "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
+            "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
+            "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
+            "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),
+            "ball_semi_trusted_rate": float(tracker["ball_semi_trusted_steps"] / steps),
+            "ball_degraded_rate": float(tracker["ball_degraded_steps"] / steps),
+            "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
+            "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
+            "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
+            "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
+            "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
+            "first_non_synthetic_ball_after_reset_ms": float(tracker["first_non_synthetic_ball_after_reset_ms"] or 0.0),
+            "first_trusted_ball_after_reset_ms": float(tracker["first_trusted_ball_after_reset_ms"] or 0.0),
+            "first_natural_ball_seen_after_reset_ms": float(tracker["first_natural_ball_seen_after_reset_ms"] or 0.0),
             "reward_terms_sum": dict(tracker["reward_terms_sum"]),
             "reward_weighted_terms_sum": dict(tracker["reward_weighted_terms_sum"]),
             "skill_counts": dict(tracker["skill_counts"]),
@@ -527,6 +680,7 @@ class RealSimRobotEnv(ParallelEnv):
         done: bool,
     ) -> Dict[str, object]:
         raw_obs = asdict(obs)
+        ball_masks = _ball_observation_masks(obs)
         info: Dict[str, object] = {
             "state": self.get_global_state(),
             "obs_feature_names": OBS_FEATURE_NAMES,
@@ -541,6 +695,15 @@ class RealSimRobotEnv(ParallelEnv):
             "obs_export_mode": int(obs.obs_export_mode),
             "corrected_exported_robot_pose": bool(obs.corrected_exported_robot_pose),
             "corrected_exported_ball": bool(obs.corrected_exported_ball),
+            "ball_export_source": int(obs.ball_export_source),
+            "ball_export_fresh": bool(obs.ball_export_fresh),
+            "natural_time_since_ball_seen": float(obs.natural_time_since_ball_seen),
+            "natural_ball_seen_percentage": float(obs.natural_ball_seen_percentage),
+            "natural_ball_consistent_with_game_state": bool(obs.natural_ball_consistent_with_game_state),
+            "reset_applied_frame": int(obs.reset_applied_frame),
+            "dynamic_applied_frame": int(obs.dynamic_applied_frame),
+            "reset_applied_age_ms": int(obs.frame - obs.reset_applied_frame) if obs.reset_applied_frame > 0 and obs.frame >= obs.reset_applied_frame else -1,
+            "dynamic_applied_age_ms": int(obs.frame - obs.dynamic_applied_frame) if obs.dynamic_applied_frame > 0 and obs.frame >= obs.dynamic_applied_frame else -1,
             "synthetic_pose_observation": bool(obs.synthetic_pose_observation),
             "synthetic_ball_observation": bool(obs.synthetic_ball_observation),
             "synthetic_pose_reason": obs.synthetic_pose_reason,
@@ -577,6 +740,7 @@ class RealSimRobotEnv(ParallelEnv):
             "shot_quality_no_obstacles": obs.shot_quality_no_obstacles,
             "shot_opening_with_obstacles": obs.shot_opening_with_obstacles,
             "pass_options_count": obs.pass_options_count,
+            **ball_masks,
         }
         if evaluation is not None:
             info.update(evaluation.as_dict())
