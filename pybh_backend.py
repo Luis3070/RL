@@ -959,10 +959,25 @@ class PyBHBackend:
                 f"max_poll_steps={max_poll_steps} poll_timeout_ms={poll_timeout_ms}"
             )
 
-        obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, self.obs_timeout_ms)))
-        if obs.obs_ready:
+        min_frame = self._last_obs.frame if self._last_obs is not None else -1
+        poll_timeout_ms = max(1, min(50, self.obs_timeout_ms // 10 if self.obs_timeout_ms > 0 else 10))
+        max_poll_steps = max(4, self.obs_timeout_ms // poll_timeout_ms if self.obs_timeout_ms > 0 else 4)
+        last_obs: BackendObservation | None = None
+        for _ in range(max_poll_steps):
+            obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, poll_timeout_ms)))
+            last_obs = obs
+            if not obs.obs_ready:
+                continue
+            if min_frame >= 0 and obs.frame < min_frame:
+                continue
             self._last_obs = obs
             return obs
+        if last_obs is not None and last_obs.obs_ready and self._last_obs is not None:
+            raise RuntimeError(
+                "pybh.rl_get_obs returned only stale visible frames within timeout: "
+                f"min_frame={min_frame} last_frame={last_obs.frame} poll_timeout_ms={poll_timeout_ms} "
+                f"max_poll_steps={max_poll_steps}"
+            )
         raise RuntimeError(f"pybh.rl_get_obs timed out in backend={self.mode}")
 
     def _set_action(self, action: StructuredSkillAction) -> None:
