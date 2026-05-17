@@ -183,8 +183,8 @@ class TrainConfig:
     learning_rate: float = 1e-4
     discount_factor: float = 0.99
     gae_lambda: float = 0.95
-    entropy_loss_scale: float = 0.001
-    value_loss_scale: float = 1.0
+    entropy_loss_scale: float = 0.01
+    value_loss_scale: float = 0.5
     ratio_clip: float = 0.2
     grad_norm_clip: float = 0.5
     hidden_size: int = 128

@@ -12,6 +12,11 @@ from pybh_backend import BackendObservation
 
 EPS = 1e-6
 ACTIVE_SKILL_NAMES = ("walk", "dribble", "shoot")
+BALL_VISIBLE_MAX_AGE_MS = 1200.0
+BALL_TRUSTED_MAX_AGE_MS = 600.0
+
+_APPROACH_OFFSET_X = -210.0   # mm: ideal approach offset from ball along field-x
+_APPROACH_RADIUS_MM = 600.0   # mm: distance at which approach quality → 0
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,7 @@ class RewardWeights:
     ball_progress_post_takeover: float = 0.0
     first_to_ball: float = 0.0
     bad_duel: float = 0.0
+    approach_ball: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -61,6 +67,7 @@ class RewardWeights:
             "ball_progress_post_takeover": self.ball_progress_post_takeover,
             "first_to_ball": self.first_to_ball,
             "bad_duel": self.bad_duel,
+            "approach_ball": self.approach_ball,
         }
 
 
@@ -170,30 +177,41 @@ def features_from_obs(obs: BackendObservation) -> TakeoverFeatures:
 
 
 def is_takeover_envelope(features: TakeoverFeatures) -> bool:
+    # seen_pct removed: with ci 30 the seenPercentage window caps at 3.3% for
+    # natural observations, making any seen_pct threshold structurally unreachable.
+    # Freshness is captured by t_seen_ms aligned with BALL_TRUSTED_MAX_AGE_MS.
     return (
         features.d_ball_mm <= 450.0
         and abs(features.a_ball_rad) <= math.radians(35.0)
-        and features.t_seen_ms <= 400.0
-        and features.seen_pct >= 0.4
+        and features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
     )
 
 
 def is_walk_zone(features: TakeoverFeatures) -> bool:
+    # seen_pct removed: same ci-30 incompatibility as is_takeover_envelope.
     return (
         not is_takeover_envelope(features)
         and features.t_seen_ms <= 1000.0
-        and features.seen_pct >= 0.2
     )
 
 
 def is_shoot_zone(features: TakeoverFeatures) -> bool:
+    # seen_pct removed: same ci-30 incompatibility. t_seen_ms <= 300 keeps the
+    # shoot zone intentionally tight (ball must be very fresh to shoot).
     return (
         features.d_ball_mm <= 320.0
         and abs(features.a_ball_rad) <= math.radians(20.0)
         and features.t_seen_ms <= 300.0
-        and features.seen_pct >= 0.5
         and (features.shot_open >= 0.7 or features.score_now)
     )
+
+
+def _approach_quality(obs: BackendObservation) -> float:
+    """Proximity [0,1] to the ideal ball-approach position (210mm behind ball along field-x)."""
+    target_x = float(obs.ball_x) + _APPROACH_OFFSET_X
+    target_y = float(obs.ball_y)
+    dist = math.hypot(float(obs.robot_x) - target_x, float(obs.robot_y) - target_y)
+    return clip(1.0 - dist / _APPROACH_RADIUS_MM, 0.0, 1.0)
 
 
 def is_dribble_zone(features: TakeoverFeatures) -> bool:
@@ -293,6 +311,19 @@ def is_ball_confident(step_ctx: StepContext) -> bool:
     )
 
 
+def ball_confidence_profile(step_ctx: StepContext) -> tuple[bool, bool, bool, float]:
+    obs = step_ctx.obs
+    rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
+    visible = bool(float(obs.ball_seen_percentage) > 5.0 or float(obs.time_since_ball_seen) <= BALL_VISIBLE_MAX_AGE_MS)
+    trusted = bool((not rescued) and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS)
+    seen_term = clip(float(obs.ball_seen_percentage) / 100.0, 0.0, 1.0)
+    age_term = clip(1.0 - (float(obs.time_since_ball_seen) / BALL_VISIBLE_MAX_AGE_MS), 0.0, 1.0)
+    confidence = 0.5 * seen_term + 0.5 * age_term
+    if rescued:
+        confidence *= 0.25
+    return visible, trusted, rescued, float(confidence)
+
+
 def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluation:
     prev_obs = step_ctx.prev_obs or step_ctx.obs
     prev_features = features_from_obs(prev_obs)
@@ -304,11 +335,20 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     shoot_zone = is_shoot_zone(cur_features)
     dribble_zone = is_dribble_zone(cur_features)
     ball_confident = is_ball_confident(step_ctx)
+    ball_visible, ball_trusted, ball_rescued, ball_confidence = ball_confidence_profile(step_ctx)
+    coarse_scale = 0.35 + 0.65 * ball_confidence if ball_visible else 0.0
+    fine_scale = ball_confidence if ball_trusted else 0.35 * ball_confidence if not ball_rescued else 0.0
 
-    progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0)
-    align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0)
-    enter_takeover = 1.0 if ball_confident and takeover_envelope and not prev_takeover_envelope else 0.0
-    hold_takeover = 1.0 if ball_confident and takeover_envelope else 0.0
+    progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * coarse_scale
+    align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
+    enter_takeover = 1.0 if ball_confident and ball_trusted and takeover_envelope and not prev_takeover_envelope else 0.0
+    # Walk in the takeover envelope earns bad_walk; hold_takeover only fires for
+    # dribble/shoot so the gradient clearly pushes away from walk.
+    hold_takeover = (
+        fine_scale
+        if ball_confident and ball_trusted and takeover_envelope and step_ctx.skill_name != "walk"
+        else 0.0
+    )
 
     good_walk = (
         1.0
@@ -327,14 +367,18 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     )
 
     good_dribble = (
-        1.0
-        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and dribble_zone
+        fine_scale
+        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and ball_trusted and dribble_zone
         else 0.0
     )
     bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not dribble_zone else 0.0
+    if step_ctx.skill_name == "dribble" and not ball_trusted:
+        bad_dribble += 0.5 if ball_rescued else 0.25
 
-    good_shoot = 1.0 if step_ctx.skill_name == "shoot" and ball_confident and shoot_zone else 0.0
+    good_shoot = fine_scale if step_ctx.skill_name == "shoot" and ball_confident and ball_trusted and shoot_zone else 0.0
     bad_shoot = 1.0 if step_ctx.skill_name == "shoot" and not shoot_zone else 0.0
+    if step_ctx.skill_name == "shoot" and not ball_trusted:
+        bad_shoot += 0.5 if ball_rescued else 0.25
     projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
 
     skill_switch = 1.0 if step_ctx.prev_skill_name is not None and step_ctx.skill_name != step_ctx.prev_skill_name else 0.0
@@ -350,13 +394,22 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     corridor_keep = 1.0 if step_ctx.stage >= 3 and step_ctx.corridor_open else 0.0
 
     ball_progress_post_takeover = 0.0
-    if ball_confident and takeover_envelope:
+    if ball_confident and ball_trusted and takeover_envelope:
         prev_goal_dist = goal_ball_distance_mm(prev_obs)
         cur_goal_dist = goal_ball_distance_mm(step_ctx.obs)
-        ball_progress_post_takeover = clip((prev_goal_dist - cur_goal_dist) / 300.0, -1.0, 1.0)
+        ball_progress_post_takeover = clip((prev_goal_dist - cur_goal_dist) / 300.0, -1.0, 1.0) * fine_scale
 
     first_to_ball_reward = 1.0 if step_ctx.stage >= 4 and step_ctx.first_to_ball else 0.0
     bad_duel_penalty = 1.0 if step_ctx.stage >= 4 and step_ctx.bad_duel else 0.0
+
+    # Approach reward: incentivizes reaching the ideal pre-takeover position
+    # (210mm behind the ball along field-x) when the ball is trusted but the
+    # robot is not yet in the takeover envelope.
+    approach_ball = (
+        _approach_quality(step_ctx.obs) * ball_confidence
+        if (not takeover_envelope and ball_trusted and not ball_rescued)
+        else 0.0
+    )
 
     terms = {
         "progress_ball": progress_ball,
@@ -380,6 +433,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "ball_progress_post_takeover": ball_progress_post_takeover,
         "first_to_ball": first_to_ball_reward,
         "bad_duel": bad_duel_penalty,
+        "approach_ball": approach_ball,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

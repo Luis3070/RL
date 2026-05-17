@@ -13,7 +13,6 @@ from action import StructuredSkillAction
 from config import ACTION, ENV, ROOT_DIR
 from environment import (
     BALL_TRUSTED_MAX_AGE_MS,
-    BALL_TRUSTED_SEEN_PCT_MIN,
     BALL_VISIBLE_MAX_AGE_MS,
     BALL_VISIBLE_SEEN_PCT_MIN,
     OBS_SIZE,
@@ -175,10 +174,10 @@ def main() -> None:
                 seen_pct = float(raw.get("ball_seen_percentage", 0.0))
                 time_since_seen = float(raw.get("time_since_ball_seen", 0.0))
                 visible_mask_expected = bool(seen_pct > BALL_VISIBLE_SEEN_PCT_MIN or time_since_seen <= BALL_VISIBLE_MAX_AGE_MS)
+                natural_time_since_seen = float(info.get("natural_time_since_ball_seen", float("inf")))
                 trusted_mask_expected = bool(
                     (not bool(info.get("ball_rescued_mask", False)))
-                    and seen_pct >= BALL_TRUSTED_SEEN_PCT_MIN
-                    and time_since_seen <= BALL_TRUSTED_MAX_AGE_MS
+                    and natural_time_since_seen <= BALL_TRUSTED_MAX_AGE_MS
                 )
                 if bool(info.get("ball_visible_mask", False)) != visible_mask_expected:
                     record_violation(

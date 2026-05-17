@@ -19,7 +19,7 @@ from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
-from action import SkillType, StructuredSkillAction, action_to_numpy
+from action import StructuredSkillAction, action_to_numpy
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
@@ -41,21 +41,21 @@ class ScriptRunConfig:
     embedded_qt_platform: str | None = ENV.backend.embedded_qt_platform
     embedded_3d_preflight: bool = ENV.backend.embedded_3d_preflight
     smoke_steps: int = TRAIN.smoke_steps
-    train_steps: int = 1024
+    train_steps: int = 800_000
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     stage_id: int = 0
-    max_stage_id: int = 0
+    max_stage_id: int = 3
     save_telemetry: bool = True
     save_plots: bool = True
     capture_eval_steps: bool = True
-    telemetry_tag: str = "sanity_stage0_ide"
+    telemetry_tag: str = "overnight_stage0_to_3"
     experiment_name: str = TRAIN.experiment_name
-    max_episode_steps: int = 160
-    rollout_steps: int = 64
-    learning_epochs: int = 2
-    mini_batches: int = 2
-    eval_interval: int = 256
-    checkpoint_interval: int = 512
+    max_episode_steps: int = 220
+    rollout_steps: int = 256
+    learning_epochs: int = 4
+    mini_batches: int = 4
+    eval_interval: int = 5_000
+    checkpoint_interval: int = 5_000
     eval_episodes: int = 2
     abort_on_wire_fail: bool = False
     parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
@@ -77,6 +77,13 @@ class TelemetryPaths:
 IDE_RUN = ScriptRunConfig()
 
 
+def _env_bool(name: str, fallback: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return fallback
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _parse_player_numbers(value: str | None, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not value:
         return fallback
@@ -89,12 +96,39 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         cfg = replace(cfg, mode=mode)
     if train_steps := os.environ.get("RL_TRAIN_STEPS"):
         cfg = replace(cfg, train_steps=int(train_steps))
+    if learner_device := os.environ.get("RL_LEARNER_DEVICE"):
+        cfg = replace(cfg, learner_device=learner_device)
+    if smoke_steps := os.environ.get("RL_SMOKE_STEPS"):
+        cfg = replace(cfg, smoke_steps=int(smoke_steps))
     if stage_id := os.environ.get("RL_STAGE_ID"):
         cfg = replace(cfg, stage_id=int(stage_id))
     if max_stage_id := os.environ.get("RL_MAX_STAGE_ID"):
         cfg = replace(cfg, max_stage_id=int(max_stage_id))
+    if max_episode_steps := os.environ.get("RL_MAX_EPISODE_STEPS"):
+        cfg = replace(cfg, max_episode_steps=int(max_episode_steps))
+    if rollout_steps := os.environ.get("RL_ROLLOUT_STEPS"):
+        cfg = replace(cfg, rollout_steps=int(rollout_steps))
+    if learning_epochs := os.environ.get("RL_LEARNING_EPOCHS"):
+        cfg = replace(cfg, learning_epochs=int(learning_epochs))
+    if mini_batches := os.environ.get("RL_MINI_BATCHES"):
+        cfg = replace(cfg, mini_batches=int(mini_batches))
+    if eval_interval := os.environ.get("RL_EVAL_INTERVAL"):
+        cfg = replace(cfg, eval_interval=int(eval_interval))
+    if checkpoint_interval := os.environ.get("RL_CHECKPOINT_INTERVAL"):
+        cfg = replace(cfg, checkpoint_interval=int(checkpoint_interval))
+    if eval_episodes := os.environ.get("RL_EVAL_EPISODES"):
+        cfg = replace(cfg, eval_episodes=int(eval_episodes))
+    cfg = replace(
+        cfg,
+        save_telemetry=_env_bool("RL_SAVE_TELEMETRY", cfg.save_telemetry),
+        save_plots=_env_bool("RL_SAVE_PLOTS", cfg.save_plots),
+        capture_eval_steps=_env_bool("RL_CAPTURE_EVAL_STEPS", cfg.capture_eval_steps),
+        abort_on_wire_fail=_env_bool("RL_ABORT_ON_WIRE_FAIL", cfg.abort_on_wire_fail),
+    )
     if telemetry_tag := os.environ.get("RL_TELEMETRY_TAG"):
         cfg = replace(cfg, telemetry_tag=telemetry_tag)
+    if experiment_name := os.environ.get("RL_EXPERIMENT_NAME"):
+        cfg = replace(cfg, experiment_name=experiment_name)
     cfg = replace(
         cfg,
         parallel_player_numbers=_parse_player_numbers(
@@ -141,7 +175,7 @@ class PolicyNetwork(GaussianMixin, Model):
             self,
             clip_actions=True,
             clip_log_std=True,
-            min_log_std=-4.0,
+            min_log_std=-2.0,
             max_log_std=0.0,
         )
         self.net = nn.Sequential(
@@ -154,8 +188,14 @@ class PolicyNetwork(GaussianMixin, Model):
         self.log_std_parameter = nn.Parameter(torch.full((self.num_actions,), -0.5, dtype=torch.float32))
         with torch.no_grad():
             final_linear = self.net[-1]
-            if isinstance(final_linear, nn.Linear) and final_linear.bias is not None and final_linear.bias.numel() > 0:
-                final_linear.bias[0] = float(SkillType.walk)
+            if isinstance(final_linear, nn.Linear):
+                # Small orthogonal init keeps initial mean_actions near 0 (within action
+                # space) so the first PPO update never sees ratio-overflow NaN.
+                nn.init.orthogonal_(final_linear.weight, gain=0.01)
+                if final_linear.bias is not None:
+                    nn.init.zeros_(final_linear.bias)
+                    # Compact skill encoding: 0=walk, 1=dribble, 2=shoot. Start at walk.
+                    final_linear.bias[0] = 0.0
         self.to(device)
 
     def compute(self, inputs, role=""):
@@ -535,6 +575,12 @@ def _tensorize_eval_state(state: np.ndarray, device: str) -> torch.Tensor:
 
 
 def _extract_tracking_dict(agent: MAPPO) -> Mapping[str, object]:
+    # Prefer the snapshot: it's built after each write_tracking_data call and
+    # persists loss keys across skrl's internal clear() between rollouts.
+    # The live tracking_data only contains reward/episode metrics mid-rollout.
+    snapshot = getattr(agent, "_last_tracking_snapshot", None)
+    if isinstance(snapshot, Mapping) and snapshot:
+        return snapshot
     for attr_name in ("track_data", "tracking_data", "_track_data", "_tracking_data"):
         value = getattr(agent, attr_name, None)
         if callable(value):
@@ -545,9 +591,6 @@ def _extract_tracking_dict(agent: MAPPO) -> Mapping[str, object]:
         if isinstance(value, Mapping):
             if value:
                 return value
-    snapshot = getattr(agent, "_last_tracking_snapshot", None)
-    if isinstance(snapshot, Mapping) and snapshot:
-        return snapshot
     return {}
 
 
@@ -559,6 +602,28 @@ def _extract_agent_stat(agent: MAPPO, *candidate_keys: str) -> float:
             if np.isfinite(value):
                 return value
     return float("nan")
+
+
+def _diagnose_nan_source(agent: MAPPO, *candidate_keys: str) -> str:
+    """Return a one-line string explaining WHY _extract_agent_stat returned NaN.
+
+    Returns one of:
+      "key_not_found"   — none of the candidate keys exist in the tracking dict
+      "value_nan"       — key found, stored value is NaN  (genuine numerical NaN)
+      "value_inf"       — key found, stored value is ±Inf (numerical overflow)
+    """
+    tracking = _extract_tracking_dict(agent)
+    if not tracking:
+        return "key_not_found (tracking dict is empty)"
+    for key in candidate_keys:
+        if key in tracking:
+            value = _coerce_scalar_metric(tracking[key])
+            if np.isnan(value):
+                return f"value_nan (key='{key}' raw={tracking[key]!r})"
+            if np.isinf(value):
+                return f"value_inf (key='{key}' raw={tracking[key]!r})"
+            return f"value_finite={value:.4f} (key='{key}')"
+    return f"key_not_found (tried={candidate_keys!r}, available_sample={list(tracking)[:4]!r})"
 
 
 def sample_smoke_action(
@@ -711,6 +776,7 @@ def evaluate_agent(
                 timestep=timestep,
                 timesteps=timesteps,
             )
+        safe_eval_actions = {k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0) for k, v in actions.items()}
         return {
             agent_id: StructuredSkillAction(
                 skill_type=int(round(float(action_tensor[0]))),
@@ -720,7 +786,7 @@ def evaluate_agent(
                 pass_target=int(round(float(action_tensor[4]))),
             )
             for agent_id, action_tensor in (
-                (uid, actions[uid].detach().cpu().reshape(-1).numpy())
+                (uid, safe_eval_actions[uid].detach().cpu().reshape(-1).numpy())
                 for uid in eval_env.possible_agents
             )
         }
@@ -779,6 +845,9 @@ def print_eval_summary(
     collision_rate = float(summary.get("collision_rate", 0.0))
     mean_time_to_takeover = float(summary.get("mean_time_to_takeover", 0.0))
     stability_score = float(summary.get("stability_score", 0.0))
+    ball_trusted_rate = float(summary.get("ball_trusted_rate", 0.0))
+    ball_rescued_rate = float(summary.get("ball_rescued_rate", 0.0))
+    ball_confidence_score_mean = float(summary.get("ball_confidence_score_mean", 0.0))
     policy_loss = _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss")
     value_loss = _extract_agent_stat(agent, f"Loss / Value loss ({agent_id})", "Loss / Value loss", "value_loss")
     entropy = _extract_agent_stat(
@@ -794,6 +863,8 @@ def print_eval_summary(
         f"reward_mean={reward_mean:.3f} "
         f"takeover={clean_takeover_rate:.3f} finish={clean_finish_rate:.3f} "
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
+        f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
+        f"ball_conf={ball_confidence_score_mean:.3f} "
         f"time_to_takeover={mean_time_to_takeover:.1f} stability={stability_score:.3f} "
         f"policy_loss={policy_loss:.4f} value_loss={value_loss:.4f} entropy={entropy:.4f} "
         f"wire={wire_audit.get('wire_audit_status', 'UNKNOWN')}",
@@ -985,7 +1056,12 @@ def run_smoke(
             observations, rewards, terminated, truncated, infos = wrapped_env.step(
                 {a: action_tensor for a in all_agents}
             )
-            reward_value = float(rewards[primary_agent].item())
+            if primary_agent not in rewards or primary_agent not in infos:
+                if infos:
+                    final_step_info = next(iter(infos.values()))
+                break
+            reward_tensor = rewards[primary_agent]
+            reward_value = float(reward_tensor.item() if hasattr(reward_tensor, "item") else reward_tensor)
             total_reward += reward_value
             completed_steps = step + 1
             step_info = infos[primary_agent]
@@ -1000,7 +1076,11 @@ def run_smoke(
                 f"frame={step_info['bridge_frame']}",
                 flush=True,
             )
-            if bool(terminated[primary_agent].item()) or bool(truncated[primary_agent].item()):
+            terminated_value = terminated[primary_agent]
+            truncated_value = truncated[primary_agent]
+            is_terminated = bool(terminated_value.item() if hasattr(terminated_value, "item") else terminated_value)
+            is_truncated = bool(truncated_value.item() if hasattr(truncated_value, "item") else truncated_value)
+            if is_terminated or is_truncated:
                 print(f"[smoke] episode_metrics={step_info.get('episode_metrics', {})}", flush=True)
                 break
     finally:
@@ -1079,6 +1159,19 @@ def run_training(
         observations, infos = wrapped_env.reset()
         stage_history: Dict[int, Dict[str, float]] = {}
         agent_id = wrapped_env.possible_agents[0]
+        _nan_reload_count = 0
+
+        # Save initial weights as bootstrap checkpoint so the NaN guard can
+        # fire from the very first rollout (before checkpoint_interval elapses).
+        _initial_ckpt = save_checkpoint(
+            checkpoint_models,
+            train_cfg=TRAIN,
+            timestep=0,
+            stage_id=current_stage,
+            eval_summary=None,
+        )
+        last_good_checkpoint_path: Path = _initial_ckpt
+        print(f"[checkpoint] initial saved={_initial_ckpt}", flush=True)
 
         for timestep in range(timesteps):
             observations_device = _move_to_device(observations, device)
@@ -1091,13 +1184,15 @@ def run_training(
                     timestep=timestep,
                     timesteps=timesteps,
                 )
-                next_observations, rewards, terminated, truncated, infos = wrapped_env.step(_move_to_device(actions, "cpu"))
+                # Guard against NaN/Inf actions from a corrupted policy (prevents SimRobot hang)
+                safe_actions = {k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0) for k, v in actions.items()}
+                next_observations, rewards, terminated, truncated, infos = wrapped_env.step(_move_to_device(safe_actions, "cpu"))
                 next_observations_device = _move_to_device(next_observations, device)
                 next_states_device = _agent_state_from_env(raw_env, agent_id, device)
                 agent.record_transition(
                     observations=observations_device,
                     states=states_device,
-                    actions=actions,
+                    actions=safe_actions,
                     rewards=_move_to_device(rewards, device),
                     next_observations=next_observations_device,
                     next_states=next_states_device,
@@ -1108,6 +1203,34 @@ def run_training(
                     timesteps=timesteps,
                 )
             agent.post_interaction(timestep=timestep, timesteps=timesteps)
+
+            if (timestep + 1) % TRAIN.rollout_steps == 0:
+                _ploss = _extract_agent_stat(
+                    agent,
+                    f"Loss / Policy loss ({agent_id})",
+                    "Loss / Policy loss",
+                    "policy_loss",
+                )
+                if np.isnan(_ploss) and last_good_checkpoint_path is not None and _nan_reload_count < 10:
+                    _nan_reload_count += 1
+                    _nan_diag = _diagnose_nan_source(
+                        agent,
+                        f"Loss / Policy loss ({agent_id})",
+                        "Loss / Policy loss",
+                        "policy_loss",
+                    )
+                    print(
+                        f"[nan-guard] step={timestep + 1} reload #{_nan_reload_count}/10"
+                        f" diag={_nan_diag} ← {last_good_checkpoint_path.name}",
+                        flush=True,
+                    )
+                    _ckpt = torch.load(last_good_checkpoint_path, map_location=device, weights_only=True)
+                    checkpoint_models["policy"].load_state_dict(_ckpt["policy_state_dict"])
+                    checkpoint_models["value"].load_state_dict(_ckpt["value_state_dict"])
+                    # Reset log_std to initial value to escape degenerate σ regime
+                    with torch.no_grad():
+                        if hasattr(checkpoint_models["policy"], "log_std_parameter"):
+                            checkpoint_models["policy"].log_std_parameter.fill_(-0.5)
 
             if not wrapped_env.agents:
                 observations, infos = wrapped_env.reset()
@@ -1156,6 +1279,15 @@ def run_training(
                     eval_summary={**dict(eval_summary), **dict(wire_audit)},
                 )
                 print(f"[checkpoint] saved={checkpoint_path}", flush=True)
+                _ploss_ckpt = _extract_agent_stat(
+                    agent,
+                    f"Loss / Policy loss ({agent_id})",
+                    "Loss / Policy loss",
+                    "policy_loss",
+                )
+                if not np.isnan(_ploss_ckpt):
+                    last_good_checkpoint_path = checkpoint_path
+                    _nan_reload_count = 0
 
             if abort_on_wire_fail and wire_audit["wire_audit_status"] == "FAIL":
                 raise RuntimeError(f"Wire audit failed at timestep {timestep + 1}: {wire_audit['wire_audit_failures']}")
@@ -1163,8 +1295,12 @@ def run_training(
             if (timestep + 1) < timesteps:
                 observations, infos = wrapped_env.reset()
 
-            if TRAIN.auto_promote and current_stage < max_stage_id and promote_stage(current_stage, eval_summary, stage_history):
-                stage_history[current_stage] = dict(eval_summary)
+            promotion_metrics = {**dict(eval_summary), **dict(wire_audit)}
+            _policy_healthy = not np.isnan(
+                _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss")
+            )
+            if TRAIN.auto_promote and _policy_healthy and current_stage < max_stage_id and promote_stage(current_stage, promotion_metrics, stage_history):
+                stage_history[current_stage] = dict(promotion_metrics)
                 current_stage += 1
                 print(f"[curriculum] promoted_to_stage={current_stage} at_step={timestep + 1}", flush=True)
                 wrapped_env.close()
@@ -1212,9 +1348,11 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         f"[run] mode={run_cfg.mode} learner_device={run_cfg.learner_device} "
         f"env_backend={run_cfg.backend} obs_mode={run_cfg.obs_mode} "
         f"simrobot_profile={run_cfg.simrobot_profile} stage={run_cfg.stage_id} "
+        f"max_stage={run_cfg.max_stage_id} "
         f"embedded_qt_platform={run_cfg.embedded_qt_platform or 'auto'} "
         f"embedded_3d_preflight={int(bool(run_cfg.embedded_3d_preflight))} "
-        f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps}",
+        f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps} "
+        f"eval_interval={effective_train.eval_interval} checkpoint_interval={effective_train.checkpoint_interval}",
         flush=True,
     )
 

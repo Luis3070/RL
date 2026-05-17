@@ -57,6 +57,7 @@ _STAGE_SPECS = {
             align_ball=0.8,
             enter_takeover=2.5,
             hold_takeover=0.4,
+            approach_ball=0.06,
             good_walk=0.5,
             bad_walk=-0.8,
             good_dribble=0.8,
@@ -84,6 +85,7 @@ _STAGE_SPECS = {
             align_ball=0.7,
             enter_takeover=2.2,
             hold_takeover=0.4,
+            approach_ball=0.05,
             good_walk=0.4,
             bad_walk=-0.8,
             good_dribble=0.9,
@@ -111,6 +113,7 @@ _STAGE_SPECS = {
             align_ball=0.6,
             enter_takeover=2.0,
             hold_takeover=0.5,
+            approach_ball=0.04,
             good_walk=0.3,
             bad_walk=-0.9,
             good_dribble=1.1,
@@ -140,6 +143,7 @@ _STAGE_SPECS = {
             align_ball=0.5,
             enter_takeover=1.8,
             hold_takeover=0.6,
+            approach_ball=0.03,
             good_walk=0.2,
             bad_walk=-1.0,
             good_dribble=1.4,
@@ -294,18 +298,18 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
             radius_max_mm=stage.ball_radius_max_mm or 800.0,
-            robot_xy_bounds=(-1600.0, -400.0, -700.0, 700.0),
-            line_angle_range_deg=25.0,
-            heading_noise_deg=20.0,
+            robot_xy_bounds=(-1500.0, -500.0, -550.0, 550.0),
+            line_angle_range_deg=18.0,
+            heading_noise_deg=12.0,
         )
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 1:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
             radius_max_mm=stage.ball_radius_max_mm or 1600.0,
-            robot_xy_bounds=(-2200.0, -500.0, -900.0, 900.0),
-            line_angle_range_deg=40.0,
-            heading_noise_deg=30.0,
+            robot_xy_bounds=(-2100.0, -550.0, -800.0, 800.0),
+            line_angle_range_deg=28.0,
+            heading_noise_deg=18.0,
         )
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 2:
@@ -349,37 +353,86 @@ def get_dynamic_world_update(stage_id: int, episode_step: int, robot_x: float, r
     return {"opponents": opponents}
 
 
+def _metric(metrics: Mapping[str, float], name: str, default: float = 0.0) -> float:
+    try:
+        return float(metrics.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _wire_is_healthy(metrics: Mapping[str, float]) -> bool:
+    return str(metrics.get("wire_audit_status", "PASS")) != "FAIL"
+
+
+def _ball_semantics_ok(
+    metrics: Mapping[str, float],
+    *,
+    trusted_min: float,
+    rescued_max: float,
+    confidence_min: float,
+) -> bool:
+    return (
+        _metric(metrics, "ball_visible_rate") >= 0.90
+        and _metric(metrics, "ball_trusted_rate") >= trusted_min
+        and _metric(metrics, "ball_rescued_rate") <= rescued_max
+        and _metric(metrics, "ball_confidence_score_mean") >= confidence_min
+    )
+
+
+def _behavior_is_stable(metrics: Mapping[str, float], *, thrash_max: float, collision_max: float) -> bool:
+    return (
+        _wire_is_healthy(metrics)
+        and _metric(metrics, "thrash_rate", 1.0) <= thrash_max
+        and _metric(metrics, "collision_rate", 1.0) <= collision_max
+    )
+
+
 def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[int, Mapping[str, float]]) -> bool:
     if stage_id == 0:
         return (
-            metrics.get("clean_walk_rate", 0.0) >= 0.95
-            and metrics.get("clean_takeover_rate", 0.0) >= 0.95
-            and metrics.get("clean_finish_rate", 0.0) >= 0.95
-            and metrics.get("thrash_rate", 1.0) <= 0.05
+            _ball_semantics_ok(metrics, trusted_min=0.60, rescued_max=0.35, confidence_min=0.50)
+            and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.10)
+            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.05
+            and (
+                _metric(metrics, "walk_compat_rate") >= 0.08
+                or _metric(metrics, "takeover_success_rate") >= 0.50
+                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= 20.0
+            )
+            and _metric(metrics, "stability_score") >= 0.38
         )
     if stage_id == 1:
         stage0 = history.get(0, {})
         return (
-            metrics.get("clean_walk_rate", 0.0) >= 0.90
-            and metrics.get("clean_takeover_rate", 0.0) >= 0.90
-            and metrics.get("clean_finish_rate", 0.0) >= 0.90
-            and metrics.get("mean_time_to_takeover", float("inf")) <= stage0.get("mean_time_to_takeover", float("inf"))
-            and metrics.get("thrash_rate", 1.0) <= 0.08
+            _ball_semantics_ok(metrics, trusted_min=0.58, rescued_max=0.38, confidence_min=0.48)
+            and _behavior_is_stable(metrics, thrash_max=0.10, collision_max=0.10)
+            and _metric(metrics, "episode_reward_mean", -999.0) >= _metric(stage0, "episode_reward_mean", -0.10) - 0.05
+            and (
+                _metric(metrics, "walk_compat_rate") >= 0.08
+                or _metric(metrics, "takeover_success_rate") >= 0.35
+                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= 35.0
+            )
+            and (
+                _metric(metrics, "takeover_success_rate") >= 0.10
+                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= _metric(stage0, "mean_time_to_takeover", float("inf"))
+            )
         )
     if stage_id == 2:
         return (
-            metrics.get("clean_takeover_rate", 0.0) >= 0.85
-            and metrics.get("clean_finish_rate", 0.0) >= 0.85
-            and metrics.get("collision_rate", 1.0) <= 0.05
-            and metrics.get("obstacle_clearance_success", 0.0) >= 0.85
-            and metrics.get("thrash_rate", 1.0) <= 0.10
+            _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
+            and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
+            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.25
+            and (
+                _metric(metrics, "obstacle_clearance_success") >= 0.25
+                or _metric(metrics, "clearance_positive_steps") > 0.0
+                or _metric(metrics, "stability_score") >= 0.42
+            )
         )
     if stage_id == 3:
         stage2 = history.get(2, {})
         return (
-            metrics.get("clean_episode_rate", 0.0) >= 0.80
-            and metrics.get("collision_rate", 1.0) <= 0.08
-            and metrics.get("dynamic_obstacle_success", 0.0) > 0.50
-            and metrics.get("stability_score", 0.0) >= stage2.get("stability_score", 0.0)
+            _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
+            and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
+            and _metric(metrics, "dynamic_obstacle_success") >= 0.20
+            and _metric(metrics, "stability_score") >= _metric(stage2, "stability_score", 0.0) - 0.05
         )
     return False

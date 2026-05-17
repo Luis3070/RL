@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import math
 import os
 import re
@@ -23,6 +24,28 @@ from config import (
 )
 
 PYBH_MAKE_PYTHON = BHUMAN_DIR / "Make/Python"
+ONNXRUNTIME_LIB_DIR = BHUMAN_DIR / "Util/onnxruntime/lib/Linux"
+ONNXRUNTIME_LIB_PATH = ONNXRUNTIME_LIB_DIR / "libonnxruntime.so.1.10.0"
+
+
+def _ensure_pybh_runtime_dependencies() -> None:
+    if not ONNXRUNTIME_LIB_PATH.exists():
+        return
+
+    current_ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    search_paths = current_ld_library_path.split(":") if current_ld_library_path else []
+    if str(ONNXRUNTIME_LIB_DIR) not in search_paths:
+        os.environ["LD_LIBRARY_PATH"] = (
+            f"{ONNXRUNTIME_LIB_DIR}:{current_ld_library_path}" if current_ld_library_path else str(ONNXRUNTIME_LIB_DIR)
+        )
+
+    # When Python starts without LD_LIBRARY_PATH (common from IDE run buttons),
+    # the extension import below cannot locate ONNX Runtime on its own.
+    # Preloading the exact .so here makes train.py plug-and-play.
+    ctypes.CDLL(str(ONNXRUNTIME_LIB_PATH), mode=getattr(ctypes, "RTLD_GLOBAL", 0))
+
+
+_ensure_pybh_runtime_dependencies()
 if PYBH_MAKE_PYTHON.exists() and str(PYBH_MAKE_PYTHON) not in sys.path:
     sys.path.insert(0, str(PYBH_MAKE_PYTHON))
 

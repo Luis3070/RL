@@ -32,7 +32,10 @@ PASS_COUNT_NORM = 5.0
 UPRIGHT_MAX_FALL_STATE = 2
 BALL_VISIBLE_SEEN_PCT_MIN = 5.0
 BALL_VISIBLE_MAX_AGE_MS = 1200.0
-BALL_TRUSTED_SEEN_PCT_MIN = 20.0
+# BALL_TRUSTED_SEEN_PCT_MIN: removed — with ci 30 the seenPercentage window (60
+# frames) contains only 2 image frames, capping the achievable value at 3.3%.
+# The 20% threshold could never be met regardless of detection quality.
+# Trust is now based on natural_time_since_ball_seen (Option B).
 BALL_TRUSTED_MAX_AGE_MS = 600.0
 BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
 
@@ -44,8 +47,7 @@ def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
     visible = bool(seen_pct > BALL_VISIBLE_SEEN_PCT_MIN or time_since_seen <= BALL_VISIBLE_MAX_AGE_MS)
     trusted = bool(
         (not rescued)
-        and seen_pct >= BALL_TRUSTED_SEEN_PCT_MIN
-        and time_since_seen <= BALL_TRUSTED_MAX_AGE_MS
+        and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS
     )
     semi_trusted = bool(
         (not rescued)
@@ -112,12 +114,16 @@ class RealSimRobotEnv(ParallelEnv):
         self.observation_spaces = {
             "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
         }
+        # Skill dimension uses compact indices 0..N-1 mapped to active_skill_names order.
+        # This keeps all active skills adjacent so exploration is uniform.
+        # Mapping: 0→walk, 1→dribble, 2→shoot (per ACTIVE_SKILLS ordering).
+        self._compact_skill_map: tuple[str, ...] = tuple(self.stage_spec.active_skill_names)
         self.action_spaces = {
             "player_1": gym.spaces.Box(
                 low=np.asarray([0.0, -ACTION.x_range, -ACTION.y_range, -math.pi, 0.0], dtype=np.float32),
                 high=np.asarray(
                     [
-                        float(len(ACTION.skill_names) - 1),
+                        float(len(self._compact_skill_map) - 1),
                         ACTION.x_range,
                         ACTION.y_range,
                         math.pi,
@@ -178,6 +184,17 @@ class RealSimRobotEnv(ParallelEnv):
             policy_action = action_from_mapping(action_payload)
         else:
             policy_action = action_from_numpy(np.asarray(action_payload, dtype=np.float32))
+
+        # Remap compact skill index (0..N-1) → SkillType integer so that
+        # all active skills are adjacent and equally reachable by exploration.
+        compact_idx = max(0, min(int(policy_action.skill_type), len(self._compact_skill_map) - 1))
+        policy_action = StructuredSkillAction(
+            skill_type=int(SkillType.from_public_name(self._compact_skill_map[compact_idx])),
+            target_x=policy_action.target_x,
+            target_y=policy_action.target_y,
+            target_theta=policy_action.target_theta,
+            pass_target=policy_action.pass_target,
+        )
 
         if self._last_backend_obs is None:
             raise RuntimeError("step() called before reset()")

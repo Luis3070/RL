@@ -124,6 +124,12 @@ class RealSimRobotEnvWrapper:
             "reward_terms_sum": dict(reward_terms_sum),
             "reward_weighted_terms_sum": dict(weighted_terms_sum),
             "episode_metrics": episode_metrics,
+            "ball_semantics": {
+                "ball_trusted_rate": float(episode_metrics.get("ball_trusted_rate", 0.0)),
+                "ball_rescued_rate": float(episode_metrics.get("ball_rescued_rate", 0.0)),
+                "ball_confidence_score_mean": float(episode_metrics.get("ball_confidence_score_mean", 0.0)),
+                "first_trusted_ball_after_reset_ms": float(episode_metrics.get("first_trusted_ball_after_reset_ms", 0.0)),
+            },
             "final_info": final_info,
             "step_records": step_records,
         }
