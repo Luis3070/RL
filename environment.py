@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import os
+import time
+from collections import defaultdict
 from dataclasses import asdict
 from typing import Dict, Optional
 
@@ -38,6 +41,9 @@ BALL_VISIBLE_MAX_AGE_MS = 1200.0
 # Trust is now based on natural_time_since_ball_seen (Option B).
 BALL_TRUSTED_MAX_AGE_MS = 600.0
 BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
+
+_STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
+_PROFILE_INTERVAL = int(os.getenv("RL_PROFILE_INTERVAL", "256"))
 
 
 def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
@@ -145,6 +151,9 @@ class RealSimRobotEnv(ParallelEnv):
         self._skill_history: list[str] = []
         self._current_world_spec = None
         self._episode_tracker: Dict[str, object] = {}
+        if _STEP_PROFILE:
+            self._prof_acc: Dict[str, float] = defaultdict(float)
+            self._prof_count = 0
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -200,7 +209,11 @@ class RealSimRobotEnv(ParallelEnv):
             raise RuntimeError("step() called before reset()")
 
         executed_action, projection_applied = self.project_action(policy_action, obs=self._last_backend_obs)
+        if _STEP_PROFILE:
+            _t0 = time.perf_counter()
         obs = self.backend.step(executed_action)
+        if _STEP_PROFILE:
+            _t1 = time.perf_counter()
         self._episode_step += 1
 
         dynamic_update_applied = False
@@ -242,7 +255,11 @@ class RealSimRobotEnv(ParallelEnv):
             bad_duel=False,
         )
         evaluation = evaluate_step(step_ctx, self.stage_spec.reward_weights)
+        if _STEP_PROFILE:
+            _t2 = time.perf_counter()
         encoded = self._encode_obs(obs)
+        if _STEP_PROFILE:
+            _t3 = time.perf_counter()
         self._update_episode_tracker(step_ctx, evaluation, projection_applied, dynamic_update_applied)
 
         self._last_obs = encoded
@@ -260,6 +277,30 @@ class RealSimRobotEnv(ParallelEnv):
             dynamic_update_applied=dynamic_update_applied,
             done=done,
         )
+
+        if _STEP_PROFILE:
+            _t4 = time.perf_counter()
+            self._prof_acc["backend_ms"] += (_t1 - _t0) * 1e3
+            self._prof_acc["reward_ms"] += (_t2 - _t1) * 1e3
+            self._prof_acc["encode_ms"] += (_t3 - _t2) * 1e3
+            self._prof_acc["other_ms"] += (_t4 - _t3) * 1e3
+            self._prof_count += 1
+            if self._prof_count >= _PROFILE_INTERVAL:
+                n = self._prof_count
+                total = sum(self._prof_acc.values())
+                player = getattr(self.cfg.backend, "player_number", "?")
+                print(
+                    f"[step_prof p={player} n={n}] "
+                    f"backend={self._prof_acc['backend_ms']/n:.1f}ms "
+                    f"reward={self._prof_acc['reward_ms']/n:.2f}ms "
+                    f"encode={self._prof_acc['encode_ms']/n:.2f}ms "
+                    f"other={self._prof_acc['other_ms']/n:.2f}ms "
+                    f"step_total={total/n:.1f}ms "
+                    f"step_rate={1e3*n/total:.1f}/s",
+                    flush=True,
+                )
+                self._prof_acc = defaultdict(float)
+                self._prof_count = 0
 
         rewards = {"player_1": float(evaluation.total_reward)}
         terminations = {"player_1": done}

@@ -55,21 +55,21 @@ _STAGE_SPECS = {
         reward_weights=RewardWeights(
             progress_ball=1.2,
             align_ball=0.8,
-            enter_takeover=2.5,
-            hold_takeover=0.4,
-            approach_ball=0.06,
-            good_walk=0.5,
-            bad_walk=-0.8,
-            good_dribble=0.8,
-            bad_dribble=-1.2,
+            enter_takeover=4.0,
+            hold_takeover=1.0,
+            approach_ball=0.10,
+            good_walk=0.45,
+            bad_walk=-0.35,
+            good_dribble=1.0,
+            bad_dribble=-0.65,
             good_shoot=1.2,
             bad_shoot=-1.8,
             projection_penalty=-0.10,
-            skill_switch=-0.15,
-            thrash=-0.8,
+            skill_switch=-0.05,
+            thrash=-1.0,
             goal=4.0,
             timeout=-2.0,
-            ball_progress_post_takeover=0.3,
+            ball_progress_post_takeover=0.6,
         ),
     ),
     1: StageSpec(
@@ -392,13 +392,12 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
         return (
             _ball_semantics_ok(metrics, trusted_min=0.60, rescued_max=0.35, confidence_min=0.50)
             and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.10)
-            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.05
-            and (
-                _metric(metrics, "walk_compat_rate") >= 0.08
-                or _metric(metrics, "takeover_success_rate") >= 0.50
-                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= 20.0
-            )
-            and _metric(metrics, "stability_score") >= 0.38
+            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.15
+            and _metric(metrics, "stability_score") >= 0.45
+            and _metric(metrics, "takeover_success_rate") >= 0.80
+            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 35.0
+            and _metric(metrics, "dribble_compat_rate") >= 0.20
+            and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
         )
     if stage_id == 1:
         stage0 = history.get(0, {})

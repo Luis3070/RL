@@ -27,6 +27,8 @@ PYBH_MAKE_PYTHON = BHUMAN_DIR / "Make/Python"
 ONNXRUNTIME_LIB_DIR = BHUMAN_DIR / "Util/onnxruntime/lib/Linux"
 ONNXRUNTIME_LIB_PATH = ONNXRUNTIME_LIB_DIR / "libonnxruntime.so.1.10.0"
 
+_STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
+
 
 def _ensure_pybh_runtime_dependencies() -> None:
     if not ONNXRUNTIME_LIB_PATH.exists():
@@ -461,6 +463,10 @@ class PyBHBackend:
         self.obs_mode = obs_mode
         self.player_number = int(player_number)
         self.frames_per_step = max(1, int(frames_per_step))
+        if _STEP_PROFILE:
+            self._bp_set_action_acc = 0.0
+            self._bp_read_obs_acc = 0.0
+            self._bp_count = 0
         self.obs_timeout_ms = int(obs_timeout_ms)
         default_visible_timeout_ms = max(self.obs_timeout_ms, 25000) if mode == "simrobot_visible" else self.obs_timeout_ms
         self.visible_request_timeout_ms = (
@@ -926,13 +932,33 @@ class PyBHBackend:
             max_pass_target=ACTION.max_pass_target,
         )
         adapted_action = adapt_action_to_backend(action, self._last_obs, mode=self.mode)
+        if _STEP_PROFILE:
+            _tb0 = time.perf_counter()
         self._set_action(adapted_action)
+        if _STEP_PROFILE:
+            _tb1 = time.perf_counter()
         for _ in range(self.frames_per_step):
             if self._uses_embedded_simrobot():
                 pybh.simrobot_step(1)
             elif self._uses_visible_simrobot():
                 break
         obs = self.read_obs()
+        if _STEP_PROFILE:
+            _tb2 = time.perf_counter()
+            self._bp_set_action_acc += (_tb1 - _tb0) * 1e3
+            self._bp_read_obs_acc += (_tb2 - _tb1) * 1e3
+            self._bp_count += 1
+            if self._bp_count >= int(os.getenv("RL_PROFILE_INTERVAL", "256")):
+                n = self._bp_count
+                print(
+                    f"[backend_prof p={self.player_number} n={n}] "
+                    f"set_action={self._bp_set_action_acc/n:.2f}ms "
+                    f"read_obs={self._bp_read_obs_acc/n:.1f}ms",
+                    flush=True,
+                )
+                self._bp_set_action_acc = 0.0
+                self._bp_read_obs_acc = 0.0
+                self._bp_count = 0
         self._last_obs = obs
         self._steps_since_reset += 1
         if self._uses_embedded_simrobot():
