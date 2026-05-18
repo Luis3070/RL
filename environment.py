@@ -5,13 +5,13 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import asdict
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 import gymnasium as gym
 import numpy as np
 from pettingzoo import ParallelEnv
 
-from action import SkillType, StructuredSkillAction, action_from_mapping, action_from_numpy, skill_mask
+from action import SKILL_ORDER, SkillType, StructuredSkillAction, action_from_mapping, action_from_numpy, skill_mask
 from config import ACTION, ENV
 from curriculum import (
     get_dynamic_world_update,
@@ -120,16 +120,12 @@ class RealSimRobotEnv(ParallelEnv):
         self.observation_spaces = {
             "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
         }
-        # Skill dimension uses compact indices 0..N-1 mapped to active_skill_names order.
-        # This keeps all active skills adjacent so exploration is uniform.
-        # Mapping: 0→walk, 1→dribble, 2→shoot (per ACTIVE_SKILLS ordering).
-        self._compact_skill_map: tuple[str, ...] = tuple(self.stage_spec.active_skill_names)
         self.action_spaces = {
             "player_1": gym.spaces.Box(
                 low=np.asarray([0.0, -ACTION.x_range, -ACTION.y_range, -math.pi, 0.0], dtype=np.float32),
                 high=np.asarray(
                     [
-                        float(len(self._compact_skill_map) - 1),
+                        float(len(SKILL_ORDER) - 1),
                         ACTION.x_range,
                         ACTION.y_range,
                         math.pi,
@@ -190,20 +186,25 @@ class RealSimRobotEnv(ParallelEnv):
             raise RuntimeError("step() called on terminated environment")
         action_payload = actions["player_1"]
         policy_skill_raw = 0.0
+        policy_skill_probs = {name: 0.0 for name in SKILL_ORDER}
+        policy_skill_entropy = 0.0
+        policy_param_std_mean = 0.0
         if isinstance(action_payload, dict):
             policy_skill_raw = float(action_payload.get("policy_skill_raw", action_payload.get("skill_type", 0.0)))
+            policy_skill_entropy = float(action_payload.get("policy_skill_entropy", 0.0))
+            policy_param_std_mean = float(action_payload.get("policy_param_std_mean", 0.0))
+            for name in SKILL_ORDER:
+                policy_skill_probs[name] = float(action_payload.get(f"policy_skill_prob_{name}", 0.0))
             policy_action = action_from_mapping(action_payload)
         else:
             raw_action = np.asarray(action_payload, dtype=np.float32).reshape(-1)
             policy_skill_raw = float(raw_action[0]) if raw_action.size > 0 else 0.0
             policy_action = action_from_numpy(raw_action)
 
-        # Remap compact skill index (0..N-1) → SkillType integer so that
-        # all active skills are adjacent and equally reachable by exploration.
-        compact_idx = max(0, min(int(policy_action.skill_type), len(self._compact_skill_map) - 1))
-        policy_skill_round = int(policy_action.skill_type)
+        policy_skill_round = max(0, min(int(policy_action.skill_type), len(SKILL_ORDER) - 1))
+        policy_compact_skill_index = policy_skill_round
         policy_action = StructuredSkillAction(
-            skill_type=int(SkillType.from_public_name(self._compact_skill_map[compact_idx])),
+            skill_type=policy_skill_round,
             target_x=policy_action.target_x,
             target_y=policy_action.target_y,
             target_theta=policy_action.target_theta,
@@ -213,7 +214,20 @@ class RealSimRobotEnv(ParallelEnv):
         if self._last_backend_obs is None:
             raise RuntimeError("step() called before reset()")
 
-        executed_action, projection_applied = self.project_action(policy_action, obs=self._last_backend_obs)
+        handoff_override_applied = False
+        action_for_execution = policy_action
+        if policy_action.skill_name == "walk" and self._should_force_dribble_handoff(self._last_backend_obs):
+            handoff_override_applied = True
+            fallback_targets = build_fallback_action_targets("dribble", self._last_backend_obs)
+            action_for_execution = StructuredSkillAction(
+                skill_type=SkillType.from_public_name("dribble"),
+                target_x=fallback_targets["target_x"],
+                target_y=fallback_targets["target_y"],
+                target_theta=fallback_targets["target_theta"],
+                pass_target=policy_action.pass_target,
+            )
+
+        executed_action, projection_applied = self.project_action(action_for_execution, obs=self._last_backend_obs)
         if _STEP_PROFILE:
             _t0 = time.perf_counter()
         obs = self.backend.step(executed_action)
@@ -258,6 +272,9 @@ class RealSimRobotEnv(ParallelEnv):
             corridor_open=corridor_open,
             first_to_ball=False,
             bad_duel=False,
+            policy_skill_raw=policy_skill_raw,
+            policy_skill_prob_dribble=float(policy_skill_probs.get("dribble", 0.0)),
+            handoff_override_applied=handoff_override_applied,
         )
         evaluation = evaluate_step(step_ctx, self.stage_spec.reward_weights)
         if _STEP_PROFILE:
@@ -287,7 +304,11 @@ class RealSimRobotEnv(ParallelEnv):
             dynamic_update_applied=dynamic_update_applied,
             policy_skill_raw=policy_skill_raw,
             policy_skill_round=policy_skill_round,
-            policy_compact_skill_index=compact_idx,
+            policy_compact_skill_index=policy_compact_skill_index,
+            policy_skill_probs=policy_skill_probs,
+            policy_skill_entropy=policy_skill_entropy,
+            policy_param_std_mean=policy_param_std_mean,
+            handoff_override_applied=handoff_override_applied,
             done=done,
         )
 
@@ -339,6 +360,23 @@ class RealSimRobotEnv(ParallelEnv):
             pass_target=int(action.pass_target),
         )
         return projected, True
+
+    def _should_force_dribble_handoff(self, obs: BackendObservation) -> bool:
+        if self.stage_spec.stage_id != 0 or "dribble" not in self.stage_spec.active_skill_names:
+            return False
+        if self._last_evaluation is None:
+            return False
+        stable_takeover = bool(self._last_evaluation.takeover_envelope and self._last_evaluation.prev_takeover_envelope)
+        if not stable_takeover:
+            return False
+        rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
+        trusted = bool((not rescued) and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS)
+        clean_export = bool(
+            obs.ball_export_fresh
+            and not obs.ball_observation_stale
+            and not obs.ball_observation_collapsed
+        )
+        return bool(trusted and clean_export)
 
     def close(self):
         self.backend.close()
@@ -393,6 +431,7 @@ class RealSimRobotEnv(ParallelEnv):
             "skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_counts": {name: 0 for name in ACTION.skill_names},
             "skill_projection_count": 0,
+            "handoff_override_count": 0,
             "walk_steps": 0,
             "dribble_steps": 0,
             "shoot_steps": 0,
@@ -472,6 +511,8 @@ class RealSimRobotEnv(ParallelEnv):
         tracker["policy_skill_counts"][step_ctx.policy_skill_name] += 1
         if projection_applied:
             tracker["skill_projection_count"] += 1
+        if step_ctx.handoff_override_applied:
+            tracker["handoff_override_count"] += 1
         if dynamic_update_applied:
             tracker["dynamic_updates"] += 1
         tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
@@ -725,6 +766,7 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_progress_post_takeover_mean": float(tracker["post_takeover_progress_sum"] / steps),
             "stability_score": stability_score,
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
+            "handoff_override_rate": float(tracker["handoff_override_count"] / steps),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
@@ -774,10 +816,20 @@ class RealSimRobotEnv(ParallelEnv):
         policy_skill_raw: float = 0.0,
         policy_skill_round: int = 0,
         policy_compact_skill_index: int = 0,
+        policy_skill_probs: Mapping[str, float] | None = None,
+        policy_skill_entropy: float = 0.0,
+        policy_param_std_mean: float = 0.0,
+        handoff_override_applied: bool = False,
         done: bool = False,
     ) -> Dict[str, object]:
         raw_obs = asdict(obs)
         ball_masks = _ball_observation_masks(obs)
+        policy_skill_probs = policy_skill_probs or {name: 0.0 for name in SKILL_ORDER}
+        policy_dribble_margin = (
+            float(policy_skill_probs.get("dribble", 0.0) - policy_skill_probs.get("walk", 0.0))
+            if sum(float(value) for value in policy_skill_probs.values()) > 0.0
+            else (1.0 if policy_action is not None and policy_action.skill_name == "dribble" else -1.0 if policy_action is not None and policy_action.skill_name == "walk" else 0.0)
+        )
         info: Dict[str, object] = {
             "state": self.get_global_state(),
             "obs_feature_names": OBS_FEATURE_NAMES,
@@ -819,8 +871,12 @@ class RealSimRobotEnv(ParallelEnv):
             "executed_skill_name": None if executed_action is None else executed_action.skill_name,
             "policy_skill_raw": float(policy_skill_raw),
             "policy_skill_round": int(policy_skill_round),
+            "policy_skill_index": int(policy_skill_round),
             "policy_compact_skill_index": int(policy_compact_skill_index),
-            "policy_skill_dribble_margin": float(policy_skill_raw - 0.5),
+            "policy_skill_dribble_margin": float(policy_dribble_margin),
+            "policy_skill_entropy": float(policy_skill_entropy),
+            "policy_param_std_mean": float(policy_param_std_mean),
+            "handoff_override_applied": bool(handoff_override_applied),
             "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
             "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
             "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),
@@ -849,6 +905,8 @@ class RealSimRobotEnv(ParallelEnv):
             "pass_options_count": obs.pass_options_count,
             **ball_masks,
         }
+        for skill_name in SKILL_ORDER:
+            info[f"policy_skill_prob_{skill_name}"] = float(policy_skill_probs.get(skill_name, 0.0))
         if evaluation is not None:
             info.update(evaluation.as_dict())
         if done:

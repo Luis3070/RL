@@ -201,7 +201,7 @@ class TrainConfig:
     device: str = "cuda:0"
     checkpoint_interval: int = 5000
     eval_interval: int = 5000
-    eval_episodes: int = 4
+    eval_episodes: int = 8
     initial_stage_id: int = -1
     max_stage_id: int = 3
     auto_promote: bool = True

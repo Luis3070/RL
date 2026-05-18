@@ -12,14 +12,15 @@ from typing import Any, Dict, Mapping
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.distributions import Categorical, Normal
 
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
-from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
+from skrl.models.torch import DeterministicMixin, Model
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
-from action import StructuredSkillAction, action_to_numpy
+from action import SKILL_ORDER, StructuredSkillAction, action_to_numpy, skill_mask
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
@@ -170,40 +171,121 @@ def _coerce_scalar_metric(value: Any) -> float:
         return float("nan")
 
 
-class PolicyNetwork(GaussianMixin, Model):
+class HybridPolicyDistribution:
+    def __init__(self, skill_distribution: Categorical, param_distribution: Normal):
+        self.skill_distribution = skill_distribution
+        self.param_distribution = param_distribution
+        self.stddev = param_distribution.stddev
+
+    def entropy(self) -> torch.Tensor:
+        return self.skill_distribution.entropy().unsqueeze(-1) + self.param_distribution.entropy().sum(dim=-1, keepdim=True)
+
+
+class PolicyNetwork(Model):
     def __init__(self, observation_space, action_space, device, hidden_size: int):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
-        GaussianMixin.__init__(
-            self,
-            clip_actions=True,
-            clip_log_std=True,
-            min_log_std=-2.0,
-            max_log_std=0.0,
-        )
-        self.net = nn.Sequential(
+        self.num_skills = len(SKILL_ORDER)
+        self.num_params = self.num_actions - 1
+        if self.num_params != 4:
+            raise ValueError(f"Hybrid policy expects 4 continuous params, got {self.num_params}")
+        self.trunk = nn.Sequential(
             nn.Linear(self.num_observations, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
-            nn.Linear(hidden_size, self.num_actions),
         )
-        self.log_std_parameter = nn.Parameter(torch.full((self.num_actions,), -0.5, dtype=torch.float32))
+        self.skill_head = nn.Linear(hidden_size, self.num_skills)
+        self.param_head = nn.Linear(hidden_size, self.num_params)
+        self.log_std_parameter = nn.Parameter(torch.full((self.num_params,), -0.5, dtype=torch.float32))
+        self._distribution: HybridPolicyDistribution | None = None
+        action_low = torch.as_tensor(action_space.low, dtype=torch.float32, device=self.device)
+        action_high = torch.as_tensor(action_space.high, dtype=torch.float32, device=self.device)
+        self.register_buffer("param_low", action_low[1:].clone())
+        self.register_buffer("param_high", action_high[1:].clone())
+        self.register_buffer("active_skill_mask", torch.ones(self.num_skills, dtype=torch.float32, device=self.device))
         with torch.no_grad():
-            final_linear = self.net[-1]
-            if isinstance(final_linear, nn.Linear):
-                # Small orthogonal init keeps initial mean_actions near 0 (within action
-                # space) so the first PPO update never sees ratio-overflow NaN.
-                nn.init.orthogonal_(final_linear.weight, gain=0.01)
-                if final_linear.bias is not None:
-                    nn.init.zeros_(final_linear.bias)
-                    # Compact skill encoding: 0=walk, 1=dribble, 2=shoot. Start at walk.
-                    final_linear.bias[0] = 0.0
+            # Separate heads keep discrete skill selection gradients from being
+            # entangled with BHuman's continuous target parameters.
+            nn.init.orthogonal_(self.skill_head.weight, gain=0.01)
+            nn.init.zeros_(self.skill_head.bias)
+            nn.init.orthogonal_(self.param_head.weight, gain=0.01)
+            nn.init.zeros_(self.param_head.bias)
         self.to(device)
+
+    def set_active_skill_names(self, active_skill_names: tuple[str, ...]) -> None:
+        mask = torch.as_tensor(skill_mask(active_skill_names), dtype=torch.float32, device=self.device)
+        if float(mask.sum().item()) <= 0.0:
+            raise ValueError("Hybrid policy skill mask must enable at least one skill")
+        self.active_skill_mask.copy_(mask)
+
+    def _masked_skill_logits(self, skill_logits: torch.Tensor) -> torch.Tensor:
+        mask = self.active_skill_mask.to(device=skill_logits.device, dtype=skill_logits.dtype)
+        return skill_logits.masked_fill(mask.unsqueeze(0) <= 0.0, -1.0e9)
 
     def compute(self, inputs, role=""):
         observations = inputs["observations"]
-        mean_actions = self.net(observations)
-        return mean_actions, {"log_std": self.log_std_parameter.expand_as(mean_actions)}
+        features = self.trunk(observations)
+        skill_logits = self.skill_head(features)
+        param_mean = self.param_head(features)
+        return skill_logits, {
+            "param_mean": param_mean,
+            "log_std": self.log_std_parameter.expand_as(param_mean),
+        }
+
+    def act(self, inputs, role=""):
+        skill_logits, outputs = self.compute(inputs, role)
+        param_mean = outputs["param_mean"]
+        log_std = torch.clamp(outputs["log_std"], min=-2.0, max=0.0)
+        outputs["log_std"] = log_std
+
+        masked_skill_logits = self._masked_skill_logits(skill_logits)
+        skill_distribution = Categorical(logits=masked_skill_logits)
+        param_distribution = Normal(param_mean, log_std.exp())
+        self._distribution = HybridPolicyDistribution(skill_distribution, param_distribution)
+
+        taken_actions = inputs.get("taken_actions")
+        if taken_actions is None:
+            skill_ids = skill_distribution.sample()
+            params = param_distribution.rsample()
+            params = torch.clamp(params, min=self.param_low, max=self.param_high)
+        else:
+            flat = taken_actions.reshape(taken_actions.shape[0], -1)
+            skill_ids = torch.clamp(flat[:, 0].round().long(), min=0, max=self.num_skills - 1)
+            params = torch.clamp(flat[:, 1:], min=self.param_low, max=self.param_high)
+
+        skill_log_prob = skill_distribution.log_prob(skill_ids).unsqueeze(-1)
+        param_log_prob = param_distribution.log_prob(params).sum(dim=-1, keepdim=True)
+        actions = torch.cat((skill_ids.to(dtype=param_mean.dtype).unsqueeze(-1), params), dim=-1)
+        skill_probs = torch.softmax(masked_skill_logits, dim=-1)
+
+        outputs.update(
+            {
+                "log_prob": skill_log_prob + param_log_prob,
+                "skill_log_prob": skill_log_prob,
+                "param_log_prob": param_log_prob,
+                "skill_logits": skill_logits,
+                "masked_skill_logits": masked_skill_logits,
+                "skill_probs": skill_probs,
+                "skill_entropy": skill_distribution.entropy().unsqueeze(-1),
+                "param_entropy": param_distribution.entropy().sum(dim=-1, keepdim=True),
+                "mean_actions": torch.cat(
+                    (torch.argmax(masked_skill_logits, dim=-1, keepdim=True).to(dtype=param_mean.dtype), param_mean),
+                    dim=-1,
+                ),
+            }
+        )
+        return actions, outputs
+
+    def random_act(self, inputs, role=""):
+        return self.act(inputs, role=role)
+
+    def get_entropy(self, *, role: str = "") -> torch.Tensor:
+        if self._distribution is None:
+            return torch.tensor(0.0, device=self.device)
+        return self._distribution.entropy()
+
+    def distribution(self, *, role: str = "") -> HybridPolicyDistribution:
+        return self._distribution
 
 
 class ValueNetwork(DeterministicMixin, Model):
@@ -278,16 +360,20 @@ def _visible_runtime_for_run(run_cfg: ScriptRunConfig, env_cfg: EnvConfig) -> Vi
     )
 
 
-def build_mappo(env, device: str, train_cfg: TrainConfig) -> tuple[MAPPO, Dict[str, torch.nn.Module]]:
+def build_mappo(
+    env,
+    device: str,
+    train_cfg: TrainConfig,
+    active_skill_names: tuple[str, ...],
+) -> tuple[MAPPO, Dict[str, torch.nn.Module]]:
     agent_id = env.possible_agents[0]
     observation_space = env.observation_space(agent_id)
     action_space = env.action_space(agent_id)
     state_space = env.state_space(agent_id)
 
     shared_policy = PolicyNetwork(observation_space, action_space, device, train_cfg.hidden_size)
+    shared_policy.set_active_skill_names(active_skill_names)
     shared_value = ValueNetwork(observation_space, state_space, action_space, device, train_cfg.hidden_size)
-    shared_policy.net = shared_policy.net.to(device)
-    shared_policy.log_std_parameter = nn.Parameter(shared_policy.log_std_parameter.detach().to(device))
     shared_policy.to(device)
     shared_value.net = shared_value.net.to(device)
     shared_value.to(device)
@@ -781,15 +867,19 @@ def evaluate_agent(
         state_value = _tensorize_eval_state(eval_env._env.state(), device=device)
         state_tensor = {agent_id: state_value for agent_id in eval_env.possible_agents}
         with torch.no_grad():
-            actions, _ = agent.act(
+            actions, outputs = agent.act(
                 observations=obs_tensor,
                 states=state_tensor,
                 timestep=timestep,
                 timesteps=timesteps,
             )
         safe_eval_actions = {k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0) for k, v in actions.items()}
-        return {
-            agent_id: {
+        payloads = {}
+        for agent_id, action_tensor in (
+            (uid, safe_eval_actions[uid].detach().cpu().reshape(-1).numpy())
+            for uid in eval_env.possible_agents
+        ):
+            payload = {
                 "skill_type": int(round(float(action_tensor[0]))),
                 "policy_skill_raw": float(action_tensor[0]),
                 "target_x": float(action_tensor[1]),
@@ -797,11 +887,20 @@ def evaluate_agent(
                 "target_theta": float(action_tensor[3]),
                 "pass_target": int(round(float(action_tensor[4]))),
             }
-            for agent_id, action_tensor in (
-                (uid, safe_eval_actions[uid].detach().cpu().reshape(-1).numpy())
-                for uid in eval_env.possible_agents
-            )
-        }
+            agent_outputs = outputs.get(agent_id, {})
+            skill_probs = agent_outputs.get("skill_probs")
+            if torch.is_tensor(skill_probs) and skill_probs.numel() >= len(SKILL_ORDER):
+                flat_probs = skill_probs.detach().cpu().reshape(-1, len(SKILL_ORDER))[0].numpy()
+                for skill_index, skill_name in enumerate(SKILL_ORDER):
+                    payload[f"policy_skill_prob_{skill_name}"] = float(flat_probs[skill_index])
+            skill_entropy = agent_outputs.get("skill_entropy")
+            if torch.is_tensor(skill_entropy) and skill_entropy.numel():
+                payload["policy_skill_entropy"] = float(skill_entropy.detach().cpu().reshape(-1)[0].item())
+            log_std = agent_outputs.get("log_std")
+            if torch.is_tensor(log_std) and log_std.numel():
+                payload["policy_param_std_mean"] = float(log_std.detach().cpu().exp().mean().item())
+            payloads[agent_id] = payload
+        return payloads
 
     episode_results = [
         eval_env.collect_episode(policy_fn, seed=TRAIN.seed + episode_idx, capture_steps=True)
@@ -898,6 +997,17 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
         "policy_skill_name": step_info.get("policy_skill_name"),
         "executed_skill_name": step_info.get("executed_skill_name"),
         "preferred_skill_name": step_info.get("preferred_skill_name"),
+        "policy_skill_index": int(step_info.get("policy_skill_index", 0)),
+        "policy_skill_entropy": float(step_info.get("policy_skill_entropy", 0.0)),
+        "policy_param_std_mean": float(step_info.get("policy_param_std_mean", 0.0)),
+        "policy_skill_prob_stand": float(step_info.get("policy_skill_prob_stand", 0.0)),
+        "policy_skill_prob_walk": float(step_info.get("policy_skill_prob_walk", 0.0)),
+        "policy_skill_prob_dribble": float(step_info.get("policy_skill_prob_dribble", 0.0)),
+        "policy_skill_prob_shoot": float(step_info.get("policy_skill_prob_shoot", 0.0)),
+        "policy_skill_prob_pass": float(step_info.get("policy_skill_prob_pass", 0.0)),
+        "policy_skill_prob_block": float(step_info.get("policy_skill_prob_block", 0.0)),
+        "policy_skill_prob_mark": float(step_info.get("policy_skill_prob_mark", 0.0)),
+        "policy_skill_prob_observe": float(step_info.get("policy_skill_prob_observe", 0.0)),
         "projection_applied": int(bool(step_info.get("projection_applied", False))),
         "synthetic_pose_observation": int(bool(step_info.get("synthetic_pose_observation", False))),
         "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),
@@ -957,9 +1067,17 @@ def _build_eval_summary_row(
     wire_audit: Mapping[str, object],
 ) -> Dict[str, Any]:
     agent_id = "player_1"
+    policy = agent.policies.get(agent_id) if hasattr(agent, "policies") else None
+    policy_distribution = policy.distribution(role="policy") if policy is not None and hasattr(policy, "distribution") else None
     row = {
         "timestep": int(timestep),
         "stage_id": int(stage_id),
+        "policy_backend": "skrl_hybrid",
+        "policy_continuous_std_mean": (
+            float(policy_distribution.stddev.detach().mean().item())
+            if policy_distribution is not None and hasattr(policy_distribution, "stddev")
+            else float("nan")
+        ),
         "policy_loss": _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss"),
         "value_loss": _extract_agent_stat(agent, f"Loss / Value loss ({agent_id})", "Loss / Value loss", "value_loss"),
         "entropy": _extract_agent_stat(
@@ -970,6 +1088,10 @@ def _build_eval_summary_row(
             "entropy",
         ),
     }
+    if policy is not None and hasattr(policy, "active_skill_mask"):
+        mask = policy.active_skill_mask.detach().cpu().numpy().reshape(-1)
+        for idx, skill_name in enumerate(SKILL_ORDER):
+            row[f"policy_mask_{skill_name}"] = float(mask[idx])
     for key, value in summary.items():
         if isinstance(value, Mapping):
             row.update(_flatten_mapping(key, value))
@@ -1061,7 +1183,7 @@ def run_smoke(
     final_step_info: Mapping[str, object] = {}
     try:
         observations, infos = wrapped_env.reset()
-        agent, _ = build_mappo(wrapped_env, device, TRAIN)
+        agent, _ = build_mappo(wrapped_env, device, TRAIN, env_cfg.active_skill_names)
         primary_agent = wrapped_env.possible_agents[0]
         all_agents = wrapped_env.possible_agents
         for step in range(steps):
@@ -1159,7 +1281,7 @@ def run_training(
     current_stage = stage_id
     env_cfg = make_env_config(current_stage, backend_cfg)
     raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
-    agent, checkpoint_models = build_mappo(wrapped_env, device, TRAIN)
+    agent, checkpoint_models = build_mappo(wrapped_env, device, TRAIN, env_cfg.active_skill_names)
     trainer_cfg = SequentialTrainerCfg(
         timesteps=timesteps,
         headless=True,
@@ -1321,6 +1443,8 @@ def run_training(
                 raw_env.close()
                 env_cfg = make_env_config(current_stage, backend_cfg)
                 raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
+                if hasattr(checkpoint_models["policy"], "set_active_skill_names"):
+                    checkpoint_models["policy"].set_active_skill_names(env_cfg.active_skill_names)
                 observations, infos = wrapped_env.reset()
     finally:
         wrapped_env.close()

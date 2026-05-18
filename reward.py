@@ -54,6 +54,7 @@ class RewardWeights:
     lost_trusted_ball: float = 0.0
     dribble_handoff: float = 0.0
     missed_dribble_handoff: float = 0.0
+    dribble_skill_intent: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -90,6 +91,7 @@ class RewardWeights:
             "lost_trusted_ball": self.lost_trusted_ball,
             "dribble_handoff": self.dribble_handoff,
             "missed_dribble_handoff": self.missed_dribble_handoff,
+            "dribble_skill_intent": self.dribble_skill_intent,
         }
 
 
@@ -124,6 +126,9 @@ class StepContext:
     corridor_open: bool = False
     first_to_ball: bool = False
     bad_duel: bool = False
+    policy_skill_raw: float = 0.0
+    policy_skill_prob_dribble: float = 0.0
+    handoff_override_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -369,6 +374,8 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     stable_trusted_ball = ball_trusted and prev_ball_trusted and not ball_rescued and not prev_ball_rescued
     stable_takeover_envelope = takeover_envelope and prev_takeover_envelope
     stable_trusted_takeover = stable_trusted_ball and stable_takeover_envelope
+    policy_intends_dribble = step_ctx.policy_skill_name == "dribble"
+    policy_intends_finish = policy_intends_dribble or step_ctx.policy_skill_name == "shoot"
 
     progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * progress_scale
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
@@ -377,7 +384,13 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     # dribble/shoot so the gradient clearly pushes away from walk.
     hold_takeover = (
         fine_scale
-        if ball_confident and stable_trusted_ball and takeover_envelope and step_ctx.skill_name != "walk"
+        if (
+            ball_confident
+            and stable_trusted_ball
+            and takeover_envelope
+            and step_ctx.skill_name != "walk"
+            and policy_intends_finish
+        )
         else 0.0
     )
 
@@ -404,7 +417,14 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
 
     good_dribble = (
         fine_scale
-        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and ball_trusted and early_dribble_zone
+        if (
+            step_ctx.skill_name == "dribble"
+            and policy_intends_dribble
+            and not step_ctx.projection_applied
+            and ball_confident
+            and ball_trusted
+            and early_dribble_zone
+        )
         else 0.0
     )
     bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not early_dribble_zone else 0.0
@@ -422,6 +442,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         and stable_trusted_takeover
         and step_ctx.prev_skill_name == "walk"
         and step_ctx.skill_name == "dribble"
+        and policy_intends_dribble
         and not step_ctx.projection_applied
     )
     skill_switch = (
@@ -523,9 +544,20 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if (
             step_ctx.stage == 0
             and stable_trusted_takeover
-            and step_ctx.skill_name == "walk"
+            and step_ctx.policy_skill_name == "walk"
             and not step_ctx.projection_applied
         )
+        else 0.0
+    )
+    dribble_skill_intent = (
+        clip(
+            float(step_ctx.policy_skill_prob_dribble)
+            if step_ctx.policy_skill_prob_dribble > 0.0
+            else (1.0 if step_ctx.policy_skill_name == "dribble" else 0.0),
+            0.0,
+            1.0,
+        ) * fine_scale
+        if step_ctx.stage == 0 and stable_trusted_takeover
         else 0.0
     )
 
@@ -563,6 +595,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "lost_trusted_ball": lost_trusted_ball,
         "dribble_handoff": dribble_handoff,
         "missed_dribble_handoff": missed_dribble_handoff,
+        "dribble_skill_intent": dribble_skill_intent,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

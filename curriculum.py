@@ -11,9 +11,9 @@ from config import BHUMAN_DIR, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, MAX_EPISODE_S
 from pybh_backend import WorldPlayerSpec, WorldSpec, build_world_spec
 from reward import RewardWeights
 
-ACTIVE_SKILLS = ("walk", "dribble", "shoot")
-WALK_ONLY_SKILLS = ("walk",)
-TAKEOVER_SKILLS = ("walk", "dribble")
+ACTIVE_SKILLS = ("stand", "walk", "dribble", "shoot")
+WALK_ONLY_SKILLS = ("stand", "walk")
+TAKEOVER_SKILLS = ("stand", "walk", "dribble")
 MASKED_SKILLS = ("pass", "mark", "block", "observe")
 
 
@@ -73,6 +73,7 @@ _STAGE_SPECS = {
             too_close_walk=-0.35,
             lost_trusted_ball=-0.25,
             missed_dribble_handoff=-0.20,
+            dribble_skill_intent=0.20,
         ),
     ),
     0: StageSpec(
@@ -102,6 +103,7 @@ _STAGE_SPECS = {
             preferred_skill_match=0.05,
             dribble_handoff=2.00,
             missed_dribble_handoff=-0.50,
+            dribble_skill_intent=0.80,
             keep_ball_front=0.15,
             bad_ball_angle=-0.18,
             rescued_ball=-0.75,
@@ -146,6 +148,7 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.35,
             dribble_handoff=0.75,
             missed_dribble_handoff=-0.25,
+            dribble_skill_intent=0.30,
         ),
     ),
     2: StageSpec(
@@ -184,6 +187,7 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.25,
             dribble_handoff=0.50,
             missed_dribble_handoff=-0.20,
+            dribble_skill_intent=0.25,
         ),
     ),
     3: StageSpec(
@@ -223,6 +227,7 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.25,
             dribble_handoff=0.50,
             missed_dribble_handoff=-0.20,
+            dribble_skill_intent=0.25,
         ),
         dynamic_update_interval_steps=4,
     ),
@@ -243,13 +248,14 @@ def get_stage_scene_path(stage_id: int, simrobot_profile: str) -> Path:
 def stage_skill_mask(stage_id: int) -> Dict[str, int]:
     stage = get_stage_spec(stage_id)
     return {
+        "stand": 1 if "stand" in stage.active_skill_names else 0,
         "walk": 1 if "walk" in stage.active_skill_names else 0,
         "dribble": 1 if "dribble" in stage.active_skill_names else 0,
         "shoot": 1 if "shoot" in stage.active_skill_names else 0,
-        "pass": 0,
-        "mark": 0,
-        "block": 0,
-        "observe": 0,
+        "pass": 1 if "pass" in stage.active_skill_names else 0,
+        "block": 1 if "block" in stage.active_skill_names else 0,
+        "mark": 1 if "mark" in stage.active_skill_names else 0,
+        "observe": 1 if "observe" in stage.active_skill_names else 0,
     }
 
 
