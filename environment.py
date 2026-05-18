@@ -189,14 +189,19 @@ class RealSimRobotEnv(ParallelEnv):
         if not self.agents:
             raise RuntimeError("step() called on terminated environment")
         action_payload = actions["player_1"]
+        policy_skill_raw = 0.0
         if isinstance(action_payload, dict):
+            policy_skill_raw = float(action_payload.get("policy_skill_raw", action_payload.get("skill_type", 0.0)))
             policy_action = action_from_mapping(action_payload)
         else:
-            policy_action = action_from_numpy(np.asarray(action_payload, dtype=np.float32))
+            raw_action = np.asarray(action_payload, dtype=np.float32).reshape(-1)
+            policy_skill_raw = float(raw_action[0]) if raw_action.size > 0 else 0.0
+            policy_action = action_from_numpy(raw_action)
 
         # Remap compact skill index (0..N-1) → SkillType integer so that
         # all active skills are adjacent and equally reachable by exploration.
         compact_idx = max(0, min(int(policy_action.skill_type), len(self._compact_skill_map) - 1))
+        policy_skill_round = int(policy_action.skill_type)
         policy_action = StructuredSkillAction(
             skill_type=int(SkillType.from_public_name(self._compact_skill_map[compact_idx])),
             target_x=policy_action.target_x,
@@ -280,6 +285,9 @@ class RealSimRobotEnv(ParallelEnv):
             evaluation=evaluation,
             projection_applied=projection_applied,
             dynamic_update_applied=dynamic_update_applied,
+            policy_skill_raw=policy_skill_raw,
+            policy_skill_round=policy_skill_round,
+            policy_compact_skill_index=compact_idx,
             done=done,
         )
 
@@ -763,7 +771,10 @@ class RealSimRobotEnv(ParallelEnv):
         evaluation: StepEvaluation | None,
         projection_applied: bool,
         dynamic_update_applied: bool,
-        done: bool,
+        policy_skill_raw: float = 0.0,
+        policy_skill_round: int = 0,
+        policy_compact_skill_index: int = 0,
+        done: bool = False,
     ) -> Dict[str, object]:
         raw_obs = asdict(obs)
         ball_masks = _ball_observation_masks(obs)
@@ -806,6 +817,10 @@ class RealSimRobotEnv(ParallelEnv):
             "raw_obs": raw_obs,
             "policy_skill_name": None if policy_action is None else policy_action.skill_name,
             "executed_skill_name": None if executed_action is None else executed_action.skill_name,
+            "policy_skill_raw": float(policy_skill_raw),
+            "policy_skill_round": int(policy_skill_round),
+            "policy_compact_skill_index": int(policy_compact_skill_index),
+            "policy_skill_dribble_margin": float(policy_skill_raw - 0.5),
             "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
             "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
             "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),

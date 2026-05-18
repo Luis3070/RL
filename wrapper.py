@@ -26,13 +26,18 @@ class RealSimRobotEnvWrapper:
     def reset(self, seed=None, options=None):
         return self._env.reset(seed=seed, options=options)
 
-    def step(self, actions: Dict[str, np.ndarray | StructuredSkillAction]):
+    def step(self, actions: Dict[str, np.ndarray | StructuredSkillAction | dict]):
         converted = {}
         for agent, action in actions.items():
-            if isinstance(action, StructuredSkillAction):
+            if isinstance(action, dict):
+                converted[agent] = action
+            elif isinstance(action, StructuredSkillAction):
                 converted[agent] = action.as_dict()
             else:
-                converted[agent] = action_from_numpy(np.asarray(action, dtype=np.float32)).as_dict()
+                raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+                payload = action_from_numpy(raw_action).as_dict()
+                payload["policy_skill_raw"] = float(raw_action[0]) if raw_action.size > 0 else 0.0
+                converted[agent] = payload
         return self._env.step(converted)
 
     def close(self):
@@ -68,6 +73,10 @@ class RealSimRobotEnvWrapper:
                         "policy_skill_name": info.get("policy_skill_name"),
                         "executed_skill_name": info.get("executed_skill_name"),
                         "preferred_skill_name": info.get("preferred_skill_name"),
+                        "policy_skill_raw": float(info.get("policy_skill_raw", 0.0)),
+                        "policy_skill_round": int(info.get("policy_skill_round", 0)),
+                        "policy_compact_skill_index": int(info.get("policy_compact_skill_index", 0)),
+                        "policy_skill_dribble_margin": float(info.get("policy_skill_dribble_margin", 0.0)),
                         "policy_target_x": float(info.get("policy_target_x", 0.0)),
                         "policy_target_y": float(info.get("policy_target_y", 0.0)),
                         "policy_target_theta": float(info.get("policy_target_theta", 0.0)),

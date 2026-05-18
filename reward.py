@@ -52,6 +52,8 @@ class RewardWeights:
     corrected_ball: float = 0.0
     too_close_walk: float = 0.0
     lost_trusted_ball: float = 0.0
+    dribble_handoff: float = 0.0
+    missed_dribble_handoff: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -86,6 +88,8 @@ class RewardWeights:
             "corrected_ball": self.corrected_ball,
             "too_close_walk": self.too_close_walk,
             "lost_trusted_ball": self.lost_trusted_ball,
+            "dribble_handoff": self.dribble_handoff,
+            "missed_dribble_handoff": self.missed_dribble_handoff,
         }
 
 
@@ -363,6 +367,8 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     progress_scale = ball_confidence if ball_trusted else 0.10 * ball_confidence if ball_visible and not ball_rescued else 0.0
     visual_control_scale = ball_confidence if ball_trusted else 0.25 * ball_confidence if ball_visible and not ball_rescued else 0.0
     stable_trusted_ball = ball_trusted and prev_ball_trusted and not ball_rescued and not prev_ball_rescued
+    stable_takeover_envelope = takeover_envelope and prev_takeover_envelope
+    stable_trusted_takeover = stable_trusted_ball and stable_takeover_envelope
 
     progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * progress_scale
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
@@ -386,10 +392,6 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         )
         else 0.0
     )
-    # Require two consecutive takeover-envelope observations before penalizing
-    # walk in the handoff zone. This gives visible-mode perception one frame of
-    # jitter tolerance while still shaping the policy toward dribble/shoot.
-    stable_takeover_envelope = takeover_envelope and prev_takeover_envelope
     bad_walk = (
         1.0
         if step_ctx.stage >= 0
@@ -415,7 +417,22 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         bad_shoot += 0.5 if ball_rescued else 0.25
     projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
 
-    skill_switch = 1.0 if step_ctx.prev_skill_name is not None and step_ctx.skill_name != step_ctx.prev_skill_name else 0.0
+    valid_dribble_handoff = bool(
+        step_ctx.stage == 0
+        and stable_trusted_takeover
+        and step_ctx.prev_skill_name == "walk"
+        and step_ctx.skill_name == "dribble"
+        and not step_ctx.projection_applied
+    )
+    skill_switch = (
+        1.0
+        if (
+            step_ctx.prev_skill_name is not None
+            and step_ctx.skill_name != step_ctx.prev_skill_name
+            and not valid_dribble_handoff
+        )
+        else 0.0
+    )
     thrash = 1.0 if is_local_thrash(step_ctx.skill_history) else 0.0
     goal_reward = 1.0 if step_ctx.goal_scored else 0.0
     timeout_penalty = 1.0 if step_ctx.timeout else 0.0
@@ -500,6 +517,17 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if prev_ball_trusted and not ball_trusted and not ball_rescued and cur_features.d_ball_mm <= 1400.0
         else 0.0
     )
+    dribble_handoff = fine_scale if valid_dribble_handoff else 0.0
+    missed_dribble_handoff = (
+        1.0
+        if (
+            step_ctx.stage == 0
+            and stable_trusted_takeover
+            and step_ctx.skill_name == "walk"
+            and not step_ctx.projection_applied
+        )
+        else 0.0
+    )
 
     terms = {
         "progress_ball": progress_ball,
@@ -533,6 +561,8 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "corrected_ball": corrected_ball,
         "too_close_walk": too_close_walk,
         "lost_trusted_ball": lost_trusted_ball,
+        "dribble_handoff": dribble_handoff,
+        "missed_dribble_handoff": missed_dribble_handoff,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

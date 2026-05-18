@@ -789,13 +789,14 @@ def evaluate_agent(
             )
         safe_eval_actions = {k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0) for k, v in actions.items()}
         return {
-            agent_id: StructuredSkillAction(
-                skill_type=int(round(float(action_tensor[0]))),
-                target_x=float(action_tensor[1]),
-                target_y=float(action_tensor[2]),
-                target_theta=float(action_tensor[3]),
-                pass_target=int(round(float(action_tensor[4]))),
-            )
+            agent_id: {
+                "skill_type": int(round(float(action_tensor[0]))),
+                "policy_skill_raw": float(action_tensor[0]),
+                "target_x": float(action_tensor[1]),
+                "target_y": float(action_tensor[2]),
+                "target_theta": float(action_tensor[3]),
+                "pass_target": int(round(float(action_tensor[4]))),
+            }
             for agent_id, action_tensor in (
                 (uid, safe_eval_actions[uid].detach().cpu().reshape(-1).numpy())
                 for uid in eval_env.possible_agents
