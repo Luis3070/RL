@@ -66,12 +66,22 @@ SIMROBOT_VISIBLE_SCENE_PRESETS = {
         position_scale=-1.0 / MM_PER_M,
         theta_offset=-(math.pi / 2.0),
     ),
-    # ci 15: camera rendered at 15 fps sim-time instead of 60 → ~4x less getImage()
-    # overhead while BallPerceptor and SelfLocator still run on real rendered images.
+    # ci 30: camera rendered at 30 fps sim-time. Safe baseline — ci 15 caused
+    # obs_timeout_ms=1000 failures (67ms delay > timeout window).
     # Only valid for simrobot_visible (separate subprocess with real GL context).
     "3d_visible": SimRobotSceneConfig(
         profile="3d",
         scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0_3D_visible.ros2",
+        robot_name="robot1",
+        position_scale=-1.0 / MM_PER_M,
+        theta_offset=-(math.pi / 2.0),
+    ),
+    # H2 experiment: ci 60 halves the camera frame period (33ms → 17ms),
+    # cutting worst-case obs wait from ~61ms to ~34ms → target ~29 steps/sec.
+    # Risk: 2× perception CPU load. Profile with RL_PROFILE_STEP=1 to confirm.
+    "3d_visible_ci60": SimRobotSceneConfig(
+        profile="3d",
+        scene_path=BHUMAN_DIR / "Config/Scenes/RL1v0_3D_visible_ci60.ros2",
         robot_name="robot1",
         position_scale=-1.0 / MM_PER_M,
         theta_offset=-(math.pi / 2.0),
@@ -192,7 +202,7 @@ class TrainConfig:
     checkpoint_interval: int = 5000
     eval_interval: int = 5000
     eval_episodes: int = 4
-    initial_stage_id: int = 0
+    initial_stage_id: int = -1
     max_stage_id: int = 3
     auto_promote: bool = True
     experiment_name: str = "pybh_mappo_takeover_ppo"

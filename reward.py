@@ -43,6 +43,9 @@ class RewardWeights:
     first_to_ball: float = 0.0
     bad_duel: float = 0.0
     approach_ball: float = 0.0
+    preferred_skill_match: float = 0.0
+    keep_ball_front: float = 0.0
+    bad_ball_angle: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -68,6 +71,9 @@ class RewardWeights:
             "first_to_ball": self.first_to_ball,
             "bad_duel": self.bad_duel,
             "approach_ball": self.approach_ball,
+            "preferred_skill_match": self.preferred_skill_match,
+            "keep_ball_front": self.keep_ball_front,
+            "bad_ball_angle": self.bad_ball_angle,
         }
 
 
@@ -334,6 +340,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     walk_zone = is_walk_zone(cur_features)
     shoot_zone = is_shoot_zone(cur_features)
     dribble_zone = is_dribble_zone(cur_features)
+    early_dribble_zone = dribble_zone or (step_ctx.stage == 0 and takeover_envelope)
     ball_confident = is_ball_confident(step_ctx)
     ball_visible, ball_trusted, ball_rescued, ball_confidence = ball_confidence_profile(step_ctx)
     coarse_scale = 0.35 + 0.65 * ball_confidence if ball_visible else 0.0
@@ -360,18 +367,26 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         )
         else 0.0
     )
+    # Require two consecutive takeover-envelope observations before penalizing
+    # walk in the handoff zone. This gives visible-mode perception one frame of
+    # jitter tolerance while still shaping the policy toward dribble/shoot.
+    stable_takeover_envelope = takeover_envelope and prev_takeover_envelope
     bad_walk = (
         1.0
-        if step_ctx.skill_name == "walk" and not step_ctx.projection_applied and (shoot_zone or dribble_zone)
+        if step_ctx.stage >= 0
+        and step_ctx.skill_name == "walk"
+        and not step_ctx.projection_applied
+        and stable_takeover_envelope
+        and (shoot_zone or dribble_zone)
         else 0.0
     )
 
     good_dribble = (
         fine_scale
-        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and ball_trusted and dribble_zone
+        if step_ctx.skill_name == "dribble" and not step_ctx.projection_applied and ball_confident and ball_trusted and early_dribble_zone
         else 0.0
     )
-    bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not dribble_zone else 0.0
+    bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not early_dribble_zone else 0.0
     if step_ctx.skill_name == "dribble" and not ball_trusted:
         bad_dribble += 0.5 if ball_rescued else 0.25
 
@@ -410,6 +425,30 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if (not takeover_envelope and ball_trusted and not ball_rescued)
         else 0.0
     )
+    preferred_for_stage = preferred_skill(cur_features)
+    if step_ctx.stage < 0:
+        preferred_for_stage = "walk"
+    elif step_ctx.stage == 0 and takeover_envelope:
+        preferred_for_stage = "dribble"
+
+    preferred_skill_match = (
+        fine_scale
+        if step_ctx.skill_name == preferred_for_stage and not step_ctx.projection_applied
+        else 0.0
+    )
+    abs_ball_angle = abs(cur_features.a_ball_rad)
+    keep_ball_front = clip(1.0 - abs_ball_angle / math.radians(70.0), 0.0, 1.0) * coarse_scale
+    bad_ball_angle = (
+        1.0
+        if (
+            step_ctx.skill_name == "walk"
+            and not takeover_envelope
+            and cur_features.d_ball_mm <= 1400.0
+            and abs_ball_angle > math.radians(60.0)
+            and ball_visible
+        )
+        else 0.0
+    )
 
     terms = {
         "progress_ball": progress_ball,
@@ -434,6 +473,9 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "first_to_ball": first_to_ball_reward,
         "bad_duel": bad_duel_penalty,
         "approach_ball": approach_ball,
+        "preferred_skill_match": preferred_skill_match,
+        "keep_ball_front": keep_ball_front,
+        "bad_ball_angle": bad_ball_angle,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

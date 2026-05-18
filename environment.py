@@ -267,7 +267,12 @@ class RealSimRobotEnv(ParallelEnv):
         self._last_evaluation = evaluation
         self._skill_history.append(executed_action.skill_name)
 
-        done = scored or timeout
+        prestage_takeover_done = (
+            self.stage_spec.stage_id < 0
+            and evaluation.takeover_envelope
+            and evaluation.prev_takeover_envelope
+        )
+        done = scored or timeout or prestage_takeover_done
         info = self._build_info(
             obs=obs,
             policy_action=policy_action,
@@ -423,6 +428,8 @@ class RealSimRobotEnv(ParallelEnv):
             "natural_ball_consistent_steps": 0,
             "ball_visible_steps": 0,
             "ball_trusted_steps": 0,
+            "fov_steps": 0,           # steps ball is inside NAO camera FOV (by GT pos)
+            "fov_not_seen_steps": 0,  # of those, BHuman natural_ball_seen_pct == 0
             "ball_semi_trusted_steps": 0,
             "ball_degraded_steps": 0,
             "ball_rescued_steps": 0,
@@ -476,6 +483,17 @@ class RealSimRobotEnv(ParallelEnv):
         masks = _ball_observation_masks(step_ctx.obs)
         tracker["ball_visible_steps"] += int(bool(masks["ball_visible_mask"]))
         tracker["ball_trusted_steps"] += int(bool(masks["ball_trusted_mask"]))
+        # FOV diagnostic: did BHuman detect the ball when it was inside the camera FOV?
+        # ball_rel_x/y are in robot frame from the corrected (GT) obs — reliable even
+        # when BHuman's own model is stale. NAO camera: ~±30° horiz, <2500mm range.
+        _bx = float(step_ctx.obs.ball_rel_x)
+        _by = float(step_ctx.obs.ball_rel_y)
+        if (_bx > 100.0
+                and math.hypot(_bx, _by) < 2500.0
+                and abs(math.atan2(_by, _bx)) < math.radians(30)):
+            tracker["fov_steps"] += 1
+            if float(step_ctx.obs.natural_ball_seen_percentage) == 0.0:
+                tracker["fov_not_seen_steps"] += 1
         tracker["ball_semi_trusted_steps"] += int(bool(masks["ball_semi_trusted_mask"]))
         tracker["ball_degraded_steps"] += int(bool(masks["ball_degraded_mask"]))
         tracker["ball_rescued_steps"] += int(bool(masks["ball_rescued_mask"]))
@@ -542,7 +560,8 @@ class RealSimRobotEnv(ParallelEnv):
         else:
             tracker["takeover_hold_current"] = 0
 
-        if evaluation.takeover_envelope and step_ctx.skill_name not in {"dribble", "shoot"}:
+        stable_takeover_envelope = evaluation.takeover_envelope and evaluation.prev_takeover_envelope
+        if stable_takeover_envelope and step_ctx.skill_name not in {"dribble", "shoot"}:
             tracker["incompatible_takeover_requests"] += 1
 
         if evaluation.terms["good_shoot"] > 0.0 or evaluation.terms["good_dribble"] > 0.0:
@@ -608,6 +627,9 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
             "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
             "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "fov_perception_failure_rate": float(
+                tracker["fov_not_seen_steps"] / max(1, tracker["fov_steps"])
+            ),
             "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
             "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
             "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
@@ -635,7 +657,10 @@ class RealSimRobotEnv(ParallelEnv):
         takeover_success = bool(tracker["takeover_entered"] and tracker["takeover_hold_max"] >= 2)
 
         clean_walk = bool(walk_steps > 0 and walk_compat_rate >= 0.7 and tracker["thrash_count"] == 0)
-        clean_takeover = bool(takeover_success and tracker["incompatible_takeover_requests"] == 0)
+        if self.stage_spec.stage_id < 0:
+            clean_takeover = bool(takeover_success and tracker["thrash_count"] == 0 and tracker["collision_count"] == 0)
+        else:
+            clean_takeover = bool(takeover_success and tracker["incompatible_takeover_requests"] == 0)
         clean_finish = bool(
             tracker["good_finish_steps"] > 0
             and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
@@ -714,6 +739,9 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
             "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
             "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "fov_perception_failure_rate": float(
+                tracker["fov_not_seen_steps"] / max(1, tracker["fov_steps"])
+            ),
             "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
             "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
             "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
@@ -778,6 +806,12 @@ class RealSimRobotEnv(ParallelEnv):
             "raw_obs": raw_obs,
             "policy_skill_name": None if policy_action is None else policy_action.skill_name,
             "executed_skill_name": None if executed_action is None else executed_action.skill_name,
+            "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
+            "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
+            "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),
+            "executed_target_x": 0.0 if executed_action is None else float(executed_action.target_x),
+            "executed_target_y": 0.0 if executed_action is None else float(executed_action.target_y),
+            "executed_target_theta": 0.0 if executed_action is None else float(executed_action.target_theta),
             "projection_applied": bool(projection_applied),
             "dynamic_update_applied": bool(dynamic_update_applied),
             "skill_history": tuple(self._skill_history),

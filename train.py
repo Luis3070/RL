@@ -43,7 +43,7 @@ class ScriptRunConfig:
     smoke_steps: int = TRAIN.smoke_steps
     train_steps: int = 800_000
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
-    stage_id: int = 0
+    stage_id: int = -1
     max_stage_id: int = 3
     save_telemetry: bool = True
     save_plots: bool = True
@@ -146,6 +146,8 @@ def _pd():
 
 
 def _plt():
+    import matplotlib
+    matplotlib.use("Agg")  # must be set before pyplot import; prevents TkAgg objects in worker threads
     return importlib.import_module("matplotlib.pyplot")
 
 
@@ -259,12 +261,20 @@ def build_env(env_cfg: EnvConfig):
 def _visible_runtime_for_run(run_cfg: ScriptRunConfig, env_cfg: EnvConfig) -> VisibleParallelRuntime | None:
     if env_cfg.backend.mode != "simrobot_visible" or len(env_cfg.parallel_player_numbers) <= 1:
         return None
-    shm_name = os.environ.get("PYBH_RL_SHM_NAME", "/pybh_rl_shared_state_v3")
+    shm_name = os.environ.get("PYBH_RL_SHM_NAME")
+    if not shm_name:
+        shm_name = f"/pybh_rl_{os.getpid()}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        os.environ["PYBH_RL_SHM_NAME"] = shm_name
+    print(f"[shm] PYBH_RL_SHM_NAME={shm_name}", flush=True)
+    # RL_SCENE_NAME overrides the SimRobot scene. ci=60 ("RL1v0_3D_visible_ci60") was tested
+    # and abandoned: BallPerceptor fails at 60fps. Default ci=30 gives ~27 steps/sec.
+    scene_name = os.environ.get("RL_SCENE_NAME", "RL1v0_3D_visible")
     return VisibleParallelRuntime(
         player_numbers=env_cfg.parallel_player_numbers,
         shm_name=shm_name,
         display_base=run_cfg.visible_parallel_display_base,
         simrobot_bin=env_cfg.backend.simrobot_bin,
+        scene_name=scene_name,
     )
 
 
@@ -707,6 +717,7 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "ball_rescued_rate",
         "ball_lost_rate",
         "misleading_seen_synthetic_rate",
+        "fov_perception_failure_rate",
         "ball_confidence_score_mean",
         "first_ball_seen_after_reset_ms",
         "first_fresh_export_after_reset_ms",
@@ -840,6 +851,7 @@ def print_eval_summary(
     agent_id = "player_1"
     reward_mean = float(summary.get("episode_reward_mean", 0.0))
     clean_takeover_rate = float(summary.get("clean_takeover_rate", 0.0))
+    takeover_success_rate = float(summary.get("takeover_success_rate", 0.0))
     clean_finish_rate = float(summary.get("clean_finish_rate", 0.0))
     thrash_rate = float(summary.get("thrash_rate", 0.0))
     collision_rate = float(summary.get("collision_rate", 0.0))
@@ -861,7 +873,8 @@ def print_eval_summary(
         "[eval] "
         f"step={timestep} stage={stage_id} "
         f"reward_mean={reward_mean:.3f} "
-        f"takeover={clean_takeover_rate:.3f} finish={clean_finish_rate:.3f} "
+        f"takeover_clean={clean_takeover_rate:.3f} takeover_success={takeover_success_rate:.3f} "
+        f"finish={clean_finish_rate:.3f} "
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
         f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
         f"ball_conf={ball_confidence_score_mean:.3f} "

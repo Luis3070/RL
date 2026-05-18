@@ -12,6 +12,8 @@ from pybh_backend import WorldPlayerSpec, WorldSpec, build_world_spec
 from reward import RewardWeights
 
 ACTIVE_SKILLS = ("walk", "dribble", "shoot")
+WALK_ONLY_SKILLS = ("walk",)
+TAKEOVER_SKILLS = ("walk", "dribble")
 MASKED_SKILLS = ("pass", "mark", "block", "observe")
 
 
@@ -44,14 +46,36 @@ def _scene_path(stage_id: int, simrobot_profile: str) -> Path:
 
 
 _STAGE_SPECS = {
+    -1: StageSpec(
+        stage_id=-1,
+        name="stage_0a_walk_approach",
+        description="Pre-stage: caminar hacia la pelota sin cambio de skill.",
+        ball_radius_max_mm=1200.0,
+        full_field=False,
+        obstacle_mode="none",
+        active_skill_names=WALK_ONLY_SKILLS,
+        reward_weights=RewardWeights(
+            progress_ball=1.2,
+            align_ball=0.8,
+            approach_ball=0.12,
+            good_walk=0.6,
+            projection_penalty=-0.05,
+            skill_switch=-0.02,
+            thrash=-0.5,
+            timeout=-1.5,
+            preferred_skill_match=0.08,
+            keep_ball_front=0.12,
+            bad_ball_angle=-0.10,
+        ),
+    ),
     0: StageSpec(
         stage_id=0,
         name="stage_0",
-        description="Approach y takeover limpio sin obstáculos a distancia corta.",
+        description="Approach y takeover limpio walk→dribble sin shoot.",
         ball_radius_max_mm=800.0,
         full_field=False,
         obstacle_mode="none",
-        active_skill_names=ACTIVE_SKILLS,
+        active_skill_names=TAKEOVER_SKILLS,
         reward_weights=RewardWeights(
             progress_ball=1.2,
             align_ball=0.8,
@@ -62,14 +86,15 @@ _STAGE_SPECS = {
             bad_walk=-0.35,
             good_dribble=1.0,
             bad_dribble=-0.65,
-            good_shoot=1.2,
-            bad_shoot=-1.8,
             projection_penalty=-0.10,
             skill_switch=-0.05,
             thrash=-1.0,
             goal=4.0,
             timeout=-2.0,
             ball_progress_post_takeover=0.6,
+            preferred_skill_match=0.05,
+            keep_ball_front=0.05,
+            bad_ball_angle=-0.08,
         ),
     ),
     1: StageSpec(
@@ -294,6 +319,15 @@ def _dynamic_obstacles(robot_pos: np.ndarray, ball_pos: np.ndarray, episode_step
 
 def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpec:
     stage = get_stage_spec(stage_id)
+    if stage.stage_id == -1:
+        ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
+            rng,
+            radius_max_mm=stage.ball_radius_max_mm or 1200.0,
+            robot_xy_bounds=(-1700.0, -450.0, -650.0, 650.0),
+            line_angle_range_deg=12.0,
+            heading_noise_deg=8.0,
+        )
+        return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 0:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
@@ -388,6 +422,15 @@ def _behavior_is_stable(metrics: Mapping[str, float], *, thrash_max: float, coll
 
 
 def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[int, Mapping[str, float]]) -> bool:
+    if stage_id == -1:
+        return (
+            _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.40, confidence_min=0.48)
+            and _behavior_is_stable(metrics, thrash_max=0.05, collision_max=0.10)
+            and _metric(metrics, "episode_reward_mean", -999.0) >= 0.10
+            and _metric(metrics, "takeover_success_rate") >= 0.80
+            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 70.0
+            and _metric(metrics, "fov_perception_failure_rate", 0.0) <= 0.20
+        )
     if stage_id == 0:
         return (
             _ball_semantics_ok(metrics, trusted_min=0.60, rescued_max=0.35, confidence_min=0.50)

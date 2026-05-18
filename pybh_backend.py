@@ -57,6 +57,7 @@ import pybh.controller as pybh
 MAX_WORLD_PLAYERS_PER_TEAM = 20
 WORLD_STATUS_POLL_INTERVAL_S = 0.01
 DEFAULT_VISIBLE_LOG_INTERVAL_S = 1.0
+VISIBLE_FRAME_REWIND_TOLERANCE = 5_000
 SETTINGS_CFG_PATH = BHUMAN_DIR / "Config/settings.cfg"
 SUPPORTED_OBS_EXPORT_MODES = {"estimated", "corrected"}
 EMBEDDED_QT_PLATFORM_OVERRIDE_ENV = "PYBH_SIMROBOT_QT_PLATFORM"
@@ -858,14 +859,34 @@ class PyBHBackend:
             self._last_obs = obs
             return obs
         elif self._uses_visible_simrobot():
-            request_id = self._visible_simrobot_reset(world_spec)
-            self._wait_for_visible_world_request(request_id=request_id)
-            self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-            obs = self._wait_for_visible_reset_obs(
-                np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
-            )
-            self._last_obs = obs
-            return obs
+            robot_target = np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
+            _RESET_MAX_ATTEMPTS = 3
+            last_exc: Exception | None = None
+            for attempt in range(_RESET_MAX_ATTEMPTS):
+                # Stop any previous walkTo/dribble command before teleporting.
+                # Otherwise the visible SimRobot can resume root-assisted walking
+                # immediately after reset and drift away before the reset obs check.
+                self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
+                request_id = self._visible_simrobot_reset(world_spec)
+                self._wait_for_visible_world_request(request_id=request_id)
+                self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
+                try:
+                    obs = self._wait_for_visible_reset_obs(robot_target)
+                    self._last_obs = obs
+                    return obs
+                except RuntimeError as exc:
+                    last_exc = exc
+                    if attempt < _RESET_MAX_ATTEMPTS - 1:
+                        # Clear _last_obs so the next read_obs() uses min_frame=-1 (accept
+                        # any frame). Without this, a stale high frame from the failed attempt
+                        # can block fresh lower-numbered frames from the retried reset.
+                        self._last_obs = None
+                        print(
+                            f"[pybh_backend p={self.player_number}] reset attempt {attempt+1} failed"
+                            f" ({exc}); retrying…",
+                            flush=True,
+                        )
+            raise last_exc  # type: ignore[misc]
         else:
             raise RuntimeError(f"Unsupported backend mode {self.mode!r}")
         obs = self.read_obs()
@@ -1018,10 +1039,27 @@ class PyBHBackend:
             if not obs.obs_ready:
                 continue
             if min_frame >= 0 and obs.frame < min_frame:
+                if obs.frame + VISIBLE_FRAME_REWIND_TOLERANCE < min_frame:
+                    print(
+                        f"[pybh_backend p={self.player_number}] visible frame rewind "
+                        f"old={min_frame} new={obs.frame}; accepting new producer",
+                        flush=True,
+                    )
+                    self._last_obs = obs
+                    return obs
                 continue
             self._last_obs = obs
             return obs
         if last_obs is not None and last_obs.obs_ready and self._last_obs is not None:
+            # Fallback: if the loop somehow exited without accepting a large rewind, catch it here.
+            if last_obs.frame + VISIBLE_FRAME_REWIND_TOLERANCE < min_frame:
+                print(
+                    f"[pybh_backend p={self.player_number}] visible frame rewind (fallback) "
+                    f"old={min_frame} new={last_obs.frame}; accepting",
+                    flush=True,
+                )
+                self._last_obs = last_obs
+                return last_obs
             raise RuntimeError(
                 "pybh.rl_get_obs returned only stale visible frames within timeout: "
                 f"min_frame={min_frame} last_frame={last_obs.frame} poll_timeout_ms={poll_timeout_ms} "
