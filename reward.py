@@ -46,6 +46,12 @@ class RewardWeights:
     preferred_skill_match: float = 0.0
     keep_ball_front: float = 0.0
     bad_ball_angle: float = 0.0
+    rescued_ball: float = 0.0
+    stale_ball: float = 0.0
+    collapsed_ball: float = 0.0
+    corrected_ball: float = 0.0
+    too_close_walk: float = 0.0
+    lost_trusted_ball: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -74,6 +80,12 @@ class RewardWeights:
             "preferred_skill_match": self.preferred_skill_match,
             "keep_ball_front": self.keep_ball_front,
             "bad_ball_angle": self.bad_ball_angle,
+            "rescued_ball": self.rescued_ball,
+            "stale_ball": self.stale_ball,
+            "collapsed_ball": self.collapsed_ball,
+            "corrected_ball": self.corrected_ball,
+            "too_close_walk": self.too_close_walk,
+            "lost_trusted_ball": self.lost_trusted_ball,
         }
 
 
@@ -317,8 +329,7 @@ def is_ball_confident(step_ctx: StepContext) -> bool:
     )
 
 
-def ball_confidence_profile(step_ctx: StepContext) -> tuple[bool, bool, bool, float]:
-    obs = step_ctx.obs
+def _ball_confidence_profile_obs(obs: BackendObservation) -> tuple[bool, bool, bool, float]:
     rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
     visible = bool(float(obs.ball_seen_percentage) > 5.0 or float(obs.time_since_ball_seen) <= BALL_VISIBLE_MAX_AGE_MS)
     trusted = bool((not rescued) and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS)
@@ -328,6 +339,10 @@ def ball_confidence_profile(step_ctx: StepContext) -> tuple[bool, bool, bool, fl
     if rescued:
         confidence *= 0.25
     return visible, trusted, rescued, float(confidence)
+
+
+def ball_confidence_profile(step_ctx: StepContext) -> tuple[bool, bool, bool, float]:
+    return _ball_confidence_profile_obs(step_ctx.obs)
 
 
 def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluation:
@@ -343,17 +358,20 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     early_dribble_zone = dribble_zone or (step_ctx.stage == 0 and takeover_envelope)
     ball_confident = is_ball_confident(step_ctx)
     ball_visible, ball_trusted, ball_rescued, ball_confidence = ball_confidence_profile(step_ctx)
-    coarse_scale = 0.35 + 0.65 * ball_confidence if ball_visible else 0.0
+    _, prev_ball_trusted, prev_ball_rescued, _ = _ball_confidence_profile_obs(prev_obs)
     fine_scale = ball_confidence if ball_trusted else 0.35 * ball_confidence if not ball_rescued else 0.0
+    progress_scale = ball_confidence if ball_trusted else 0.10 * ball_confidence if ball_visible and not ball_rescued else 0.0
+    visual_control_scale = ball_confidence if ball_trusted else 0.25 * ball_confidence if ball_visible and not ball_rescued else 0.0
+    stable_trusted_ball = ball_trusted and prev_ball_trusted and not ball_rescued and not prev_ball_rescued
 
-    progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * coarse_scale
+    progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * progress_scale
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
-    enter_takeover = 1.0 if ball_confident and ball_trusted and takeover_envelope and not prev_takeover_envelope else 0.0
+    enter_takeover = 1.0 if ball_confident and stable_trusted_ball and takeover_envelope and not prev_takeover_envelope else 0.0
     # Walk in the takeover envelope earns bad_walk; hold_takeover only fires for
     # dribble/shoot so the gradient clearly pushes away from walk.
     hold_takeover = (
         fine_scale
-        if ball_confident and ball_trusted and takeover_envelope and step_ctx.skill_name != "walk"
+        if ball_confident and stable_trusted_ball and takeover_envelope and step_ctx.skill_name != "walk"
         else 0.0
     )
 
@@ -362,6 +380,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if (
             step_ctx.skill_name == "walk"
             and not step_ctx.projection_applied
+            and ball_trusted
             and walk_zone
             and (progress_ball > 0.0 or align_ball > 0.0)
         )
@@ -437,7 +456,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         else 0.0
     )
     abs_ball_angle = abs(cur_features.a_ball_rad)
-    keep_ball_front = clip(1.0 - abs_ball_angle / math.radians(70.0), 0.0, 1.0) * coarse_scale
+    keep_ball_front = clip(1.0 - abs_ball_angle / math.radians(70.0), 0.0, 1.0) * visual_control_scale
     bad_ball_angle = (
         1.0
         if (
@@ -446,7 +465,39 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
             and cur_features.d_ball_mm <= 1400.0
             and abs_ball_angle > math.radians(60.0)
             and ball_visible
+            and not ball_rescued
         )
+        else 0.0
+    )
+    rescued_severity = 0.0
+    if ball_rescued:
+        if cur_features.d_ball_mm <= 450.0:
+            rescued_severity = 1.0
+        elif cur_features.d_ball_mm <= 700.0:
+            rescued_severity = 0.75
+        else:
+            rescued_severity = 0.35
+    stale_ball = (
+        1.5
+        if bool(step_ctx.obs.ball_observation_stale) and abs_ball_angle > math.radians(45.0)
+        else 1.0
+        if bool(step_ctx.obs.ball_observation_stale)
+        else 0.0
+    )
+    collapsed_ball = 1.0 if bool(step_ctx.obs.ball_observation_collapsed) else 0.0
+    corrected_ball = (
+        1.0
+        if bool(step_ctx.obs.corrected_exported_ball) and not bool(step_ctx.obs.ball_observation_collapsed)
+        else 0.0
+    )
+    too_close_walk = (
+        1.0
+        if step_ctx.skill_name == "walk" and not step_ctx.projection_applied and cur_features.d_ball_mm < 180.0
+        else 0.0
+    )
+    lost_trusted_ball = (
+        1.0
+        if prev_ball_trusted and not ball_trusted and not ball_rescued and cur_features.d_ball_mm <= 1400.0
         else 0.0
     )
 
@@ -476,6 +527,12 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "preferred_skill_match": preferred_skill_match,
         "keep_ball_front": keep_ball_front,
         "bad_ball_angle": bad_ball_angle,
+        "rescued_ball": rescued_severity,
+        "stale_ball": stale_ball,
+        "collapsed_ball": collapsed_ball,
+        "corrected_ball": corrected_ball,
+        "too_close_walk": too_close_walk,
+        "lost_trusted_ball": lost_trusted_ball,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

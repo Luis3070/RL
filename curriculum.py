@@ -66,6 +66,12 @@ _STAGE_SPECS = {
             preferred_skill_match=0.08,
             keep_ball_front=0.12,
             bad_ball_angle=-0.10,
+            rescued_ball=-0.40,
+            stale_ball=-0.20,
+            collapsed_ball=-1.20,
+            corrected_ball=-0.30,
+            too_close_walk=-0.35,
+            lost_trusted_ball=-0.25,
         ),
     ),
     0: StageSpec(
@@ -79,8 +85,8 @@ _STAGE_SPECS = {
         reward_weights=RewardWeights(
             progress_ball=1.2,
             align_ball=0.8,
-            enter_takeover=4.0,
-            hold_takeover=1.0,
+            enter_takeover=2.5,
+            hold_takeover=0.8,
             approach_ball=0.10,
             good_walk=0.45,
             bad_walk=-0.35,
@@ -93,8 +99,14 @@ _STAGE_SPECS = {
             timeout=-2.0,
             ball_progress_post_takeover=0.6,
             preferred_skill_match=0.05,
-            keep_ball_front=0.05,
-            bad_ball_angle=-0.08,
+            keep_ball_front=0.15,
+            bad_ball_angle=-0.18,
+            rescued_ball=-0.75,
+            stale_ball=-0.35,
+            collapsed_ball=-2.0,
+            corrected_ball=-0.60,
+            too_close_walk=-0.60,
+            lost_trusted_ball=-0.50,
         ),
     ),
     1: StageSpec(
@@ -123,6 +135,12 @@ _STAGE_SPECS = {
             goal=4.0,
             timeout=-2.5,
             ball_progress_post_takeover=0.5,
+            rescued_ball=-0.55,
+            stale_ball=-0.25,
+            collapsed_ball=-1.50,
+            corrected_ball=-0.45,
+            too_close_walk=-0.45,
+            lost_trusted_ball=-0.35,
         ),
     ),
     2: StageSpec(
@@ -153,6 +171,12 @@ _STAGE_SPECS = {
             goal=4.5,
             timeout=-2.5,
             ball_progress_post_takeover=0.7,
+            rescued_ball=-0.45,
+            stale_ball=-0.20,
+            collapsed_ball=-1.25,
+            corrected_ball=-0.35,
+            too_close_walk=-0.35,
+            lost_trusted_ball=-0.25,
         ),
     ),
     3: StageSpec(
@@ -184,6 +208,12 @@ _STAGE_SPECS = {
             thrash=-1.2,
             goal=5.0,
             timeout=-2.5,
+            rescued_ball=-0.40,
+            stale_ball=-0.20,
+            collapsed_ball=-1.20,
+            corrected_ball=-0.30,
+            too_close_walk=-0.30,
+            lost_trusted_ball=-0.25,
         ),
         dynamic_update_interval_steps=4,
     ),
@@ -433,7 +463,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
         )
     if stage_id == 0:
         return (
-            _ball_semantics_ok(metrics, trusted_min=0.60, rescued_max=0.35, confidence_min=0.50)
+            _ball_semantics_ok(metrics, trusted_min=0.65, rescued_max=0.30, confidence_min=0.55)
             and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.10)
             and _metric(metrics, "episode_reward_mean", -999.0) >= -0.15
             and _metric(metrics, "stability_score") >= 0.45
@@ -441,6 +471,8 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 35.0
             and _metric(metrics, "dribble_compat_rate") >= 0.20
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
+            and _metric(metrics, "fov_perception_failure_rate", 0.0) <= 0.10
+            and str(metrics.get("wire_audit_status", "PASS")) == "PASS"
         )
     if stage_id == 1:
         stage0 = history.get(0, {})
