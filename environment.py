@@ -215,6 +215,8 @@ class RealSimRobotEnv(ParallelEnv):
             raise RuntimeError("step() called before reset()")
 
         handoff_override_applied = False
+        target_repair_applied = False
+        target_repair_reason = ""
         action_for_execution = policy_action
         if policy_action.skill_name == "walk" and self._should_force_dribble_handoff(self._last_backend_obs):
             handoff_override_applied = True
@@ -225,6 +227,11 @@ class RealSimRobotEnv(ParallelEnv):
                 target_y=fallback_targets["target_y"],
                 target_theta=fallback_targets["target_theta"],
                 pass_target=policy_action.pass_target,
+            )
+        else:
+            action_for_execution, target_repair_applied, target_repair_reason = self._repair_execution_targets(
+                policy_action,
+                obs=self._last_backend_obs,
             )
 
         executed_action, projection_applied = self.project_action(action_for_execution, obs=self._last_backend_obs)
@@ -273,7 +280,9 @@ class RealSimRobotEnv(ParallelEnv):
             first_to_ball=False,
             bad_duel=False,
             policy_skill_raw=policy_skill_raw,
+            policy_skill_prob_walk=float(policy_skill_probs.get("walk", 0.0)),
             policy_skill_prob_dribble=float(policy_skill_probs.get("dribble", 0.0)),
+            policy_skill_prob_shoot=float(policy_skill_probs.get("shoot", 0.0)),
             handoff_override_applied=handoff_override_applied,
         )
         evaluation = evaluate_step(step_ctx, self.stage_spec.reward_weights)
@@ -282,7 +291,14 @@ class RealSimRobotEnv(ParallelEnv):
         encoded = self._encode_obs(obs)
         if _STEP_PROFILE:
             _t3 = time.perf_counter()
-        self._update_episode_tracker(step_ctx, evaluation, projection_applied, dynamic_update_applied)
+        self._update_episode_tracker(
+            step_ctx,
+            evaluation,
+            projection_applied,
+            dynamic_update_applied,
+            target_repair_applied=target_repair_applied,
+            target_repair_reason=target_repair_reason,
+        )
 
         self._last_obs = encoded
         self._last_backend_obs = obs
@@ -309,6 +325,8 @@ class RealSimRobotEnv(ParallelEnv):
             policy_skill_entropy=policy_skill_entropy,
             policy_param_std_mean=policy_param_std_mean,
             handoff_override_applied=handoff_override_applied,
+            target_repair_applied=target_repair_applied,
+            target_repair_reason=target_repair_reason,
             done=done,
         )
 
@@ -360,6 +378,25 @@ class RealSimRobotEnv(ParallelEnv):
             pass_target=int(action.pass_target),
         )
         return projected, True
+
+    def _repair_execution_targets(
+        self,
+        policy_action: StructuredSkillAction,
+        *,
+        obs: BackendObservation,
+    ) -> tuple[StructuredSkillAction, bool, str]:
+        if policy_action.skill_name not in {"walk", "dribble"}:
+            return policy_action, False, ""
+
+        fallback_targets = build_fallback_action_targets(policy_action.skill_name, obs)
+        repaired = StructuredSkillAction(
+            skill_type=policy_action.skill_type,
+            target_x=float(fallback_targets["target_x"]),
+            target_y=float(fallback_targets["target_y"]),
+            target_theta=float(fallback_targets["target_theta"]),
+            pass_target=policy_action.pass_target,
+        )
+        return repaired, True, f"{policy_action.skill_name}_heuristic_anchor"
 
     def _should_force_dribble_handoff(self, obs: BackendObservation) -> bool:
         if self.stage_spec.stage_id != 0 or "dribble" not in self.stage_spec.active_skill_names:
@@ -430,8 +467,11 @@ class RealSimRobotEnv(ParallelEnv):
             "reward_weighted_terms_sum": {},
             "skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_counts": {name: 0 for name in ACTION.skill_names},
+            "policy_skill_prob_sums": {name: 0.0 for name in ACTION.skill_names},
             "skill_projection_count": 0,
             "handoff_override_count": 0,
+            "target_repair_count": 0,
+            "target_repair_reason_counts": defaultdict(int),
             "walk_steps": 0,
             "dribble_steps": 0,
             "shoot_steps": 0,
@@ -496,6 +536,9 @@ class RealSimRobotEnv(ParallelEnv):
         evaluation: StepEvaluation,
         projection_applied: bool,
         dynamic_update_applied: bool,
+        *,
+        target_repair_applied: bool,
+        target_repair_reason: str,
     ) -> None:
         tracker = self._episode_tracker
         tracker["reward_total"] += evaluation.total_reward
@@ -509,10 +552,17 @@ class RealSimRobotEnv(ParallelEnv):
 
         tracker["skill_counts"][step_ctx.skill_name] += 1
         tracker["policy_skill_counts"][step_ctx.policy_skill_name] += 1
+        tracker["policy_skill_prob_sums"]["walk"] += float(step_ctx.policy_skill_prob_walk)
+        tracker["policy_skill_prob_sums"]["dribble"] += float(step_ctx.policy_skill_prob_dribble)
+        tracker["policy_skill_prob_sums"]["shoot"] += float(step_ctx.policy_skill_prob_shoot)
         if projection_applied:
             tracker["skill_projection_count"] += 1
         if step_ctx.handoff_override_applied:
             tracker["handoff_override_count"] += 1
+        if target_repair_applied:
+            tracker["target_repair_count"] += 1
+            if target_repair_reason:
+                tracker["target_repair_reason_counts"][target_repair_reason] += 1
         if dynamic_update_applied:
             tracker["dynamic_updates"] += 1
         tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
@@ -654,6 +704,7 @@ class RealSimRobotEnv(ParallelEnv):
             "shoot_compat_rate": float(tracker["good_shoot_steps"] / shoot_steps),
             "takeover_entered": float(bool(tracker["takeover_entered"])),
             "takeover_hold_max": float(tracker["takeover_hold_max"]),
+            "target_repair_rate": float(tracker["target_repair_count"] / steps),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
@@ -760,6 +811,17 @@ class RealSimRobotEnv(ParallelEnv):
             "bad_walk_rate": bad_walk_rate,
             "bad_dribble_rate": bad_dribble_rate,
             "bad_shoot_rate": bad_shoot_rate,
+            "policy_stand_rate": float(tracker["policy_skill_counts"].get("stand", 0) / steps),
+            "policy_walk_rate": float(tracker["policy_skill_counts"].get("walk", 0) / steps),
+            "policy_dribble_rate": float(tracker["policy_skill_counts"].get("dribble", 0) / steps),
+            "policy_shoot_rate": float(tracker["policy_skill_counts"].get("shoot", 0) / steps),
+            "executed_stand_rate": float(tracker["skill_counts"].get("stand", 0) / steps),
+            "executed_walk_rate": float(tracker["skill_counts"].get("walk", 0) / steps),
+            "executed_dribble_rate": float(tracker["skill_counts"].get("dribble", 0) / steps),
+            "executed_shoot_rate": float(tracker["skill_counts"].get("shoot", 0) / steps),
+            "policy_skill_prob_walk_mean": float(tracker["policy_skill_prob_sums"].get("walk", 0.0) / steps),
+            "policy_skill_prob_dribble_mean": float(tracker["policy_skill_prob_sums"].get("dribble", 0.0) / steps),
+            "policy_skill_prob_shoot_mean": float(tracker["policy_skill_prob_sums"].get("shoot", 0.0) / steps),
             "obstacle_clearance_success": obstacle_clearance_success,
             "dynamic_obstacle_success": dynamic_obstacle_success,
             "corridor_keep_rate": corridor_keep_rate,
@@ -767,6 +829,7 @@ class RealSimRobotEnv(ParallelEnv):
             "stability_score": stability_score,
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
             "handoff_override_rate": float(tracker["handoff_override_count"] / steps),
+            "target_repair_rate": float(tracker["target_repair_count"] / steps),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
@@ -802,6 +865,7 @@ class RealSimRobotEnv(ParallelEnv):
             "reward_weighted_terms_sum": dict(tracker["reward_weighted_terms_sum"]),
             "skill_counts": dict(tracker["skill_counts"]),
             "policy_skill_counts": dict(tracker["policy_skill_counts"]),
+            "target_repair_reason_counts": dict(tracker["target_repair_reason_counts"]),
         }
 
     def _build_info(
@@ -820,6 +884,8 @@ class RealSimRobotEnv(ParallelEnv):
         policy_skill_entropy: float = 0.0,
         policy_param_std_mean: float = 0.0,
         handoff_override_applied: bool = False,
+        target_repair_applied: bool = False,
+        target_repair_reason: str = "",
         done: bool = False,
     ) -> Dict[str, object]:
         raw_obs = asdict(obs)
@@ -877,6 +943,8 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_skill_entropy": float(policy_skill_entropy),
             "policy_param_std_mean": float(policy_param_std_mean),
             "handoff_override_applied": bool(handoff_override_applied),
+            "target_repair_applied": bool(target_repair_applied),
+            "target_repair_reason": str(target_repair_reason),
             "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
             "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
             "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),

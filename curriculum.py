@@ -22,6 +22,7 @@ class StageSpec:
     stage_id: int
     name: str
     description: str
+    ball_radius_min_mm: float | None
     ball_radius_max_mm: float | None
     full_field: bool
     obstacle_mode: str
@@ -50,6 +51,7 @@ _STAGE_SPECS = {
         stage_id=-1,
         name="stage_0a_walk_approach",
         description="Pre-stage: caminar hacia la pelota sin cambio de skill.",
+        ball_radius_min_mm=300.0,
         ball_radius_max_mm=1200.0,
         full_field=False,
         obstacle_mode="none",
@@ -59,6 +61,8 @@ _STAGE_SPECS = {
             align_ball=0.8,
             approach_ball=0.12,
             good_walk=0.6,
+            idle_stand=-0.20,
+            walk_persistence=0.10,
             projection_penalty=-0.05,
             skill_switch=-0.02,
             thrash=-0.5,
@@ -74,37 +78,42 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.25,
             missed_dribble_handoff=-0.20,
             dribble_skill_intent=0.20,
+            shoot_skill_intent=0.0,
         ),
     ),
     0: StageSpec(
         stage_id=0,
-        name="stage_0",
-        description="Approach y takeover limpio walk→dribble sin shoot.",
-        ball_radius_max_mm=800.0,
+        name="stage_0_clean_handoff",
+        description="Handoff limpio walk→dribble desde distancia real de aproximación, sin shoot.",
+        ball_radius_min_mm=700.0,
+        ball_radius_max_mm=1600.0,
         full_field=False,
         obstacle_mode="none",
         active_skill_names=TAKEOVER_SKILLS,
         reward_weights=RewardWeights(
-            progress_ball=1.2,
-            align_ball=0.8,
-            enter_takeover=2.5,
-            hold_takeover=0.8,
-            approach_ball=0.10,
-            good_walk=0.45,
-            bad_walk=-0.70,
-            good_dribble=1.50,
-            bad_dribble=-0.65,
+            progress_ball=1.35,
+            align_ball=0.9,
+            enter_takeover=2.4,
+            hold_takeover=0.55,
+            approach_ball=0.16,
+            good_walk=0.70,
+            bad_walk=-0.65,
+            idle_stand=-0.35,
+            walk_persistence=0.14,
+            good_dribble=1.00,
+            bad_dribble=-1.15,
             projection_penalty=-0.10,
             skill_switch=-0.05,
             thrash=-1.0,
-            goal=4.0,
+            goal=2.0,
             timeout=-2.0,
-            ball_progress_post_takeover=0.6,
-            preferred_skill_match=0.05,
-            dribble_handoff=2.00,
-            missed_dribble_handoff=-0.50,
-            dribble_skill_intent=0.80,
-            keep_ball_front=0.15,
+            ball_progress_post_takeover=0.35,
+            preferred_skill_match=0.10,
+            dribble_handoff=1.60,
+            missed_dribble_handoff=-0.45,
+            dribble_skill_intent=0.45,
+            shoot_skill_intent=0.0,
+            keep_ball_front=0.18,
             bad_ball_angle=-0.18,
             rescued_ball=-0.75,
             stale_ball=-0.35,
@@ -116,26 +125,29 @@ _STAGE_SPECS = {
     ),
     1: StageSpec(
         stage_id=1,
-        name="stage_1",
-        description="Misma tarea que Stage 0 con mayor exigencia temporal.",
-        ball_radius_max_mm=1600.0,
+        name="stage_1_finish_after_handoff",
+        description="Cadena walk→dribble→shoot sin obstáculos.",
+        ball_radius_min_mm=900.0,
+        ball_radius_max_mm=2400.0,
         full_field=False,
         obstacle_mode="none",
         active_skill_names=ACTIVE_SKILLS,
         reward_weights=RewardWeights(
-            progress_ball=1.0,
-            align_ball=0.7,
+            progress_ball=1.1,
+            align_ball=0.75,
             enter_takeover=2.2,
             hold_takeover=0.4,
-            approach_ball=0.05,
-            good_walk=0.4,
+            approach_ball=0.08,
+            good_walk=0.45,
             bad_walk=-0.8,
+            idle_stand=-0.60,
+            walk_persistence=0.20,
             good_dribble=0.9,
-            bad_dribble=-1.2,
+            bad_dribble=-1.6,
             good_shoot=1.3,
-            bad_shoot=-2.0,
+            bad_shoot=-2.2,
             projection_penalty=-0.15,
-            skill_switch=-0.2,
+            skill_switch=-0.3,
             thrash=-1.0,
             goal=4.0,
             timeout=-2.5,
@@ -148,13 +160,15 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.35,
             dribble_handoff=0.75,
             missed_dribble_handoff=-0.25,
-            dribble_skill_intent=0.30,
+            dribble_skill_intent=0.20,
+            shoot_skill_intent=0.45,
         ),
     ),
     2: StageSpec(
         stage_id=2,
         name="stage_2",
         description="Takeover limpio con clearance y obstáculos estáticos.",
+        ball_radius_min_mm=1200.0,
         ball_radius_max_mm=3200.0,
         full_field=False,
         obstacle_mode="static",
@@ -167,8 +181,10 @@ _STAGE_SPECS = {
             approach_ball=0.04,
             good_walk=0.3,
             bad_walk=-0.9,
+            idle_stand=-0.45,
+            walk_persistence=0.16,
             good_dribble=1.1,
-            bad_dribble=-1.3,
+            bad_dribble=-1.6,
             good_shoot=1.4,
             bad_shoot=-2.0,
             projection_penalty=-0.20,
@@ -187,13 +203,15 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.25,
             dribble_handoff=0.50,
             missed_dribble_handoff=-0.20,
-            dribble_skill_intent=0.25,
+            dribble_skill_intent=0.20,
+            shoot_skill_intent=0.45,
         ),
     ),
     3: StageSpec(
         stage_id=3,
         name="stage_3",
         description="Robustez temporal con obstáculos dinámicos scripted.",
+        ball_radius_min_mm=600.0,
         ball_radius_max_mm=None,
         full_field=True,
         obstacle_mode="dynamic",
@@ -206,10 +224,12 @@ _STAGE_SPECS = {
             approach_ball=0.03,
             good_walk=0.2,
             bad_walk=-1.0,
+            idle_stand=-0.35,
+            walk_persistence=0.12,
             good_dribble=1.4,
-            bad_dribble=-1.4,
+            bad_dribble=-1.7,
             good_shoot=1.5,
-            bad_shoot=-2.2,
+            bad_shoot=-2.0,
             projection_penalty=-0.20,
             collision=-3.2,
             clearance_gain=1.0,
@@ -227,7 +247,53 @@ _STAGE_SPECS = {
             lost_trusted_ball=-0.25,
             dribble_handoff=0.50,
             missed_dribble_handoff=-0.20,
-            dribble_skill_intent=0.25,
+            dribble_skill_intent=0.20,
+            shoot_skill_intent=0.50,
+        ),
+        dynamic_update_interval_steps=4,
+    ),
+    4: StageSpec(
+        stage_id=4,
+        name="stage_4_production",
+        description="Validación productiva: finish real, obstáculos dinámicos y sin colapso de skill.",
+        ball_radius_min_mm=600.0,
+        ball_radius_max_mm=None,
+        full_field=True,
+        obstacle_mode="dynamic",
+        active_skill_names=ACTIVE_SKILLS,
+        reward_weights=RewardWeights(
+            progress_ball=0.6,
+            align_ball=0.45,
+            enter_takeover=1.6,
+            hold_takeover=0.5,
+            approach_ball=0.02,
+            good_walk=0.2,
+            bad_walk=-1.0,
+            idle_stand=-0.35,
+            walk_persistence=0.10,
+            good_dribble=1.2,
+            bad_dribble=-1.8,
+            good_shoot=2.0,
+            bad_shoot=-2.0,
+            projection_penalty=-0.25,
+            collision=-3.5,
+            clearance_gain=0.8,
+            corridor_keep=1.0,
+            ball_progress_post_takeover=1.2,
+            skill_switch=-0.25,
+            thrash=-1.4,
+            goal=7.0,
+            timeout=-3.0,
+            rescued_ball=-0.40,
+            stale_ball=-0.20,
+            collapsed_ball=-1.20,
+            corrected_ball=-0.30,
+            too_close_walk=-0.30,
+            lost_trusted_ball=-0.25,
+            dribble_handoff=0.30,
+            missed_dribble_handoff=-0.20,
+            dribble_skill_intent=0.15,
+            shoot_skill_intent=0.70,
         ),
         dynamic_update_interval_steps=4,
     ),
@@ -262,16 +328,18 @@ def stage_skill_mask(stage_id: int) -> Dict[str, int]:
 def _sample_pose_ball_pair(
     rng: np.random.Generator,
     *,
+    radius_min_mm: float,
     radius_max_mm: float,
     robot_xy_bounds: tuple[float, float, float, float],
     line_angle_range_deg: float,
     heading_noise_deg: float,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     x_min, x_max, y_min, y_max = robot_xy_bounds
+    radius_min = min(float(radius_min_mm), float(radius_max_mm))
     for _ in range(128):
         robot_x = float(rng.uniform(x_min, x_max))
         robot_y = float(rng.uniform(y_min, y_max))
-        radius = float(rng.uniform(max(150.0, radius_max_mm * 0.25), radius_max_mm))
+        radius = float(rng.uniform(radius_min, radius_max_mm))
         line_angle = float(rng.uniform(-math.radians(line_angle_range_deg), math.radians(line_angle_range_deg)))
         ball_x = robot_x + radius * math.cos(line_angle)
         ball_y = robot_y + radius * math.sin(line_angle)
@@ -367,6 +435,7 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     if stage.stage_id == -1:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
+            radius_min_mm=stage.ball_radius_min_mm or max(150.0, (stage.ball_radius_max_mm or 1200.0) * 0.25),
             radius_max_mm=stage.ball_radius_max_mm or 1200.0,
             robot_xy_bounds=(-1700.0, -450.0, -650.0, 650.0),
             line_angle_range_deg=12.0,
@@ -376,7 +445,8 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     if stage.stage_id == 0:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
-            radius_max_mm=stage.ball_radius_max_mm or 800.0,
+            radius_min_mm=stage.ball_radius_min_mm or 700.0,
+            radius_max_mm=stage.ball_radius_max_mm or 1600.0,
             robot_xy_bounds=(-1500.0, -500.0, -550.0, 550.0),
             line_angle_range_deg=18.0,
             heading_noise_deg=12.0,
@@ -385,7 +455,8 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     if stage.stage_id == 1:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
-            radius_max_mm=stage.ball_radius_max_mm or 1600.0,
+            radius_min_mm=stage.ball_radius_min_mm or 900.0,
+            radius_max_mm=stage.ball_radius_max_mm or 2400.0,
             robot_xy_bounds=(-2100.0, -550.0, -800.0, 800.0),
             line_angle_range_deg=28.0,
             heading_noise_deg=18.0,
@@ -394,6 +465,7 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     if stage.stage_id == 2:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
             rng,
+            radius_min_mm=stage.ball_radius_min_mm or 1200.0,
             radius_max_mm=stage.ball_radius_max_mm or 3200.0,
             robot_xy_bounds=(-2800.0, -600.0, -1200.0, 1200.0),
             line_angle_range_deg=55.0,
@@ -406,7 +478,7 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
             teammates=_support_players_far(),
             opponents=_static_obstacles(robot_pos, ball_pos),
         )
-    if stage.stage_id == 3:
+    if stage.stage_id in (3, 4):
         ball_pos, robot_pos, robot_theta = _sample_full_field_pair(rng)
         return build_world_spec(
             ball_pos=ball_pos,
@@ -466,6 +538,18 @@ def _behavior_is_stable(metrics: Mapping[str, float], *, thrash_max: float, coll
     )
 
 
+def _skill_not_collapsed(
+    metrics: Mapping[str, float],
+    *,
+    dribble_prob_max: float,
+    dribble_rate_max: float,
+) -> bool:
+    return (
+        _metric(metrics, "policy_skill_prob_dribble_mean", 0.0) <= dribble_prob_max
+        and _metric(metrics, "policy_dribble_rate", 0.0) <= dribble_rate_max
+    )
+
+
 def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[int, Mapping[str, float]]) -> bool:
     if stage_id == -1:
         return (
@@ -480,36 +564,47 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
         return (
             _ball_semantics_ok(metrics, trusted_min=0.65, rescued_max=0.30, confidence_min=0.55)
             and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.10)
-            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.15
+            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.25
             and _metric(metrics, "stability_score") >= 0.45
             and _metric(metrics, "takeover_success_rate") >= 0.80
-            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 35.0
-            and _metric(metrics, "dribble_compat_rate") >= 0.20
+            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 65.0
+            and _metric(metrics, "dribble_compat_rate") >= 0.50
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
+            and _metric(metrics, "handoff_override_rate", 1.0) <= 0.03
+            and (
+                _metric(metrics, "policy_walk_rate") >= 0.02
+                or _metric(metrics, "policy_skill_prob_walk_mean") >= 0.02
+            )
+            and _skill_not_collapsed(metrics, dribble_prob_max=0.98, dribble_rate_max=0.985)
             and _metric(metrics, "fov_perception_failure_rate", 0.0) <= 0.10
             and str(metrics.get("wire_audit_status", "PASS")) == "PASS"
         )
     if stage_id == 1:
-        stage0 = history.get(0, {})
         return (
             _ball_semantics_ok(metrics, trusted_min=0.58, rescued_max=0.38, confidence_min=0.48)
             and _behavior_is_stable(metrics, thrash_max=0.10, collision_max=0.10)
-            and _metric(metrics, "episode_reward_mean", -999.0) >= _metric(stage0, "episode_reward_mean", -0.10) - 0.05
+            and _metric(metrics, "episode_reward_mean", -999.0) >= -0.20
+            and _metric(metrics, "clean_takeover_rate") >= 0.70
+            and _metric(metrics, "clean_finish_rate") >= 0.60
+            and _metric(metrics, "takeover_success_rate") >= 0.80
+            and _metric(metrics, "dribble_compat_rate") >= 0.65
+            and _metric(metrics, "bad_dribble_rate", 1.0) <= 0.20
+            and _metric(metrics, "policy_stand_rate", 1.0) <= 0.15
             and (
-                _metric(metrics, "walk_compat_rate") >= 0.08
-                or _metric(metrics, "takeover_success_rate") >= 0.35
-                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= 35.0
+                _metric(metrics, "shoot_compat_rate") >= 0.10
+                or _metric(metrics, "policy_shoot_rate") > 0.02
+                or _metric(metrics, "policy_skill_prob_shoot_mean") > 0.02
             )
-            and (
-                _metric(metrics, "takeover_success_rate") >= 0.10
-                or _metric(metrics, "mean_time_to_takeover", float("inf")) <= _metric(stage0, "mean_time_to_takeover", float("inf"))
-            )
+            and _skill_not_collapsed(metrics, dribble_prob_max=0.95, dribble_rate_max=0.96)
         )
     if stage_id == 2:
         return (
             _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
             and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
             and _metric(metrics, "episode_reward_mean", -999.0) >= -0.25
+            and _metric(metrics, "clean_takeover_rate") >= 0.50
+            and _metric(metrics, "clean_finish_rate") >= 0.40
+            and _skill_not_collapsed(metrics, dribble_prob_max=0.92, dribble_rate_max=0.94)
             and (
                 _metric(metrics, "obstacle_clearance_success") >= 0.25
                 or _metric(metrics, "clearance_positive_steps") > 0.0
@@ -521,7 +616,25 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
         return (
             _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
             and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
+            and _metric(metrics, "clean_takeover_rate") >= 0.50
+            and _metric(metrics, "clean_finish_rate") >= 0.40
             and _metric(metrics, "dynamic_obstacle_success") >= 0.20
             and _metric(metrics, "stability_score") >= _metric(stage2, "stability_score", 0.0) - 0.05
+            and _skill_not_collapsed(metrics, dribble_prob_max=0.92, dribble_rate_max=0.94)
+        )
+    if stage_id == 4:
+        return (
+            _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
+            and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.08)
+            and _metric(metrics, "clean_episode_rate") >= 0.50
+            and _metric(metrics, "clean_finish_rate") >= 0.70
+            and (
+                _metric(metrics, "goal_rate") >= 0.10
+                or _metric(metrics, "ball_progress_post_takeover_mean") >= 0.02
+            )
+            and _metric(metrics, "handoff_override_rate", 1.0) <= 0.01
+            and _metric(metrics, "skill_projection_rate", 1.0) <= 0.01
+            and _metric(metrics, "policy_shoot_rate") >= 0.02
+            and _skill_not_collapsed(metrics, dribble_prob_max=0.88, dribble_rate_max=0.90)
         )
     return False

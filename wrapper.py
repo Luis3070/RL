@@ -89,6 +89,8 @@ class RealSimRobotEnvWrapper:
                         "policy_skill_prob_mark": float(info.get("policy_skill_prob_mark", 0.0)),
                         "policy_skill_prob_observe": float(info.get("policy_skill_prob_observe", 0.0)),
                         "handoff_override_applied": int(bool(info.get("handoff_override_applied", False))),
+                        "target_repair_applied": int(bool(info.get("target_repair_applied", False))),
+                        "target_repair_reason": info.get("target_repair_reason"),
                         "policy_target_x": float(info.get("policy_target_x", 0.0)),
                         "policy_target_y": float(info.get("policy_target_y", 0.0)),
                         "policy_target_theta": float(info.get("policy_target_theta", 0.0)),

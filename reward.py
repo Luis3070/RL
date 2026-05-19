@@ -27,6 +27,8 @@ class RewardWeights:
     hold_takeover: float = 0.0
     good_walk: float = 0.0
     bad_walk: float = 0.0
+    idle_stand: float = 0.0
+    walk_persistence: float = 0.0
     good_dribble: float = 0.0
     bad_dribble: float = 0.0
     good_shoot: float = 0.0
@@ -55,6 +57,7 @@ class RewardWeights:
     dribble_handoff: float = 0.0
     missed_dribble_handoff: float = 0.0
     dribble_skill_intent: float = 0.0
+    shoot_skill_intent: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -64,6 +67,8 @@ class RewardWeights:
             "hold_takeover": self.hold_takeover,
             "good_walk": self.good_walk,
             "bad_walk": self.bad_walk,
+            "idle_stand": self.idle_stand,
+            "walk_persistence": self.walk_persistence,
             "good_dribble": self.good_dribble,
             "bad_dribble": self.bad_dribble,
             "good_shoot": self.good_shoot,
@@ -92,6 +97,7 @@ class RewardWeights:
             "dribble_handoff": self.dribble_handoff,
             "missed_dribble_handoff": self.missed_dribble_handoff,
             "dribble_skill_intent": self.dribble_skill_intent,
+            "shoot_skill_intent": self.shoot_skill_intent,
         }
 
 
@@ -127,7 +133,9 @@ class StepContext:
     first_to_ball: bool = False
     bad_duel: bool = False
     policy_skill_raw: float = 0.0
+    policy_skill_prob_walk: float = 0.0
     policy_skill_prob_dribble: float = 0.0
+    policy_skill_prob_shoot: float = 0.0
     handoff_override_applied: bool = False
 
 
@@ -311,7 +319,7 @@ def build_fallback_action_targets(skill_name: str, obs: BackendObservation) -> D
     goal_heading = math.atan2(-float(obs.ball_y), GOAL_X - float(obs.ball_x))
     if skill_name == "walk":
         return {
-            "target_x": float(obs.ball_x),
+            "target_x": float(obs.ball_x) + _APPROACH_OFFSET_X,
             "target_y": float(obs.ball_y),
             "target_theta": ball_heading,
         }
@@ -414,6 +422,30 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         and (shoot_zone or dribble_zone)
         else 0.0
     )
+    idle_stand = (
+        fine_scale
+        if (
+            step_ctx.stage >= 0
+            and step_ctx.skill_name == "stand"
+            and walk_zone
+            and ball_confident
+            and ball_trusted
+            and cur_features.d_ball_mm > 500.0
+        )
+        else 0.0
+    )
+    walk_persistence = (
+        fine_scale
+        if (
+            step_ctx.skill_name == "walk"
+            and step_ctx.prev_skill_name == "walk"
+            and not step_ctx.projection_applied
+            and ball_confident
+            and ball_trusted
+            and walk_zone
+        )
+        else 0.0
+    )
 
     good_dribble = (
         fine_scale
@@ -428,11 +460,15 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         else 0.0
     )
     bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not early_dribble_zone else 0.0
+    if step_ctx.skill_name == "dribble" and walk_zone and not takeover_envelope:
+        bad_dribble += 0.45 if step_ctx.stage == 0 else 0.75
     if step_ctx.skill_name == "dribble" and not ball_trusted:
         bad_dribble += 0.5 if ball_rescued else 0.25
 
     good_shoot = fine_scale if step_ctx.skill_name == "shoot" and ball_confident and ball_trusted and shoot_zone else 0.0
     bad_shoot = 1.0 if step_ctx.skill_name == "shoot" and not shoot_zone else 0.0
+    if step_ctx.skill_name == "shoot" and walk_zone and not shoot_zone:
+        bad_shoot += 0.75 if step_ctx.stage >= 1 else 0.35
     if step_ctx.skill_name == "shoot" and not ball_trusted:
         bad_shoot += 0.5 if ball_rescued else 0.25
     projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
@@ -560,6 +596,17 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if step_ctx.stage == 0 and stable_trusted_takeover
         else 0.0
     )
+    shoot_skill_intent = (
+        clip(
+            float(step_ctx.policy_skill_prob_shoot)
+            if step_ctx.policy_skill_prob_shoot > 0.0
+            else (1.0 if step_ctx.policy_skill_name == "shoot" else 0.0),
+            0.0,
+            1.0,
+        ) * fine_scale
+        if step_ctx.stage >= 1 and ball_confident and ball_trusted and shoot_zone
+        else 0.0
+    )
 
     terms = {
         "progress_ball": progress_ball,
@@ -568,6 +615,8 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "hold_takeover": hold_takeover,
         "good_walk": good_walk,
         "bad_walk": bad_walk,
+        "idle_stand": idle_stand,
+        "walk_persistence": walk_persistence,
         "good_dribble": good_dribble,
         "bad_dribble": bad_dribble,
         "good_shoot": good_shoot,
@@ -596,6 +645,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "dribble_handoff": dribble_handoff,
         "missed_dribble_handoff": missed_dribble_handoff,
         "dribble_skill_intent": dribble_skill_intent,
+        "shoot_skill_intent": shoot_skill_intent,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

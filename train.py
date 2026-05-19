@@ -45,7 +45,7 @@ class ScriptRunConfig:
     train_steps: int = 800_000
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     stage_id: int = -1
-    max_stage_id: int = 3
+    max_stage_id: int = 4
     save_telemetry: bool = True
     save_plots: bool = True
     capture_eval_steps: bool = True
@@ -57,7 +57,7 @@ class ScriptRunConfig:
     mini_batches: int = 4
     eval_interval: int = 5_000
     checkpoint_interval: int = 5_000
-    eval_episodes: int = 2
+    eval_episodes: int = 4
     abort_on_wire_fail: bool = False
     parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     visible_parallel_display_base: int = 410
@@ -775,12 +775,27 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "bad_walk_rate",
         "bad_dribble_rate",
         "bad_shoot_rate",
+        "policy_stand_rate",
+        "policy_walk_rate",
+        "policy_dribble_rate",
+        "policy_shoot_rate",
+        "executed_stand_rate",
+        "executed_walk_rate",
+        "executed_dribble_rate",
+        "executed_shoot_rate",
+        "policy_skill_prob_walk_mean",
+        "policy_skill_prob_dribble_mean",
+        "policy_skill_prob_shoot_mean",
         "obstacle_clearance_success",
         "dynamic_obstacle_success",
         "corridor_keep_rate",
         "ball_progress_post_takeover_mean",
         "stability_score",
         "skill_projection_rate",
+        "handoff_override_rate",
+        "target_repair_rate",
+        "policy_skill_entropy",
+        "policy_param_std_mean",
         "synthetic_pose_rate",
         "synthetic_ball_rate",
         "obs_mode_estimated_rate",

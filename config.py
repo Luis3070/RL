@@ -203,7 +203,7 @@ class TrainConfig:
     eval_interval: int = 5000
     eval_episodes: int = 8
     initial_stage_id: int = -1
-    max_stage_id: int = 3
+    max_stage_id: int = 4
     auto_promote: bool = True
     experiment_name: str = "pybh_mappo_takeover_ppo"
     wire_audit: WireAuditConfig = field(default_factory=WireAuditConfig)
