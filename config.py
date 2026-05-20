@@ -96,6 +96,9 @@ class ActionConfig:
     x_range: float = FIELD_X_HALF
     y_range: float = FIELD_Y_HALF
     theta_range: float = math.pi
+    residual_x_range: float = 650.0
+    residual_y_range: float = 450.0
+    residual_theta_range: float = 0.75
     max_pass_target: int = 4
     flat_size: int = 5
 
@@ -194,6 +197,7 @@ class TrainConfig:
     discount_factor: float = 0.99
     gae_lambda: float = 0.95
     entropy_loss_scale: float = 0.01
+    param_log_prob_weight: float = 0.10
     value_loss_scale: float = 0.5
     ratio_clip: float = 0.2
     grad_norm_clip: float = 0.5

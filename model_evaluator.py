@@ -97,6 +97,19 @@ def _format_probs(info: Mapping[str, object]) -> str:
     )
 
 
+def _ball_distance_from_info(info: Mapping[str, object]) -> float:
+    raw_obs = info.get("raw_obs", {})
+    if not isinstance(raw_obs, Mapping):
+        return 0.0
+    robot_x = float(raw_obs.get("robot_x", 0.0))
+    robot_y = float(raw_obs.get("robot_y", 0.0))
+    ball_x = float(raw_obs.get("ball_x", 0.0))
+    ball_y = float(raw_obs.get("ball_y", 0.0))
+    dx = ball_x - robot_x
+    dy = ball_y - robot_y
+    return float((dx * dx + dy * dy) ** 0.5)
+
+
 def _live_rollout(
     agent,
     eval_env,
@@ -121,6 +134,9 @@ def _live_rollout(
             reward = float(rewards.get(agent_id, 0.0))
             total_reward += reward
             info = infos.get(agent_id, {})
+            raw_obs = info.get("raw_obs", {})
+            if not isinstance(raw_obs, Mapping):
+                raw_obs = {}
             final_info = info
             row = {
                 "step": step,
@@ -134,20 +150,55 @@ def _live_rollout(
                 "dribble_zone": int(bool(info.get("dribble_zone", False))),
                 "shoot_zone": int(bool(info.get("shoot_zone", False))),
                 "handoff_override_applied": int(bool(info.get("handoff_override_applied", False))),
+                "target_repair_applied": int(bool(info.get("target_repair_applied", False))),
+                "target_repair_reason": info.get("target_repair_reason"),
+                "requested_skill": info.get("requested_skill"),
+                "requested_pass_target": int(info.get("requested_pass_target", 0)),
+                "policy_residual_x": float(info.get("policy_residual_x", 0.0)),
+                "policy_residual_y": float(info.get("policy_residual_y", 0.0)),
+                "policy_residual_theta": float(info.get("policy_residual_theta", 0.0)),
+                "policy_target_error_mm": float(info.get("policy_target_error_mm", 0.0)),
+                "policy_theta_error_rad": float(info.get("policy_theta_error_rad", 0.0)),
                 "target_x": float(info.get("policy_target_x", 0.0)),
                 "target_y": float(info.get("policy_target_y", 0.0)),
                 "target_theta": float(info.get("policy_target_theta", 0.0)),
+                "executed_target_x": float(info.get("executed_target_x", 0.0)),
+                "executed_target_y": float(info.get("executed_target_y", 0.0)),
+                "executed_target_theta": float(info.get("executed_target_theta", 0.0)),
                 "policy_skill_prob_stand": float(info.get("policy_skill_prob_stand", 0.0)),
                 "policy_skill_prob_walk": float(info.get("policy_skill_prob_walk", 0.0)),
                 "policy_skill_prob_dribble": float(info.get("policy_skill_prob_dribble", 0.0)),
                 "policy_skill_prob_shoot": float(info.get("policy_skill_prob_shoot", 0.0)),
+                "obs_export_mode": int(info.get("obs_export_mode", 0)),
+                "corrected_exported_robot_pose": int(bool(info.get("corrected_exported_robot_pose", False))),
+                "corrected_exported_ball": int(bool(info.get("corrected_exported_ball", False))),
+                "ball_export_source": int(info.get("ball_export_source", 0)),
+                "ball_export_fresh": int(bool(info.get("ball_export_fresh", False))),
+                "pose_alignment_error_mm": float(info.get("pose_alignment_error_mm", 0.0)),
+                "pose_alignment_warning": int(bool(info.get("pose_alignment_warning", False))),
+                "synthetic_pose_observation": int(bool(info.get("synthetic_pose_observation", False))),
+                "synthetic_ball_observation": int(bool(info.get("synthetic_ball_observation", False))),
+                "ball_observation_stale": int(bool(info.get("ball_observation_stale", False))),
+                "ball_observation_collapsed": int(bool(info.get("ball_observation_collapsed", False))),
+                "natural_time_since_ball_seen": float(info.get("natural_time_since_ball_seen", 0.0)),
+                "natural_ball_seen_percentage": float(info.get("natural_ball_seen_percentage", 0.0)),
                 "ball_trusted": int(bool(info.get("ball_trusted_mask", False))),
                 "ball_visible": int(bool(info.get("ball_visible_mask", False))),
+                "ball_rescued": int(bool(info.get("ball_rescued_mask", False))),
                 "ball_confidence_score": float(info.get("ball_confidence_score", 0.0)),
-                "robot_x": float(info.get("raw_obs", {}).get("robot_x", 0.0)),
-                "robot_y": float(info.get("raw_obs", {}).get("robot_y", 0.0)),
-                "ball_x": float(info.get("raw_obs", {}).get("ball_x", 0.0)),
-                "ball_y": float(info.get("raw_obs", {}).get("ball_y", 0.0)),
+                "ball_distance_mm": _ball_distance_from_info(info),
+                "ball_rel_x": float(raw_obs.get("ball_rel_x", 0.0)),
+                "ball_rel_y": float(raw_obs.get("ball_rel_y", 0.0)),
+                "robot_x": float(raw_obs.get("robot_x", 0.0)),
+                "robot_y": float(raw_obs.get("robot_y", 0.0)),
+                "robot_theta": float(raw_obs.get("robot_theta", 0.0)),
+                "estimated_robot_x": float(info.get("estimated_robot_x", 0.0)),
+                "estimated_robot_y": float(info.get("estimated_robot_y", 0.0)),
+                "estimated_robot_theta": float(info.get("estimated_robot_theta", 0.0)),
+                "ball_x": float(raw_obs.get("ball_x", 0.0)),
+                "ball_y": float(raw_obs.get("ball_y", 0.0)),
+                "estimated_ball_x": float(info.get("estimated_ball_x", 0.0)),
+                "estimated_ball_y": float(info.get("estimated_ball_y", 0.0)),
             }
             _append_csv_row(csv_path, row)
             print(
@@ -158,7 +209,10 @@ def _live_rollout(
                 f"zones=w{int(bool(info.get('walk_zone', False)))}"
                 f"/d{int(bool(info.get('dribble_zone', False)))}"
                 f"/s{int(bool(info.get('shoot_zone', False)))} "
+                f"ball_dist={_ball_distance_from_info(info):.0f}mm "
+                f"repair={int(bool(info.get('target_repair_applied', False)))} "
                 f"override={int(bool(info.get('handoff_override_applied', False)))} "
+                f"pose_warn={int(bool(info.get('pose_alignment_warning', False)))} "
                 + _format_probs(info),
                 flush=True,
             )
@@ -236,11 +290,19 @@ def _print_health(summary: Mapping[str, float]) -> None:
         "takeover_success_rate",
         "clean_takeover_rate",
         "clean_finish_rate",
+        "incompatible_takeover_rate",
+        "walk_in_stable_takeover_rate",
+        "stand_in_stable_takeover_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
         "bad_dribble_rate",
         "bad_walk_rate",
         "handoff_override_rate",
+        "target_repair_rate",
+        "policy_target_error_mean",
+        "policy_theta_error_mean",
+        "pose_jump_rate",
+        "pose_jump_max_mm",
         "stability_score",
         "ball_trusted_rate",
     ):

@@ -474,7 +474,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
 
     valid_dribble_handoff = bool(
-        step_ctx.stage == 0
+        step_ctx.stage in {0, 1}
         and stable_trusted_takeover
         and step_ctx.prev_skill_name == "walk"
         and step_ctx.skill_name == "dribble"
@@ -578,7 +578,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     missed_dribble_handoff = (
         1.0
         if (
-            step_ctx.stage == 0
+            step_ctx.stage in {0, 1}
             and stable_trusted_takeover
             and step_ctx.policy_skill_name == "walk"
             and not step_ctx.projection_applied
@@ -593,7 +593,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
             0.0,
             1.0,
         ) * fine_scale
-        if step_ctx.stage == 0 and stable_trusted_takeover
+        if step_ctx.stage in {0, 1} and stable_trusted_takeover
         else 0.0
     )
     shoot_skill_intent = (

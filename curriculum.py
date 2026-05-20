@@ -535,6 +535,7 @@ def _behavior_is_stable(metrics: Mapping[str, float], *, thrash_max: float, coll
         _wire_is_healthy(metrics)
         and _metric(metrics, "thrash_rate", 1.0) <= thrash_max
         and _metric(metrics, "collision_rate", 1.0) <= collision_max
+        and _metric(metrics, "pose_jump_rate", 0.0) <= 0.03
     )
 
 
@@ -570,7 +571,8 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 65.0
             and _metric(metrics, "dribble_compat_rate") >= 0.50
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
-            and _metric(metrics, "handoff_override_rate", 1.0) <= 0.03
+            and _metric(metrics, "handoff_override_rate", 1.0) <= 0.08
+            and _metric(metrics, "target_repair_rate", 1.0) <= 0.20
             and (
                 _metric(metrics, "policy_walk_rate") >= 0.02
                 or _metric(metrics, "policy_skill_prob_walk_mean") >= 0.02
@@ -584,12 +586,20 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             _ball_semantics_ok(metrics, trusted_min=0.58, rescued_max=0.38, confidence_min=0.48)
             and _behavior_is_stable(metrics, thrash_max=0.10, collision_max=0.10)
             and _metric(metrics, "episode_reward_mean", -999.0) >= -0.20
-            and _metric(metrics, "clean_takeover_rate") >= 0.70
+            and (
+                _metric(metrics, "clean_takeover_rate") >= 0.70
+                or (
+                    _metric(metrics, "takeover_success_rate") >= 0.80
+                    and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.03
+                )
+            )
             and _metric(metrics, "clean_finish_rate") >= 0.60
             and _metric(metrics, "takeover_success_rate") >= 0.80
             and _metric(metrics, "dribble_compat_rate") >= 0.65
             and _metric(metrics, "bad_dribble_rate", 1.0) <= 0.20
             and _metric(metrics, "policy_stand_rate", 1.0) <= 0.15
+            and _metric(metrics, "target_repair_rate", 1.0) <= 0.15
+            and _metric(metrics, "policy_target_error_mean", 9999.0) <= 520.0
             and (
                 _metric(metrics, "shoot_compat_rate") >= 0.10
                 or _metric(metrics, "policy_shoot_rate") > 0.02
@@ -602,8 +612,16 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
             and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
             and _metric(metrics, "episode_reward_mean", -999.0) >= -0.25
-            and _metric(metrics, "clean_takeover_rate") >= 0.50
+            and (
+                _metric(metrics, "clean_takeover_rate") >= 0.50
+                or (
+                    _metric(metrics, "takeover_success_rate") >= 0.75
+                    and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.05
+                )
+            )
             and _metric(metrics, "clean_finish_rate") >= 0.40
+            and _metric(metrics, "target_repair_rate", 1.0) <= 0.10
+            and _metric(metrics, "policy_target_error_mean", 9999.0) <= 480.0
             and _skill_not_collapsed(metrics, dribble_prob_max=0.92, dribble_rate_max=0.94)
             and (
                 _metric(metrics, "obstacle_clearance_success") >= 0.25
@@ -616,9 +634,17 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
         return (
             _ball_semantics_ok(metrics, trusted_min=0.55, rescued_max=0.45, confidence_min=0.45)
             and _behavior_is_stable(metrics, thrash_max=0.12, collision_max=0.12)
-            and _metric(metrics, "clean_takeover_rate") >= 0.50
+            and (
+                _metric(metrics, "clean_takeover_rate") >= 0.50
+                or (
+                    _metric(metrics, "takeover_success_rate") >= 0.75
+                    and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.05
+                )
+            )
             and _metric(metrics, "clean_finish_rate") >= 0.40
             and _metric(metrics, "dynamic_obstacle_success") >= 0.20
+            and _metric(metrics, "target_repair_rate", 1.0) <= 0.08
+            and _metric(metrics, "policy_target_error_mean", 9999.0) <= 450.0
             and _metric(metrics, "stability_score") >= _metric(stage2, "stability_score", 0.0) - 0.05
             and _skill_not_collapsed(metrics, dribble_prob_max=0.92, dribble_rate_max=0.94)
         )

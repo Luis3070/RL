@@ -172,17 +172,28 @@ def _coerce_scalar_metric(value: Any) -> float:
 
 
 class HybridPolicyDistribution:
-    def __init__(self, skill_distribution: Categorical, param_distribution: Normal):
+    def __init__(self, skill_distribution: Categorical, param_distribution: Normal, param_entropy_weight: float):
         self.skill_distribution = skill_distribution
         self.param_distribution = param_distribution
+        self.param_entropy_weight = float(param_entropy_weight)
         self.stddev = param_distribution.stddev
 
     def entropy(self) -> torch.Tensor:
-        return self.skill_distribution.entropy().unsqueeze(-1) + self.param_distribution.entropy().sum(dim=-1, keepdim=True)
+        return self.skill_distribution.entropy().unsqueeze(-1) + (
+            self.param_entropy_weight * self.param_distribution.entropy().sum(dim=-1, keepdim=True)
+        )
 
 
 class PolicyNetwork(Model):
-    def __init__(self, observation_space, action_space, device, hidden_size: int):
+    def __init__(
+        self,
+        observation_space,
+        action_space,
+        device,
+        hidden_size: int,
+        *,
+        param_log_prob_weight: float,
+    ):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         self.num_skills = len(SKILL_ORDER)
         self.num_params = self.num_actions - 1
@@ -197,6 +208,7 @@ class PolicyNetwork(Model):
         self.skill_head = nn.Linear(hidden_size, self.num_skills)
         self.param_head = nn.Linear(hidden_size, self.num_params)
         self.log_std_parameter = nn.Parameter(torch.full((self.num_params,), -0.5, dtype=torch.float32))
+        self.param_log_prob_weight = float(param_log_prob_weight)
         self._distribution: HybridPolicyDistribution | None = None
         action_low = torch.as_tensor(action_space.low, dtype=torch.float32, device=self.device)
         action_high = torch.as_tensor(action_space.high, dtype=torch.float32, device=self.device)
@@ -226,7 +238,7 @@ class PolicyNetwork(Model):
         observations = inputs["observations"]
         features = self.trunk(observations)
         skill_logits = self.skill_head(features)
-        param_mean = self.param_head(features)
+        param_mean = torch.tanh(self.param_head(features))
         return skill_logits, {
             "param_mean": param_mean,
             "log_std": self.log_std_parameter.expand_as(param_mean),
@@ -241,7 +253,11 @@ class PolicyNetwork(Model):
         masked_skill_logits = self._masked_skill_logits(skill_logits)
         skill_distribution = Categorical(logits=masked_skill_logits)
         param_distribution = Normal(param_mean, log_std.exp())
-        self._distribution = HybridPolicyDistribution(skill_distribution, param_distribution)
+        self._distribution = HybridPolicyDistribution(
+            skill_distribution,
+            param_distribution,
+            param_entropy_weight=self.param_log_prob_weight,
+        )
 
         taken_actions = inputs.get("taken_actions")
         if taken_actions is None:
@@ -255,14 +271,17 @@ class PolicyNetwork(Model):
 
         skill_log_prob = skill_distribution.log_prob(skill_ids).unsqueeze(-1)
         param_log_prob = param_distribution.log_prob(params).sum(dim=-1, keepdim=True)
+        weighted_param_log_prob = self.param_log_prob_weight * param_log_prob
         actions = torch.cat((skill_ids.to(dtype=param_mean.dtype).unsqueeze(-1), params), dim=-1)
         skill_probs = torch.softmax(masked_skill_logits, dim=-1)
 
         outputs.update(
             {
-                "log_prob": skill_log_prob + param_log_prob,
+                "log_prob": skill_log_prob + weighted_param_log_prob,
                 "skill_log_prob": skill_log_prob,
                 "param_log_prob": param_log_prob,
+                "weighted_param_log_prob": weighted_param_log_prob,
+                "param_log_prob_weight": torch.full_like(param_log_prob, self.param_log_prob_weight),
                 "skill_logits": skill_logits,
                 "masked_skill_logits": masked_skill_logits,
                 "skill_probs": skill_probs,
@@ -371,7 +390,13 @@ def build_mappo(
     action_space = env.action_space(agent_id)
     state_space = env.state_space(agent_id)
 
-    shared_policy = PolicyNetwork(observation_space, action_space, device, train_cfg.hidden_size)
+    shared_policy = PolicyNetwork(
+        observation_space,
+        action_space,
+        device,
+        train_cfg.hidden_size,
+        param_log_prob_weight=train_cfg.param_log_prob_weight,
+    )
     shared_policy.set_active_skill_names(active_skill_names)
     shared_value = ValueNetwork(observation_space, state_space, action_space, device, train_cfg.hidden_size)
     shared_policy.to(device)
@@ -751,7 +776,8 @@ def sample_smoke_action(
     single_env = next(iter(raw_env._envs.values())) if isinstance(raw_env, ParallelSlotSimRobotEnv) else raw_env
     if single_env._last_backend_obs is None:
         return proposed_action
-    projected_action, _ = single_env.project_action(proposed_action, obs=single_env._last_backend_obs)
+    decoded_action = single_env._decode_residual_policy_action(proposed_action, obs=single_env._last_backend_obs)
+    projected_action, _ = single_env.project_action(decoded_action, obs=single_env._last_backend_obs)
     return projected_action
 
 
@@ -769,6 +795,11 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "goal_rate",
         "thrash_rate",
         "mean_time_to_takeover",
+        "stable_takeover_steps",
+        "incompatible_takeover_steps",
+        "incompatible_takeover_rate",
+        "walk_in_stable_takeover_rate",
+        "stand_in_stable_takeover_rate",
         "walk_compat_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
@@ -794,6 +825,8 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "skill_projection_rate",
         "handoff_override_rate",
         "target_repair_rate",
+        "policy_target_error_mean",
+        "policy_theta_error_mean",
         "policy_skill_entropy",
         "policy_param_std_mean",
         "synthetic_pose_rate",
@@ -801,6 +834,8 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "obs_mode_estimated_rate",
         "obs_mode_corrected_rate",
         "pose_alignment_warning_rate",
+        "pose_jump_rate",
+        "pose_jump_max_mm",
         "ball_stale_rate",
         "ball_collapsed_rate",
         "corrected_exported_robot_pose_rate",
@@ -1023,6 +1058,11 @@ def _build_smoke_step_row(step: int, reward_value: float, step_info: Mapping[str
         "policy_skill_prob_block": float(step_info.get("policy_skill_prob_block", 0.0)),
         "policy_skill_prob_mark": float(step_info.get("policy_skill_prob_mark", 0.0)),
         "policy_skill_prob_observe": float(step_info.get("policy_skill_prob_observe", 0.0)),
+        "policy_residual_x": float(step_info.get("policy_residual_x", 0.0)),
+        "policy_residual_y": float(step_info.get("policy_residual_y", 0.0)),
+        "policy_residual_theta": float(step_info.get("policy_residual_theta", 0.0)),
+        "policy_target_error_mm": float(step_info.get("policy_target_error_mm", 0.0)),
+        "policy_theta_error_rad": float(step_info.get("policy_theta_error_rad", 0.0)),
         "projection_applied": int(bool(step_info.get("projection_applied", False))),
         "synthetic_pose_observation": int(bool(step_info.get("synthetic_pose_observation", False))),
         "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),

@@ -44,6 +44,7 @@ BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
 
 _STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
 _PROFILE_INTERVAL = int(os.getenv("RL_PROFILE_INTERVAL", "256"))
+POSE_JUMP_WARNING_MM = 350.0
 
 
 def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
@@ -122,13 +123,13 @@ class RealSimRobotEnv(ParallelEnv):
         }
         self.action_spaces = {
             "player_1": gym.spaces.Box(
-                low=np.asarray([0.0, -ACTION.x_range, -ACTION.y_range, -math.pi, 0.0], dtype=np.float32),
+                low=np.asarray([0.0, -1.0, -1.0, -1.0, 0.0], dtype=np.float32),
                 high=np.asarray(
                     [
                         float(len(SKILL_ORDER) - 1),
-                        ACTION.x_range,
-                        ACTION.y_range,
-                        math.pi,
+                        1.0,
+                        1.0,
+                        1.0,
                         float(ACTION.max_pass_target),
                     ],
                     dtype=np.float32,
@@ -189,6 +190,9 @@ class RealSimRobotEnv(ParallelEnv):
         policy_skill_probs = {name: 0.0 for name in SKILL_ORDER}
         policy_skill_entropy = 0.0
         policy_param_std_mean = 0.0
+        policy_residual_x = 0.0
+        policy_residual_y = 0.0
+        policy_residual_theta = 0.0
         if isinstance(action_payload, dict):
             policy_skill_raw = float(action_payload.get("policy_skill_raw", action_payload.get("skill_type", 0.0)))
             policy_skill_entropy = float(action_payload.get("policy_skill_entropy", 0.0))
@@ -203,7 +207,7 @@ class RealSimRobotEnv(ParallelEnv):
 
         policy_skill_round = max(0, min(int(policy_action.skill_type), len(SKILL_ORDER) - 1))
         policy_compact_skill_index = policy_skill_round
-        policy_action = StructuredSkillAction(
+        raw_policy_action = StructuredSkillAction(
             skill_type=policy_skill_round,
             target_x=policy_action.target_x,
             target_y=policy_action.target_y,
@@ -213,6 +217,11 @@ class RealSimRobotEnv(ParallelEnv):
 
         if self._last_backend_obs is None:
             raise RuntimeError("step() called before reset()")
+
+        policy_residual_x = float(np.clip(raw_policy_action.target_x, -1.0, 1.0))
+        policy_residual_y = float(np.clip(raw_policy_action.target_y, -1.0, 1.0))
+        policy_residual_theta = float(np.clip(raw_policy_action.target_theta, -1.0, 1.0))
+        policy_action = self._decode_residual_policy_action(raw_policy_action, obs=self._last_backend_obs)
 
         handoff_override_applied = False
         target_repair_applied = False
@@ -233,6 +242,10 @@ class RealSimRobotEnv(ParallelEnv):
                 policy_action,
                 obs=self._last_backend_obs,
             )
+        policy_target_error_mm, policy_theta_error_rad = self._policy_anchor_errors(
+            policy_action,
+            obs=self._last_backend_obs,
+        )
 
         executed_action, projection_applied = self.project_action(action_for_execution, obs=self._last_backend_obs)
         if _STEP_PROFILE:
@@ -298,6 +311,10 @@ class RealSimRobotEnv(ParallelEnv):
             dynamic_update_applied,
             target_repair_applied=target_repair_applied,
             target_repair_reason=target_repair_reason,
+            policy_target_error_mm=policy_target_error_mm,
+            policy_theta_error_rad=policy_theta_error_rad,
+            policy_skill_entropy=policy_skill_entropy,
+            policy_param_std_mean=policy_param_std_mean,
         )
 
         self._last_obs = encoded
@@ -324,6 +341,11 @@ class RealSimRobotEnv(ParallelEnv):
             policy_skill_probs=policy_skill_probs,
             policy_skill_entropy=policy_skill_entropy,
             policy_param_std_mean=policy_param_std_mean,
+            policy_residual_x=policy_residual_x,
+            policy_residual_y=policy_residual_y,
+            policy_residual_theta=policy_residual_theta,
+            policy_target_error_mm=policy_target_error_mm,
+            policy_theta_error_rad=policy_theta_error_rad,
             handoff_override_applied=handoff_override_applied,
             target_repair_applied=target_repair_applied,
             target_repair_reason=target_repair_reason,
@@ -362,6 +384,42 @@ class RealSimRobotEnv(ParallelEnv):
             self.agents = []
         return {"player_1": encoded}, rewards, terminations, truncations, {"player_1": info}
 
+    def _policy_anchor_errors(self, policy_action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[float, float]:
+        if policy_action.skill_name not in {"walk", "dribble", "shoot"}:
+            return 0.0, 0.0
+        anchors = build_fallback_action_targets(policy_action.skill_name, obs)
+        target_error_mm = math.hypot(
+            float(policy_action.target_x) - float(anchors["target_x"]),
+            float(policy_action.target_y) - float(anchors["target_y"]),
+        )
+        theta_error_rad = abs(self._wrap_angle(float(policy_action.target_theta) - float(anchors["target_theta"])))
+        return float(target_error_mm), float(theta_error_rad)
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+    def _decode_residual_policy_action(
+        self,
+        raw_action: StructuredSkillAction,
+        *,
+        obs: BackendObservation,
+    ) -> StructuredSkillAction:
+        residual_x = float(np.clip(raw_action.target_x, -1.0, 1.0))
+        residual_y = float(np.clip(raw_action.target_y, -1.0, 1.0))
+        residual_theta = float(np.clip(raw_action.target_theta, -1.0, 1.0))
+        anchors = build_fallback_action_targets(raw_action.skill_name, obs)
+        target_x = float(anchors["target_x"] + residual_x * ACTION.residual_x_range)
+        target_y = float(anchors["target_y"] + residual_y * ACTION.residual_y_range)
+        target_theta = self._wrap_angle(float(anchors["target_theta"] + residual_theta * ACTION.residual_theta_range))
+        return StructuredSkillAction(
+            skill_type=raw_action.skill_type,
+            target_x=float(np.clip(target_x, -ACTION.x_range, ACTION.x_range)),
+            target_y=float(np.clip(target_y, -ACTION.y_range, ACTION.y_range)),
+            target_theta=target_theta,
+            pass_target=raw_action.pass_target,
+        )
+
     def project_action(self, action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[StructuredSkillAction, bool]:
         if action.skill_name in self.stage_spec.active_skill_names:
             return action, False
@@ -389,6 +447,14 @@ class RealSimRobotEnv(ParallelEnv):
             return policy_action, False, ""
 
         fallback_targets = build_fallback_action_targets(policy_action.skill_name, obs)
+        target_error_mm = math.hypot(
+            float(policy_action.target_x) - float(fallback_targets["target_x"]),
+            float(policy_action.target_y) - float(fallback_targets["target_y"]),
+        )
+        theta_error = abs(self._wrap_angle(float(policy_action.target_theta) - float(fallback_targets["target_theta"])))
+        residual_radius_limit = math.hypot(ACTION.residual_x_range, ACTION.residual_y_range) * 1.05
+        if target_error_mm <= residual_radius_limit and theta_error <= ACTION.residual_theta_range * 1.05:
+            return policy_action, False, ""
         repaired = StructuredSkillAction(
             skill_type=policy_action.skill_type,
             target_x=float(fallback_targets["target_x"]),
@@ -468,10 +534,15 @@ class RealSimRobotEnv(ParallelEnv):
             "skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_prob_sums": {name: 0.0 for name in ACTION.skill_names},
+            "policy_skill_entropy_sum": 0.0,
+            "policy_param_std_sum": 0.0,
             "skill_projection_count": 0,
             "handoff_override_count": 0,
             "target_repair_count": 0,
             "target_repair_reason_counts": defaultdict(int),
+            "policy_target_error_sum": 0.0,
+            "policy_theta_error_sum": 0.0,
+            "policy_target_quality_count": 0,
             "walk_steps": 0,
             "dribble_steps": 0,
             "shoot_steps": 0,
@@ -488,7 +559,10 @@ class RealSimRobotEnv(ParallelEnv):
             "takeover_first_step": None,
             "takeover_hold_current": 0,
             "takeover_hold_max": 0,
+            "stable_takeover_steps": 0,
             "incompatible_takeover_requests": 0,
+            "walk_in_stable_takeover_steps": 0,
+            "stand_in_stable_takeover_steps": 0,
             "good_finish_steps": 0,
             "goal": False,
             "collision_count": 0,
@@ -503,6 +577,8 @@ class RealSimRobotEnv(ParallelEnv):
             "obs_mode_estimated_steps": 0,
             "obs_mode_corrected_steps": 0,
             "pose_alignment_warning_steps": 0,
+            "pose_jump_steps": 0,
+            "pose_jump_max_mm": 0.0,
             "ball_stale_steps": 0,
             "ball_collapsed_steps": 0,
             "corrected_exported_robot_pose_steps": 0,
@@ -539,6 +615,10 @@ class RealSimRobotEnv(ParallelEnv):
         *,
         target_repair_applied: bool,
         target_repair_reason: str,
+        policy_target_error_mm: float,
+        policy_theta_error_rad: float,
+        policy_skill_entropy: float,
+        policy_param_std_mean: float,
     ) -> None:
         tracker = self._episode_tracker
         tracker["reward_total"] += evaluation.total_reward
@@ -555,6 +635,8 @@ class RealSimRobotEnv(ParallelEnv):
         tracker["policy_skill_prob_sums"]["walk"] += float(step_ctx.policy_skill_prob_walk)
         tracker["policy_skill_prob_sums"]["dribble"] += float(step_ctx.policy_skill_prob_dribble)
         tracker["policy_skill_prob_sums"]["shoot"] += float(step_ctx.policy_skill_prob_shoot)
+        tracker["policy_skill_entropy_sum"] += float(policy_skill_entropy)
+        tracker["policy_param_std_sum"] += float(policy_param_std_mean)
         if projection_applied:
             tracker["skill_projection_count"] += 1
         if step_ctx.handoff_override_applied:
@@ -563,6 +645,10 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["target_repair_count"] += 1
             if target_repair_reason:
                 tracker["target_repair_reason_counts"][target_repair_reason] += 1
+        if step_ctx.policy_skill_name in {"walk", "dribble", "shoot"}:
+            tracker["policy_target_error_sum"] += float(policy_target_error_mm)
+            tracker["policy_theta_error_sum"] += float(policy_theta_error_rad)
+            tracker["policy_target_quality_count"] += 1
         if dynamic_update_applied:
             tracker["dynamic_updates"] += 1
         tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
@@ -570,6 +656,13 @@ class RealSimRobotEnv(ParallelEnv):
         tracker["obs_mode_estimated_steps"] += int(int(step_ctx.obs.obs_export_mode) == 0)
         tracker["obs_mode_corrected_steps"] += int(int(step_ctx.obs.obs_export_mode) == 1)
         tracker["pose_alignment_warning_steps"] += int(bool(step_ctx.obs.pose_alignment_warning))
+        if step_ctx.prev_obs is not None:
+            pose_jump_mm = math.hypot(
+                float(step_ctx.obs.robot_x) - float(step_ctx.prev_obs.robot_x),
+                float(step_ctx.obs.robot_y) - float(step_ctx.prev_obs.robot_y),
+            )
+            tracker["pose_jump_max_mm"] = max(float(tracker["pose_jump_max_mm"]), float(pose_jump_mm))
+            tracker["pose_jump_steps"] += int(pose_jump_mm > POSE_JUMP_WARNING_MM)
         tracker["ball_stale_steps"] += int(bool(step_ctx.obs.ball_observation_stale))
         tracker["ball_collapsed_steps"] += int(bool(step_ctx.obs.ball_observation_collapsed))
         tracker["corrected_exported_robot_pose_steps"] += int(bool(step_ctx.obs.corrected_exported_robot_pose))
@@ -660,8 +753,14 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["takeover_hold_current"] = 0
 
         stable_takeover_envelope = evaluation.takeover_envelope and evaluation.prev_takeover_envelope
+        if stable_takeover_envelope:
+            tracker["stable_takeover_steps"] += 1
         if stable_takeover_envelope and step_ctx.skill_name not in {"dribble", "shoot"}:
             tracker["incompatible_takeover_requests"] += 1
+            if step_ctx.skill_name == "walk":
+                tracker["walk_in_stable_takeover_steps"] += 1
+            elif step_ctx.skill_name == "stand":
+                tracker["stand_in_stable_takeover_steps"] += 1
 
         if evaluation.terms["good_shoot"] > 0.0 or evaluation.terms["good_dribble"] > 0.0:
             tracker["good_finish_steps"] += 1
@@ -704,12 +803,31 @@ class RealSimRobotEnv(ParallelEnv):
             "shoot_compat_rate": float(tracker["good_shoot_steps"] / shoot_steps),
             "takeover_entered": float(bool(tracker["takeover_entered"])),
             "takeover_hold_max": float(tracker["takeover_hold_max"]),
+            "stable_takeover_steps": float(tracker["stable_takeover_steps"]),
+            "incompatible_takeover_steps": float(tracker["incompatible_takeover_requests"]),
+            "incompatible_takeover_rate": float(
+                tracker["incompatible_takeover_requests"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "walk_in_stable_takeover_rate": float(
+                tracker["walk_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "stand_in_stable_takeover_rate": float(
+                tracker["stand_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
             "target_repair_rate": float(tracker["target_repair_count"] / steps),
+            "policy_target_error_mean": float(
+                tracker["policy_target_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "policy_theta_error_mean": float(
+                tracker["policy_theta_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
             "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
             "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "pose_jump_rate": float(tracker["pose_jump_steps"] / steps),
+            "pose_jump_max_mm": float(tracker["pose_jump_max_mm"]),
             "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
             "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
             "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
@@ -755,6 +873,10 @@ class RealSimRobotEnv(ParallelEnv):
         collision_episode = float(tracker["collision_count"] > 0)
         mean_time_to_takeover = float(tracker["takeover_first_step"] or self.cfg.max_episode_steps)
         takeover_success = bool(tracker["takeover_entered"] and tracker["takeover_hold_max"] >= 2)
+        stable_takeover_steps = max(1, tracker["stable_takeover_steps"])
+        incompatible_takeover_rate = float(tracker["incompatible_takeover_requests"] / stable_takeover_steps)
+        walk_in_stable_takeover_rate = float(tracker["walk_in_stable_takeover_steps"] / stable_takeover_steps)
+        stand_in_stable_takeover_rate = float(tracker["stand_in_stable_takeover_steps"] / stable_takeover_steps)
 
         clean_walk = bool(walk_steps > 0 and walk_compat_rate >= 0.7 and tracker["thrash_count"] == 0)
         if self.stage_spec.stage_id < 0:
@@ -805,6 +927,11 @@ class RealSimRobotEnv(ParallelEnv):
             "goal_rate": float(tracker["goal"]),
             "thrash_rate": thrash_rate,
             "mean_time_to_takeover": mean_time_to_takeover,
+            "stable_takeover_steps": float(tracker["stable_takeover_steps"]),
+            "incompatible_takeover_steps": float(tracker["incompatible_takeover_requests"]),
+            "incompatible_takeover_rate": incompatible_takeover_rate,
+            "walk_in_stable_takeover_rate": walk_in_stable_takeover_rate,
+            "stand_in_stable_takeover_rate": stand_in_stable_takeover_rate,
             "walk_compat_rate": walk_compat_rate,
             "dribble_compat_rate": dribble_compat_rate,
             "shoot_compat_rate": shoot_compat_rate,
@@ -822,6 +949,8 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_skill_prob_walk_mean": float(tracker["policy_skill_prob_sums"].get("walk", 0.0) / steps),
             "policy_skill_prob_dribble_mean": float(tracker["policy_skill_prob_sums"].get("dribble", 0.0) / steps),
             "policy_skill_prob_shoot_mean": float(tracker["policy_skill_prob_sums"].get("shoot", 0.0) / steps),
+            "policy_skill_entropy": float(tracker["policy_skill_entropy_sum"] / steps),
+            "policy_param_std_mean": float(tracker["policy_param_std_sum"] / steps),
             "obstacle_clearance_success": obstacle_clearance_success,
             "dynamic_obstacle_success": dynamic_obstacle_success,
             "corridor_keep_rate": corridor_keep_rate,
@@ -830,11 +959,19 @@ class RealSimRobotEnv(ParallelEnv):
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
             "handoff_override_rate": float(tracker["handoff_override_count"] / steps),
             "target_repair_rate": float(tracker["target_repair_count"] / steps),
+            "policy_target_error_mean": float(
+                tracker["policy_target_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "policy_theta_error_mean": float(
+                tracker["policy_theta_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
             "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
             "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
             "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
             "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
             "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "pose_jump_rate": float(tracker["pose_jump_steps"] / steps),
+            "pose_jump_max_mm": float(tracker["pose_jump_max_mm"]),
             "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
             "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
             "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
@@ -883,6 +1020,11 @@ class RealSimRobotEnv(ParallelEnv):
         policy_skill_probs: Mapping[str, float] | None = None,
         policy_skill_entropy: float = 0.0,
         policy_param_std_mean: float = 0.0,
+        policy_residual_x: float = 0.0,
+        policy_residual_y: float = 0.0,
+        policy_residual_theta: float = 0.0,
+        policy_target_error_mm: float = 0.0,
+        policy_theta_error_rad: float = 0.0,
         handoff_override_applied: bool = False,
         target_repair_applied: bool = False,
         target_repair_reason: str = "",
@@ -942,6 +1084,11 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_skill_dribble_margin": float(policy_dribble_margin),
             "policy_skill_entropy": float(policy_skill_entropy),
             "policy_param_std_mean": float(policy_param_std_mean),
+            "policy_residual_x": float(policy_residual_x),
+            "policy_residual_y": float(policy_residual_y),
+            "policy_residual_theta": float(policy_residual_theta),
+            "policy_target_error_mm": float(policy_target_error_mm),
+            "policy_theta_error_rad": float(policy_theta_error_rad),
             "handoff_override_applied": bool(handoff_override_applied),
             "target_repair_applied": bool(target_repair_applied),
             "target_repair_reason": str(target_repair_reason),
