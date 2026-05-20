@@ -7,7 +7,7 @@ from typing import Dict, Mapping
 
 import numpy as np
 
-from config import BHUMAN_DIR, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, MAX_EPISODE_STEPS
+from config import BHUMAN_DIR, DT, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, MAX_EPISODE_STEPS
 from pybh_backend import WorldPlayerSpec, WorldSpec, build_world_spec
 from reward import RewardWeights
 
@@ -30,6 +30,15 @@ class StageSpec:
     reward_weights: RewardWeights
     max_episode_steps: int = MAX_EPISODE_STEPS
     dynamic_update_interval_steps: int = 0
+
+
+@dataclass
+class DynamicWorldState:
+    stage_id: int
+    opponent_positions: np.ndarray
+    opponent_velocities: np.ndarray
+    ball_pos: np.ndarray
+    ball_vel: np.ndarray
 
 
 def _scene_path(stage_id: int, simrobot_profile: str) -> Path:
@@ -430,6 +439,31 @@ def _dynamic_obstacles(robot_pos: np.ndarray, ball_pos: np.ndarray, episode_step
     )
 
 
+def init_dynamic_world_state(stage_id: int, world_spec: WorldSpec, rng: np.random.Generator) -> DynamicWorldState | None:
+    stage = get_stage_spec(stage_id)
+    if stage.obstacle_mode != "dynamic":
+        return None
+    if world_spec.opponents:
+        opponent_positions = np.asarray([[player.x, player.y] for player in world_spec.opponents], dtype=np.float32)
+    else:
+        opponent_positions = np.asarray(
+            [
+                [world_spec.ball_x - 700.0, world_spec.ball_y + 450.0],
+                [world_spec.ball_x - 550.0, world_spec.ball_y - 450.0],
+            ],
+            dtype=np.float32,
+        )
+    opponent_velocities = rng.uniform(-40.0, 40.0, size=opponent_positions.shape).astype(np.float32)
+    ball_vel = rng.uniform(-20.0, 20.0, size=(2,)).astype(np.float32)
+    return DynamicWorldState(
+        stage_id=stage_id,
+        opponent_positions=opponent_positions,
+        opponent_velocities=opponent_velocities,
+        ball_pos=np.asarray([world_spec.ball_x, world_spec.ball_y], dtype=np.float32),
+        ball_vel=ball_vel,
+    )
+
+
 def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpec:
     stage = get_stage_spec(stage_id)
     if stage.stage_id == -1:
@@ -490,12 +524,105 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     raise ValueError(f"Unsupported stage_id {stage_id!r}")
 
 
-def get_dynamic_world_update(stage_id: int, episode_step: int, robot_x: float, robot_y: float, ball_x: float, ball_y: float) -> Dict[str, object] | None:
+def _limit_vector(vector: np.ndarray, max_norm: float) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= max_norm or norm <= 1e-6:
+        return vector
+    return vector * float(max_norm / norm)
+
+
+def _natural_dynamic_world_update(
+    state: DynamicWorldState,
+    *,
+    stage_id: int,
+    episode_step: int,
+    robot_x: float,
+    robot_y: float,
+    ball_x: float,
+    ball_y: float,
+    interval_steps: int,
+) -> Dict[str, object]:
+    dt_s = max(DT, DT * max(1, interval_steps))
+    robot_pos = np.asarray([robot_x, robot_y], dtype=np.float32)
+    observed_ball_pos = np.asarray([ball_x, ball_y], dtype=np.float32)
+    state.ball_pos = 0.85 * state.ball_pos + 0.15 * observed_ball_pos
+
+    direction = state.ball_pos - robot_pos
+    distance = float(np.linalg.norm(direction))
+    if distance < 1.0:
+        direction = np.asarray([1.0, 0.0], dtype=np.float32)
+        distance = 1.0
+    direction = direction / distance
+    lateral = np.asarray([-direction[1], direction[0]], dtype=np.float32)
+
+    base_targets = np.asarray(
+        [
+            robot_pos + direction * min(distance * 0.55, 1900.0) + lateral * 420.0,
+            state.ball_pos - direction * 520.0 - lateral * 430.0,
+        ],
+        dtype=np.float32,
+    )
+    phase = float(state.stage_id * 0.73 + interval_steps * 0.11)
+    sway = np.asarray(
+        [
+            lateral * (170.0 * math.sin(phase + episode_step * 0.035)),
+            lateral * (140.0 * math.cos(phase + episode_step * 0.029)),
+        ],
+        dtype=np.float32,
+    )
+    targets = base_targets + sway
+    max_opp_speed_mm_s = 420.0 if stage_id >= 4 else 330.0
+    max_opp_step = max_opp_speed_mm_s * dt_s
+    for index in range(min(len(state.opponent_positions), len(targets))):
+        delta = _limit_vector(targets[index] - state.opponent_positions[index], max_opp_step)
+        state.opponent_velocities[index] = delta / dt_s
+        state.opponent_positions[index] = state.opponent_positions[index] + delta
+        state.opponent_positions[index, 0], state.opponent_positions[index, 1] = _clip_field(
+            float(state.opponent_positions[index, 0]),
+            float(state.opponent_positions[index, 1]),
+        )
+
+    ball_target = observed_ball_pos + direction * (35.0 * math.sin(episode_step * 0.021)) + lateral * (
+        55.0 * math.sin(episode_step * 0.017)
+    )
+    ball_delta = _limit_vector(ball_target - state.ball_pos, (120.0 if stage_id >= 4 else 80.0) * dt_s)
+    state.ball_vel = ball_delta / dt_s
+    state.ball_pos = state.ball_pos + ball_delta
+    state.ball_pos[0], state.ball_pos[1] = _clip_field(float(state.ball_pos[0]), float(state.ball_pos[1]))
+
+    opponents = []
+    for index, pos in enumerate(state.opponent_positions[:2], start=1):
+        to_robot = robot_pos - pos
+        theta = math.atan2(float(to_robot[1]), float(to_robot[0]))
+        opponents.append(WorldPlayerSpec(number=index, x=float(pos[0]), y=float(pos[1]), theta=theta))
+    return {"opponents": tuple(opponents), "ball_pos": state.ball_pos.copy()}
+
+
+def get_dynamic_world_update(
+    stage_id: int,
+    episode_step: int,
+    robot_x: float,
+    robot_y: float,
+    ball_x: float,
+    ball_y: float,
+    dynamic_state: DynamicWorldState | None = None,
+) -> Dict[str, object] | None:
     stage = get_stage_spec(stage_id)
     if stage.obstacle_mode != "dynamic":
         return None
     if stage.dynamic_update_interval_steps <= 0 or episode_step % stage.dynamic_update_interval_steps != 0:
         return None
+    if dynamic_state is not None:
+        return _natural_dynamic_world_update(
+            dynamic_state,
+            stage_id=stage_id,
+            episode_step=episode_step,
+            robot_x=robot_x,
+            robot_y=robot_y,
+            ball_x=ball_x,
+            ball_y=ball_y,
+            interval_steps=stage.dynamic_update_interval_steps,
+        )
     opponents = _dynamic_obstacles(
         np.array([robot_x, robot_y], dtype=np.float32),
         np.array([ball_x, ball_y], dtype=np.float32),
@@ -509,6 +636,14 @@ def _metric(metrics: Mapping[str, float], name: str, default: float = 0.0) -> fl
         return float(metrics.get(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _policy_incompatible_takeover_rate(metrics: Mapping[str, float], default: float = 1.0) -> float:
+    return _metric(
+        metrics,
+        "policy_incompatible_takeover_rate",
+        _metric(metrics, "incompatible_takeover_rate", default),
+    )
 
 
 def _wire_is_healthy(metrics: Mapping[str, float]) -> bool:
@@ -569,6 +704,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             and _metric(metrics, "stability_score") >= 0.45
             and _metric(metrics, "takeover_success_rate") >= 0.80
             and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 65.0
+            and _policy_incompatible_takeover_rate(metrics) <= 0.08
             and _metric(metrics, "dribble_compat_rate") >= 0.50
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
             and _metric(metrics, "handoff_override_rate", 1.0) <= 0.08
@@ -591,6 +727,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 or (
                     _metric(metrics, "takeover_success_rate") >= 0.80
                     and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.03
+                    and _policy_incompatible_takeover_rate(metrics) <= 0.03
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.60
@@ -617,6 +754,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 or (
                     _metric(metrics, "takeover_success_rate") >= 0.75
                     and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.05
+                    and _policy_incompatible_takeover_rate(metrics) <= 0.05
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.40
@@ -639,6 +777,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 or (
                     _metric(metrics, "takeover_success_rate") >= 0.75
                     and _metric(metrics, "incompatible_takeover_rate", 1.0) <= 0.05
+                    and _policy_incompatible_takeover_rate(metrics) <= 0.05
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.40
@@ -660,6 +799,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             )
             and _metric(metrics, "handoff_override_rate", 1.0) <= 0.01
             and _metric(metrics, "skill_projection_rate", 1.0) <= 0.01
+            and _policy_incompatible_takeover_rate(metrics) <= 0.03
             and _metric(metrics, "policy_shoot_rate") >= 0.02
             and _skill_not_collapsed(metrics, dribble_prob_max=0.88, dribble_rate_max=0.90)
         )

@@ -22,6 +22,8 @@ from train import (
     make_env_config,
 )
 
+LIVE_POSE_JUMP_WARNING_MM = 350.0
+
 
 def _latest_checkpoint(experiment_name: str) -> Path:
     checkpoint_dir = RUNS_DIR / experiment_name
@@ -125,6 +127,21 @@ def _live_rollout(
     obs, infos = eval_env.reset(seed=seed)
     total_reward = 0.0
     final_info: Mapping[str, object] = {}
+    previous_robot_xy: tuple[float, float] | None = None
+    live_counts = {
+        "steps": 0,
+        "target_repair": 0,
+        "handoff_override": 0,
+        "pose_jump": 0,
+        "corrected_exported_robot_pose": 0,
+    }
+    live_sums = {
+        "policy_target_error_mm": 0.0,
+        "policy_theta_error_rad": 0.0,
+        "pose_jump_max_mm": 0.0,
+    }
+    live_policy_skill_counts = {name: 0 for name in SKILL_ORDER}
+    live_executed_skill_counts = {name: 0 for name in SKILL_ORDER}
     print("[live] reset complete. Watch SimRobot now.", flush=True)
     try:
         for step in range(1, max_steps + 1):
@@ -138,6 +155,31 @@ def _live_rollout(
             if not isinstance(raw_obs, Mapping):
                 raw_obs = {}
             final_info = info
+            robot_x = float(raw_obs.get("robot_x", 0.0))
+            robot_y = float(raw_obs.get("robot_y", 0.0))
+            robot_theta = float(raw_obs.get("robot_theta", 0.0))
+            ball_x = float(raw_obs.get("ball_x", 0.0))
+            ball_y = float(raw_obs.get("ball_y", 0.0))
+            pose_jump_mm = 0.0
+            if previous_robot_xy is not None:
+                dx = robot_x - previous_robot_xy[0]
+                dy = robot_y - previous_robot_xy[1]
+                pose_jump_mm = float((dx * dx + dy * dy) ** 0.5)
+            previous_robot_xy = (robot_x, robot_y)
+            live_counts["steps"] += 1
+            live_counts["target_repair"] += int(bool(info.get("target_repair_applied", False)))
+            live_counts["handoff_override"] += int(bool(info.get("handoff_override_applied", False)))
+            live_counts["pose_jump"] += int(pose_jump_mm > LIVE_POSE_JUMP_WARNING_MM)
+            live_counts["corrected_exported_robot_pose"] += int(bool(info.get("corrected_exported_robot_pose", False)))
+            live_sums["policy_target_error_mm"] += float(info.get("policy_target_error_mm", 0.0))
+            live_sums["policy_theta_error_rad"] += float(info.get("policy_theta_error_rad", 0.0))
+            live_sums["pose_jump_max_mm"] = max(live_sums["pose_jump_max_mm"], pose_jump_mm)
+            policy_skill_name = str(info.get("policy_skill_name") or "")
+            executed_skill_name = str(info.get("executed_skill_name") or "")
+            if policy_skill_name in live_policy_skill_counts:
+                live_policy_skill_counts[policy_skill_name] += 1
+            if executed_skill_name in live_executed_skill_counts:
+                live_executed_skill_counts[executed_skill_name] += 1
             row = {
                 "step": step,
                 "reward": reward,
@@ -189,14 +231,15 @@ def _live_rollout(
                 "ball_distance_mm": _ball_distance_from_info(info),
                 "ball_rel_x": float(raw_obs.get("ball_rel_x", 0.0)),
                 "ball_rel_y": float(raw_obs.get("ball_rel_y", 0.0)),
-                "robot_x": float(raw_obs.get("robot_x", 0.0)),
-                "robot_y": float(raw_obs.get("robot_y", 0.0)),
-                "robot_theta": float(raw_obs.get("robot_theta", 0.0)),
+                "robot_x": robot_x,
+                "robot_y": robot_y,
+                "robot_theta": robot_theta,
+                "pose_jump_mm": pose_jump_mm,
                 "estimated_robot_x": float(info.get("estimated_robot_x", 0.0)),
                 "estimated_robot_y": float(info.get("estimated_robot_y", 0.0)),
                 "estimated_robot_theta": float(info.get("estimated_robot_theta", 0.0)),
-                "ball_x": float(raw_obs.get("ball_x", 0.0)),
-                "ball_y": float(raw_obs.get("ball_y", 0.0)),
+                "ball_x": ball_x,
+                "ball_y": ball_y,
                 "estimated_ball_x": float(info.get("estimated_ball_x", 0.0)),
                 "estimated_ball_y": float(info.get("estimated_ball_y", 0.0)),
             }
@@ -223,7 +266,21 @@ def _live_rollout(
     finally:
         if previous_mode is not None:
             agent.enable_training_mode(bool(previous_mode))
-    return {"total_reward": total_reward, "final_info": dict(final_info)}
+    steps = max(1, int(live_counts["steps"]))
+    metrics = {
+        "live_steps": float(live_counts["steps"]),
+        "live_target_repair_rate": float(live_counts["target_repair"] / steps),
+        "live_handoff_override_rate": float(live_counts["handoff_override"] / steps),
+        "live_policy_target_error_mean": float(live_sums["policy_target_error_mm"] / steps),
+        "live_policy_theta_error_mean": float(live_sums["policy_theta_error_rad"] / steps),
+        "live_pose_jump_rate": float(live_counts["pose_jump"] / steps),
+        "live_pose_jump_max_mm": float(live_sums["pose_jump_max_mm"]),
+        "live_corrected_exported_robot_pose_rate": float(live_counts["corrected_exported_robot_pose"] / steps),
+    }
+    for skill_name in ("stand", "walk", "dribble", "shoot"):
+        metrics[f"live_policy_{skill_name}_rate"] = float(live_policy_skill_counts.get(skill_name, 0) / steps)
+        metrics[f"live_executed_{skill_name}_rate"] = float(live_executed_skill_counts.get(skill_name, 0) / steps)
+    return {"total_reward": total_reward, "final_info": dict(final_info), "metrics": metrics}
 
 
 def _collect_metric_episodes(
@@ -293,6 +350,9 @@ def _print_health(summary: Mapping[str, float]) -> None:
         "incompatible_takeover_rate",
         "walk_in_stable_takeover_rate",
         "stand_in_stable_takeover_rate",
+        "policy_incompatible_takeover_rate",
+        "policy_walk_in_stable_takeover_rate",
+        "policy_stand_in_stable_takeover_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
         "bad_dribble_rate",
@@ -307,6 +367,21 @@ def _print_health(summary: Mapping[str, float]) -> None:
         "ball_trusted_rate",
     ):
         print(f"  {key}={float(summary.get(key, 0.0)):.3f}", flush=True)
+    if "live_steps" in summary:
+        print("[health] live rollout", flush=True)
+        for key in (
+            "live_target_repair_rate",
+            "live_handoff_override_rate",
+            "live_policy_target_error_mean",
+            "live_policy_theta_error_mean",
+            "live_pose_jump_rate",
+            "live_pose_jump_max_mm",
+            "live_policy_walk_rate",
+            "live_policy_dribble_rate",
+            "live_policy_shoot_rate",
+            "live_corrected_exported_robot_pose_rate",
+        ):
+            print(f"  {key}={float(summary.get(key, 0.0)):.3f}", flush=True)
 
 
 def main() -> None:
@@ -402,6 +477,9 @@ def main() -> None:
         summary["checkpoint_stage_id"] = float(checkpoint.get("stage_id", stage_id))
         summary["eval_stage_id"] = float(stage_id)
         summary["live_total_reward"] = float(live_result["total_reward"])
+        live_metrics = live_result.get("metrics", {})
+        if isinstance(live_metrics, Mapping):
+            summary.update(live_metrics)
         summary["checkpoint_path"] = str(checkpoint_path)
         _append_csv_row(summary_csv, summary)
         _print_health(summary)

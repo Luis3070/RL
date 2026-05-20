@@ -1031,14 +1031,20 @@ class PyBHBackend:
 
         min_frame = self._last_obs.frame if self._last_obs is not None else -1
         poll_timeout_ms = max(1, min(50, self.obs_timeout_ms // 10 if self.obs_timeout_ms > 0 else 10))
-        max_poll_steps = max(4, self.obs_timeout_ms // poll_timeout_ms if self.obs_timeout_ms > 0 else 4)
+        # Use a deadline-based loop rather than a fixed step count.  During a PPO
+        # gradient update the env is idle while SimRobot keeps running: semaphore
+        # counts accumulate (one per frame, ~30 Hz).  With a fixed 20-step cap the
+        # loop exhausts draining those counts before a fresh frame can arrive.
+        # A deadline loop drains stale counts in <1 ms each and still blocks
+        # correctly for the next fresh frame within the full obs_timeout window.
+        obs_deadline_s = time.monotonic() + (self.obs_timeout_ms / 1000.0 if self.obs_timeout_ms > 0 else 5.0)
         last_obs: BackendObservation | None = None
-        for _ in range(max_poll_steps):
+        while time.monotonic() < obs_deadline_s:
             obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, poll_timeout_ms)))
             last_obs = obs
             if not obs.obs_ready:
                 continue
-            if min_frame >= 0 and obs.frame < min_frame:
+            if min_frame >= 0 and obs.frame <= min_frame:
                 if obs.frame + VISIBLE_FRAME_REWIND_TOLERANCE < min_frame:
                     print(
                         f"[pybh_backend p={self.player_number}] visible frame rewind "
@@ -1062,8 +1068,7 @@ class PyBHBackend:
                 return last_obs
             raise RuntimeError(
                 "pybh.rl_get_obs returned only stale visible frames within timeout: "
-                f"min_frame={min_frame} last_frame={last_obs.frame} poll_timeout_ms={poll_timeout_ms} "
-                f"max_poll_steps={max_poll_steps}"
+                f"min_frame={min_frame} last_frame={last_obs.frame} poll_timeout_ms={poll_timeout_ms}"
             )
         raise RuntimeError(f"pybh.rl_get_obs timed out in backend={self.mode}")
 
@@ -1077,13 +1082,17 @@ class PyBHBackend:
             target_y=float(action.target_y),
             target_theta=float(action.target_theta),
         )
+        # Visible mode uses rl_set_visible_action which does NOT clear obsReady.
+        # The semaphore in rl_get_obs guarantees frame freshness; clearing obsReady
+        # here creates a race that forces a 2-frame (66ms) wait instead of 1-frame (33ms).
+        set_action_fn = pybh.rl_set_visible_action if self._uses_visible_simrobot() else pybh.rl_set_action
         if action.skill is SkillType.pass_:
             try:
-                pybh.rl_set_action(pass_target=int(action.pass_target), **kwargs)
+                set_action_fn(pass_target=int(action.pass_target), **kwargs)
                 return
             except TypeError:
                 pass
-        pybh.rl_set_action(**kwargs)
+        set_action_fn(**kwargs)
 
     def _serialize_players(self, players: tuple[WorldPlayerSpec, ...]) -> list[tuple[int, float, float, float, bool]]:
         return [player.as_tuple() for player in players]

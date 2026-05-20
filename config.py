@@ -148,6 +148,7 @@ class EnvConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     parallel_player_numbers: tuple[int, ...] = (PLAYER_NUMBER,)
     active_skill_names: tuple[str, ...] = ("walk", "dribble", "shoot")
+    enable_handoff_override: bool = False
     reward_goal_bonus: float = 5.0
     reward_progress_scale: float = 0.003
     reward_step_penalty: float = 0.01

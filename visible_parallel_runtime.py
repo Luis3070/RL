@@ -111,9 +111,12 @@ class VisibleParallelRuntime:
                     ),
                     flush=True,
                 )
+        _env_lp = int(os.getenv("RL_LP_NUM_THREADS", "0"))
         effective_lp = (
             self.lp_num_threads
             if self.lp_num_threads > 0
+            else _env_lp
+            if _env_lp > 0
             else _compute_lp_num_threads(
                 len(self.player_numbers),
                 python_reserved_cores=self.python_reserved_cores,

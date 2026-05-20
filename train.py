@@ -59,6 +59,8 @@ class ScriptRunConfig:
     checkpoint_interval: int = 5_000
     eval_episodes: int = 4
     abort_on_wire_fail: bool = False
+    bc_warm_start: bool = False
+    bc_checkpoint_path: str | None = None
     parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     visible_parallel_display_base: int = 410
 
@@ -125,7 +127,10 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         save_plots=_env_bool("RL_SAVE_PLOTS", cfg.save_plots),
         capture_eval_steps=_env_bool("RL_CAPTURE_EVAL_STEPS", cfg.capture_eval_steps),
         abort_on_wire_fail=_env_bool("RL_ABORT_ON_WIRE_FAIL", cfg.abort_on_wire_fail),
+        bc_warm_start=_env_bool("RL_BC_WARM_START", cfg.bc_warm_start),
     )
+    if bc_checkpoint_path := os.environ.get("RL_BC_CHECKPOINT"):
+        cfg = replace(cfg, bc_checkpoint_path=bc_checkpoint_path)
     if telemetry_tag := os.environ.get("RL_TELEMETRY_TAG"):
         cfg = replace(cfg, telemetry_tag=telemetry_tag)
     if experiment_name := os.environ.get("RL_EXPERIMENT_NAME"):
@@ -800,6 +805,10 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "incompatible_takeover_rate",
         "walk_in_stable_takeover_rate",
         "stand_in_stable_takeover_rate",
+        "policy_incompatible_takeover_steps",
+        "policy_incompatible_takeover_rate",
+        "policy_walk_in_stable_takeover_rate",
+        "policy_stand_in_stable_takeover_rate",
         "walk_compat_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
@@ -990,6 +999,39 @@ def save_checkpoint(
     return checkpoint_path
 
 
+def _latest_bc_checkpoint() -> Path | None:
+    root = RUNS_DIR / "bc_warm_start"
+    if not root.exists():
+        return None
+    candidates = sorted(root.glob("**/*.pt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def load_bc_warm_start(
+    models: Mapping[str, torch.nn.Module],
+    *,
+    checkpoint_path: str | Path | None,
+    device: str,
+    active_skill_names: tuple[str, ...],
+) -> Path:
+    resolved_path = Path(checkpoint_path).expanduser() if checkpoint_path else _latest_bc_checkpoint()
+    if resolved_path is None:
+        raise FileNotFoundError(
+            "RL_BC_WARM_START=1 was requested, but no BC checkpoint was found under runs/bc_warm_start. "
+            "Set RL_BC_CHECKPOINT=/path/to/checkpoint.pt or run train_bc.py first."
+        )
+    resolved_path = resolved_path.resolve()
+    checkpoint = torch.load(resolved_path, map_location=device, weights_only=False)
+    if "policy_state_dict" not in checkpoint:
+        raise KeyError(f"BC checkpoint {resolved_path} does not contain policy_state_dict")
+    models["policy"].load_state_dict(checkpoint["policy_state_dict"])
+    if "value_state_dict" in checkpoint:
+        models["value"].load_state_dict(checkpoint["value_state_dict"], strict=False)
+    if hasattr(models["policy"], "set_active_skill_names"):
+        models["policy"].set_active_skill_names(active_skill_names)
+    return resolved_path
+
+
 def print_eval_summary(
     stage_id: int,
     timestep: int,
@@ -1003,6 +1045,9 @@ def print_eval_summary(
     clean_takeover_rate = float(summary.get("clean_takeover_rate", 0.0))
     takeover_success_rate = float(summary.get("takeover_success_rate", 0.0))
     clean_finish_rate = float(summary.get("clean_finish_rate", 0.0))
+    policy_incompatible_takeover_rate = float(summary.get("policy_incompatible_takeover_rate", 0.0))
+    handoff_override_rate = float(summary.get("handoff_override_rate", 0.0))
+    target_repair_rate = float(summary.get("target_repair_rate", 0.0))
     thrash_rate = float(summary.get("thrash_rate", 0.0))
     collision_rate = float(summary.get("collision_rate", 0.0))
     mean_time_to_takeover = float(summary.get("mean_time_to_takeover", 0.0))
@@ -1025,6 +1070,8 @@ def print_eval_summary(
         f"reward_mean={reward_mean:.3f} "
         f"takeover_clean={clean_takeover_rate:.3f} takeover_success={takeover_success_rate:.3f} "
         f"finish={clean_finish_rate:.3f} "
+        f"policy_incompat={policy_incompatible_takeover_rate:.3f} "
+        f"override={handoff_override_rate:.3f} repair={target_repair_rate:.3f} "
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
         f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
         f"ball_conf={ball_confidence_score_mean:.3f} "
@@ -1323,6 +1370,8 @@ def run_training(
     telemetry_paths: TelemetryPaths | None = None,
     save_plots: bool = True,
     abort_on_wire_fail: bool = False,
+    bc_warm_start: bool = False,
+    bc_checkpoint_path: str | None = None,
 ) -> None:
     backend_cfg = replace(
         ENV.backend,
@@ -1337,6 +1386,14 @@ def run_training(
     env_cfg = make_env_config(current_stage, backend_cfg)
     raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
     agent, checkpoint_models = build_mappo(wrapped_env, device, TRAIN, env_cfg.active_skill_names)
+    if bc_warm_start:
+        loaded_bc_path = load_bc_warm_start(
+            checkpoint_models,
+            checkpoint_path=bc_checkpoint_path,
+            device=device,
+            active_skill_names=env_cfg.active_skill_names,
+        )
+        print(f"[bc-warm-start] loaded={loaded_bc_path}", flush=True)
     trainer_cfg = SequentialTrainerCfg(
         timesteps=timesteps,
         headless=True,
@@ -1545,7 +1602,8 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         f"embedded_qt_platform={run_cfg.embedded_qt_platform or 'auto'} "
         f"embedded_3d_preflight={int(bool(run_cfg.embedded_3d_preflight))} "
         f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps} "
-        f"eval_interval={effective_train.eval_interval} checkpoint_interval={effective_train.checkpoint_interval}",
+        f"eval_interval={effective_train.eval_interval} checkpoint_interval={effective_train.checkpoint_interval} "
+        f"bc_warm_start={int(bool(run_cfg.bc_warm_start))}",
         flush=True,
     )
 
@@ -1571,6 +1629,8 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 telemetry_paths=telemetry_paths,
                 save_plots=run_cfg.save_plots,
                 abort_on_wire_fail=run_cfg.abort_on_wire_fail,
+                bc_warm_start=run_cfg.bc_warm_start,
+                bc_checkpoint_path=run_cfg.bc_checkpoint_path,
             )
         else:
             run_training(

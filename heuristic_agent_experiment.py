@@ -4,16 +4,21 @@ import argparse
 import csv
 import math
 import statistics
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 from action import SkillType, StructuredSkillAction
 from config import DT, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, GOAL_Y_HALF, SIMROBOT_BIN
+from curriculum import get_dynamic_world_update, get_stage_spec, sample_stage_world_spec
 from pybh_backend import PyBHBackend
-
-_SCRIPT_DIR = Path(__file__).resolve().parent
+from teacher_policy import BALL_SEARCH_MAX_AGE_MS, stage_aware_teacher_action
 
 HANDOFF_OFFSET_MM = np.array([-210.0, 0.0], dtype=np.float32)
 APPROACH_THRESHOLD_MM = 350.0
@@ -46,45 +51,65 @@ def _heuristic_action(robot_pos: np.ndarray, ball_pos: np.ndarray) -> Structured
     )
 
 
+def _stage_aware_teacher_action(obs, stage_id: int, prev_skill_name: str | None = None) -> StructuredSkillAction:
+    return stage_aware_teacher_action(obs, stage_id, prev_skill_name)
+
+
 def _goal_scored(ball_pos: np.ndarray) -> bool:
     return bool(ball_pos[0] >= GOAL_X and abs(ball_pos[1]) <= GOAL_Y_HALF)
 
 
-def _run_episode(backend: PyBHBackend, seed: int) -> dict[str, int | bool | None]:
+def _run_episode(backend: PyBHBackend, seed: int, stage_id: int) -> dict[str, int | bool | None | float]:
     rng = np.random.default_rng(seed)
-    ball_pos = np.array(
-        [
-            rng.uniform(0.0, FIELD_X_HALF * 0.5),
-            rng.uniform(-FIELD_Y_HALF * 0.3, FIELD_Y_HALF * 0.3),
-        ],
-        dtype=np.float32,
-    )
-    robot_pos = ball_pos + np.array([-800.0, rng.uniform(-200.0, 200.0)], dtype=np.float32)
-    robot_pos = np.clip(robot_pos, [-FIELD_X_HALF, -FIELD_Y_HALF], [FIELD_X_HALF, FIELD_Y_HALF]).astype(np.float32)
-    robot_theta = _face_ball(robot_pos, ball_pos)
-
-    obs = backend.reset(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=float(robot_theta))
+    world_spec = sample_stage_world_spec(stage_id, rng)
+    obs = backend.reset(world_spec=world_spec)
+    ball_pos = np.array([float(obs.ball_x), float(obs.ball_y)], dtype=np.float32)
+    robot_pos = np.array([float(obs.robot_x), float(obs.robot_y)], dtype=np.float32)
     ball_pos[:] = (obs.ball_x, obs.ball_y)
     robot_pos[:] = (obs.robot_x, obs.robot_y)
-    robot_theta = obs.robot_theta
 
     shoot_issued = False
     goal_scored = False
     handoff_ready = False
     first_shoot_step: int | None = None
+    first_dribble_step: int | None = None
+    walk_steps = 0
+    dribble_steps = 0
+    shoot_steps = 0
+    stand_steps = 0
+    stale_steps = 0
+    prev_skill_name: str | None = None
     step = 0
 
     for step in range(1, MAX_STEPS + 1):
-        action = _heuristic_action(robot_pos, ball_pos)
+        action = _stage_aware_teacher_action(obs, stage_id, prev_skill_name)
         obs = backend.step(action)
+        world_update = get_dynamic_world_update(
+            stage_id,
+            step,
+            robot_x=obs.robot_x,
+            robot_y=obs.robot_y,
+            ball_x=obs.ball_x,
+            ball_y=obs.ball_y,
+        )
+        if world_update:
+            obs = backend.set_dynamic_world(**world_update)
         ball_pos[:] = (obs.ball_x, obs.ball_y)
         robot_pos[:] = (obs.robot_x, obs.robot_y)
-        robot_theta = obs.robot_theta
+        prev_skill_name = action.skill_name
+
+        walk_steps += int(action.skill_name == "walk")
+        dribble_steps += int(action.skill_name == "dribble")
+        shoot_steps += int(action.skill_name == "shoot")
+        stand_steps += int(action.skill_name == "stand")
+        stale_steps += int(float(obs.time_since_ball_seen) > BALL_SEARCH_MAX_AGE_MS)
 
         if action.skill_name == "shoot" and not shoot_issued:
             shoot_issued = True
-            handoff_ready = True
             first_shoot_step = step
+        if action.skill_name == "dribble" and first_dribble_step is None:
+            first_dribble_step = step
+            handoff_ready = True
 
         if _goal_scored(ball_pos):
             goal_scored = True
@@ -99,6 +124,12 @@ def _run_episode(backend: PyBHBackend, seed: int) -> dict[str, int | bool | None
         "shoot_issued": shoot_issued,
         "goal_scored": goal_scored,
         "first_shoot_step": first_shoot_step,
+        "first_dribble_step": first_dribble_step,
+        "walk_steps": walk_steps,
+        "dribble_steps": dribble_steps,
+        "shoot_steps": shoot_steps,
+        "stand_steps": stand_steps,
+        "stale_steps": stale_steps,
     }
 
 
@@ -106,10 +137,11 @@ def run_experiment(
     n_episodes: int,
     seed_base: int,
     *,
+    stage_id: int,
     backend_mode: str,
     simrobot_profile: str,
     launch_simrobot: bool,
-) -> list[dict[str, int | bool | None]]:
+) -> list[dict[str, int | bool | None | float]]:
     backend = PyBHBackend(
         mode=backend_mode,
         frames_per_step=3 if backend_mode == "simrobot" else 1,
@@ -120,10 +152,10 @@ def run_experiment(
     )
     backend.start()
 
-    results: list[dict[str, int | bool | None]] = []
+    results: list[dict[str, int | bool | None | float]] = []
     try:
         for episode in range(n_episodes):
-            results.append(_run_episode(backend, seed_base + episode))
+            results.append(_run_episode(backend, seed_base + episode, stage_id))
             if (episode + 1) % 10 == 0:
                 goals = sum(int(result["goal_scored"]) for result in results)
                 handoffs = sum(int(result["handoff_ready"]) for result in results)
@@ -134,12 +166,16 @@ def run_experiment(
     return results
 
 
-def print_summary(results: list[dict[str, int | bool | None]], label: str) -> None:
+def print_summary(results: list[dict[str, int | bool | None | float]], label: str) -> None:
     total = len(results)
     goals = sum(int(result["goal_scored"]) for result in results)
     handoffs = sum(int(result["handoff_ready"]) for result in results)
     shoots = sum(int(result["shoot_issued"]) for result in results)
     first_shoot_steps = [int(result["first_shoot_step"]) for result in results if result["first_shoot_step"] is not None]
+    first_dribble_steps = [
+        int(result["first_dribble_step"]) for result in results if result["first_dribble_step"] is not None
+    ]
+    total_steps = max(1, sum(int(result["steps"]) for result in results))
 
     print()
     print("=" * 55)
@@ -148,14 +184,22 @@ def print_summary(results: list[dict[str, int | bool | None]], label: str) -> No
     print(f"  goal_rate      : {goals / total:.3f}  ({goals}/{total})")
     print(f"  handoff_rate   : {handoffs / total:.3f}  ({handoffs}/{total})")
     print(f"  shoot_rate     : {shoots / total:.3f}  ({shoots}/{total})")
+    if first_dribble_steps:
+        median_step = statistics.median(first_dribble_steps)
+        print(f"  median_dribble_step: {median_step:.0f}  (~{median_step * DT:.2f}s)")
     if first_shoot_steps:
         median_step = statistics.median(first_shoot_steps)
         print(f"  median_shoot_step: {median_step:.0f}  (~{median_step * DT:.2f}s)")
     print(f"  mean_steps     : {statistics.mean(int(result['steps']) for result in results):.1f}")
+    print(f"  skill_mix      : stand={sum(int(r['stand_steps']) for r in results) / total_steps:.3f} "
+          f"walk={sum(int(r['walk_steps']) for r in results) / total_steps:.3f} "
+          f"dribble={sum(int(r['dribble_steps']) for r in results) / total_steps:.3f} "
+          f"shoot={sum(int(r['shoot_steps']) for r in results) / total_steps:.3f}")
+    print(f"  stale_step_rate: {sum(int(r['stale_steps']) for r in results) / total_steps:.3f}")
     print("=" * 55)
 
 
-def save_csv(results: list[dict[str, int | bool | None]], path: Path) -> None:
+def save_csv(results: list[dict[str, int | bool | None | float]], path: Path) -> None:
     with path.open("w", newline="", encoding="ascii") as handle:
         writer = csv.DictWriter(
             handle,
@@ -167,6 +211,12 @@ def save_csv(results: list[dict[str, int | bool | None]], path: Path) -> None:
                 "shoot_issued",
                 "goal_scored",
                 "first_shoot_step",
+                "first_dribble_step",
+                "walk_steps",
+                "dribble_steps",
+                "shoot_steps",
+                "stand_steps",
+                "stale_steps",
             ],
         )
         writer.writeheader()
@@ -175,7 +225,7 @@ def save_csv(results: list[dict[str, int | bool | None]], path: Path) -> None:
     print(f"  CSV guardado en {path}")
 
 
-def plot_results(results: list[dict[str, int | bool | None]], path: Path) -> None:
+def plot_results(results: list[dict[str, int | bool | None | float]], path: Path) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -220,18 +270,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Heuristic agent experiment on real SimRobot backends")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed-base", type=int, default=200)
+    parser.add_argument("--stage-id", type=int, default=0, choices=(-1, 0, 1, 2, 3, 4))
     parser.add_argument("--backend", choices=("simrobot", "simrobot_visible"), default="simrobot")
     parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default="2d")
     parser.add_argument("--launch-simrobot", action="store_true")
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
-    label = f"{args.backend}:{args.simrobot_profile}"
-    print(f"Corriendo {args.episodes} episodios con seed_base={args.seed_base} ({label}) ...")
+    stage = get_stage_spec(args.stage_id)
+    label = f"{args.backend}:{args.simrobot_profile}:stage{args.stage_id}"
+    print(
+        f"Corriendo {args.episodes} episodios con seed_base={args.seed_base} "
+        f"({label}, active_skills={stage.active_skill_names}) ..."
+    )
     started_at = time.perf_counter()
     results = run_experiment(
         args.episodes,
         args.seed_base,
+        stage_id=args.stage_id,
         backend_mode=args.backend,
         simrobot_profile=args.simrobot_profile,
         launch_simrobot=args.launch_simrobot,

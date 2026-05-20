@@ -6,7 +6,7 @@ from typing import Dict, Mapping, Sequence
 
 import numpy as np
 
-from config import GOAL_X, GOAL_Y_HALF
+from config import FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, GOAL_Y_HALF
 from observation import ObsIndex
 from pybh_backend import BackendObservation
 
@@ -314,19 +314,28 @@ def heuristic_bias(step_ctx: StepContext) -> Dict[str, float]:
     return skill_bias
 
 
+def _bounded_target(x: float, y: float) -> tuple[float, float]:
+    return (
+        float(np.clip(x, -FIELD_X_HALF, FIELD_X_HALF)),
+        float(np.clip(y, -FIELD_Y_HALF, FIELD_Y_HALF)),
+    )
+
+
 def build_fallback_action_targets(skill_name: str, obs: BackendObservation) -> Dict[str, float]:
     ball_heading = ball_angle_rad(obs)
     goal_heading = math.atan2(-float(obs.ball_y), GOAL_X - float(obs.ball_x))
     if skill_name == "walk":
+        target_x, target_y = _bounded_target(float(obs.ball_x) + _APPROACH_OFFSET_X, float(obs.ball_y))
         return {
-            "target_x": float(obs.ball_x) + _APPROACH_OFFSET_X,
-            "target_y": float(obs.ball_y),
+            "target_x": target_x,
+            "target_y": target_y,
             "target_theta": ball_heading,
         }
     if skill_name == "dribble":
+        target_x, target_y = _bounded_target(float(obs.ball_x), float(obs.ball_y))
         return {
-            "target_x": float(obs.ball_x),
-            "target_y": float(obs.ball_y),
+            "target_x": target_x,
+            "target_y": target_y,
             "target_theta": goal_heading,
         }
     return {
@@ -416,7 +425,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     bad_walk = (
         1.0
         if step_ctx.stage >= 0
-        and step_ctx.skill_name == "walk"
+        and (step_ctx.skill_name == "walk" or step_ctx.policy_skill_name == "walk")
         and not step_ctx.projection_applied
         and stable_takeover_envelope
         and (shoot_zone or dribble_zone)

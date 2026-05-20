@@ -16,6 +16,7 @@ from config import ACTION, ENV
 from curriculum import (
     get_dynamic_world_update,
     get_stage_spec,
+    init_dynamic_world_state,
     sample_stage_world_spec,
     stage_skill_mask,
 )
@@ -147,6 +148,7 @@ class RealSimRobotEnv(ParallelEnv):
         self._episode_step = 0
         self._skill_history: list[str] = []
         self._current_world_spec = None
+        self._dynamic_world_state = None
         self._episode_tracker: Dict[str, object] = {}
         if _STEP_PROFILE:
             self._prof_acc: Dict[str, float] = defaultdict(float)
@@ -165,7 +167,9 @@ class RealSimRobotEnv(ParallelEnv):
         self._episode_step = 0
         self._skill_history = []
         self._last_evaluation = None
-        self._current_world_spec = sample_stage_world_spec(self.stage_spec.stage_id, self._rng)
+        options = options or {}
+        self._current_world_spec = options.get("world_spec") or sample_stage_world_spec(self.stage_spec.stage_id, self._rng)
+        self._dynamic_world_state = init_dynamic_world_state(self.stage_spec.stage_id, self._current_world_spec, self._rng)
         obs = self.backend.reset(world_spec=self._current_world_spec)
         encoded = self._encode_obs(obs)
         self._last_obs = encoded
@@ -227,7 +231,11 @@ class RealSimRobotEnv(ParallelEnv):
         target_repair_applied = False
         target_repair_reason = ""
         action_for_execution = policy_action
-        if policy_action.skill_name == "walk" and self._should_force_dribble_handoff(self._last_backend_obs):
+        if (
+            self.cfg.enable_handoff_override
+            and policy_action.skill_name == "walk"
+            and self._should_force_dribble_handoff(self._last_backend_obs)
+        ):
             handoff_override_applied = True
             fallback_targets = build_fallback_action_targets("dribble", self._last_backend_obs)
             action_for_execution = StructuredSkillAction(
@@ -263,6 +271,7 @@ class RealSimRobotEnv(ParallelEnv):
             robot_y=obs.robot_y,
             ball_x=obs.ball_x,
             ball_y=obs.ball_y,
+            dynamic_state=self._dynamic_world_state,
         )
         if world_update:
             obs = self.backend.set_dynamic_world(**world_update)
@@ -385,7 +394,7 @@ class RealSimRobotEnv(ParallelEnv):
         return {"player_1": encoded}, rewards, terminations, truncations, {"player_1": info}
 
     def _policy_anchor_errors(self, policy_action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[float, float]:
-        if policy_action.skill_name not in {"walk", "dribble", "shoot"}:
+        if policy_action.skill_name not in {"walk", "dribble"}:
             return 0.0, 0.0
         anchors = build_fallback_action_targets(policy_action.skill_name, obs)
         target_error_mm = math.hypot(
@@ -563,6 +572,9 @@ class RealSimRobotEnv(ParallelEnv):
             "incompatible_takeover_requests": 0,
             "walk_in_stable_takeover_steps": 0,
             "stand_in_stable_takeover_steps": 0,
+            "policy_incompatible_takeover_requests": 0,
+            "policy_walk_in_stable_takeover_steps": 0,
+            "policy_stand_in_stable_takeover_steps": 0,
             "good_finish_steps": 0,
             "goal": False,
             "collision_count": 0,
@@ -645,7 +657,7 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["target_repair_count"] += 1
             if target_repair_reason:
                 tracker["target_repair_reason_counts"][target_repair_reason] += 1
-        if step_ctx.policy_skill_name in {"walk", "dribble", "shoot"}:
+        if step_ctx.policy_skill_name in {"walk", "dribble"}:
             tracker["policy_target_error_sum"] += float(policy_target_error_mm)
             tracker["policy_theta_error_sum"] += float(policy_theta_error_rad)
             tracker["policy_target_quality_count"] += 1
@@ -761,6 +773,12 @@ class RealSimRobotEnv(ParallelEnv):
                 tracker["walk_in_stable_takeover_steps"] += 1
             elif step_ctx.skill_name == "stand":
                 tracker["stand_in_stable_takeover_steps"] += 1
+        if stable_takeover_envelope and step_ctx.policy_skill_name not in {"dribble", "shoot"}:
+            tracker["policy_incompatible_takeover_requests"] += 1
+            if step_ctx.policy_skill_name == "walk":
+                tracker["policy_walk_in_stable_takeover_steps"] += 1
+            elif step_ctx.policy_skill_name == "stand":
+                tracker["policy_stand_in_stable_takeover_steps"] += 1
 
         if evaluation.terms["good_shoot"] > 0.0 or evaluation.terms["good_dribble"] > 0.0:
             tracker["good_finish_steps"] += 1
@@ -813,6 +831,16 @@ class RealSimRobotEnv(ParallelEnv):
             ),
             "stand_in_stable_takeover_rate": float(
                 tracker["stand_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_incompatible_takeover_steps": float(tracker["policy_incompatible_takeover_requests"]),
+            "policy_incompatible_takeover_rate": float(
+                tracker["policy_incompatible_takeover_requests"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_walk_in_stable_takeover_rate": float(
+                tracker["policy_walk_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_stand_in_stable_takeover_rate": float(
+                tracker["policy_stand_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
             ),
             "target_repair_rate": float(tracker["target_repair_count"] / steps),
             "policy_target_error_mean": float(
@@ -877,12 +905,25 @@ class RealSimRobotEnv(ParallelEnv):
         incompatible_takeover_rate = float(tracker["incompatible_takeover_requests"] / stable_takeover_steps)
         walk_in_stable_takeover_rate = float(tracker["walk_in_stable_takeover_steps"] / stable_takeover_steps)
         stand_in_stable_takeover_rate = float(tracker["stand_in_stable_takeover_steps"] / stable_takeover_steps)
+        policy_incompatible_takeover_rate = float(
+            tracker["policy_incompatible_takeover_requests"] / stable_takeover_steps
+        )
+        policy_walk_in_stable_takeover_rate = float(
+            tracker["policy_walk_in_stable_takeover_steps"] / stable_takeover_steps
+        )
+        policy_stand_in_stable_takeover_rate = float(
+            tracker["policy_stand_in_stable_takeover_steps"] / stable_takeover_steps
+        )
 
         clean_walk = bool(walk_steps > 0 and walk_compat_rate >= 0.7 and tracker["thrash_count"] == 0)
         if self.stage_spec.stage_id < 0:
             clean_takeover = bool(takeover_success and tracker["thrash_count"] == 0 and tracker["collision_count"] == 0)
         else:
-            clean_takeover = bool(takeover_success and tracker["incompatible_takeover_requests"] == 0)
+            clean_takeover = bool(
+                takeover_success
+                and tracker["incompatible_takeover_requests"] == 0
+                and tracker["policy_incompatible_takeover_requests"] == 0
+            )
         clean_finish = bool(
             tracker["good_finish_steps"] > 0
             and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
@@ -932,6 +973,10 @@ class RealSimRobotEnv(ParallelEnv):
             "incompatible_takeover_rate": incompatible_takeover_rate,
             "walk_in_stable_takeover_rate": walk_in_stable_takeover_rate,
             "stand_in_stable_takeover_rate": stand_in_stable_takeover_rate,
+            "policy_incompatible_takeover_steps": float(tracker["policy_incompatible_takeover_requests"]),
+            "policy_incompatible_takeover_rate": policy_incompatible_takeover_rate,
+            "policy_walk_in_stable_takeover_rate": policy_walk_in_stable_takeover_rate,
+            "policy_stand_in_stable_takeover_rate": policy_stand_in_stable_takeover_rate,
             "walk_compat_rate": walk_compat_rate,
             "dribble_compat_rate": dribble_compat_rate,
             "shoot_compat_rate": shoot_compat_rate,
@@ -1089,6 +1134,7 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_residual_theta": float(policy_residual_theta),
             "policy_target_error_mm": float(policy_target_error_mm),
             "policy_theta_error_rad": float(policy_theta_error_rad),
+            "handoff_override_enabled": bool(self.cfg.enable_handoff_override),
             "handoff_override_applied": bool(handoff_override_applied),
             "target_repair_applied": bool(target_repair_applied),
             "target_repair_reason": str(target_repair_reason),
