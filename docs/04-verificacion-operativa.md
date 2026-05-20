@@ -66,12 +66,6 @@ PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
 python3 smoke_test_skill_requests.py --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
 ```
 
-Luego en SimRobot:
-
-```text
-F5
-```
-
 ## Verificación heurística
 
 ```bash

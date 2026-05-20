@@ -85,12 +85,12 @@ Eso motivó la creación de `RLFull*`.
 
 No era un cuelgue real del wire. El problema era de UX:
 
-- el script mandaba el reset antes de que el usuario terminara `F5`
+- el script mandaba el reset antes de que la escena visible terminara de cargar
 - el script no imprimía progreso mientras esperaba el `request_id` y la obs nueva
 
 Los scripts de GUI ahora:
 
-- esperan `Enter` después de `F5`
+- esperan `Enter` después de que la escena visible ya está corriendo
 - usan `timeout_ms=30000`
 - imprimen progreso explícito
 - permiten separar timeout de `request_id` y de observación posterior
@@ -144,7 +144,7 @@ Se agregaron estos scripts:
 
 Estado de estos scripts:
 
-- ya no asumen `F5` instantáneo
+- ya no asumen intervención manual para arrancar la simulación
 - muestran progreso antes de esperar
 - aceptan:
   - `--request-timeout-ms`

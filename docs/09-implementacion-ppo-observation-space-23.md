@@ -209,7 +209,7 @@ PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python pyth
 Resultado esperado:
 
 - SimRobot abre la escena `RL1v0_3D.ros2`.
-- Al presionar `F5`, el frame avanza.
+- El frame empieza a avanzar cuando termina de cargar la escena.
 - El log no debe quedarse en `obs_ready=0 stale_frame=...`.
 - El robot debe recibir acciones por `SkillRequest`.
 - El movimiento visible debe seguir pasando por B-Human.

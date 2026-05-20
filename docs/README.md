@@ -20,6 +20,7 @@ Lectura recomendada:
 14. [Guia practica para armar escenas y escenarios RL](./15-guia-escenas-y-escenarios-rl.md)
 15. [Curriculum dinamico: balon y rivales](./16-curriculum-dinamico-balon-y-rivales.md)
 16. [Handoff visible SimRobot GUI](./17-handoff-visible-simrobot-gui.md)
+17. [SimRobot estable y partido hibrido RL vs B-Human](./21-simrobot-estable-y-rl-vs-bhuman.md)
 
 Resumen corto:
 

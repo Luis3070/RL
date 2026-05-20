@@ -35,7 +35,7 @@ Esto aplica a:
 
 - SimRobot embebido perfil `2d`
 - SimRobot embebido perfil `3d`
-- SimRobot visible con `F5`
+- SimRobot visible con escena que arranca sola
 
 ## Escenarios y escenas RL
 
@@ -123,4 +123,4 @@ Verificado en esta sesión:
 
 Limitación honesta:
 
-- la validación visible con GUI sigue requiriendo una sesión gráfica y `F5`
+- la validación visible con GUI sigue requiriendo una sesión gráfica

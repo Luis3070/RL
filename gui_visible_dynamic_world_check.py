@@ -34,7 +34,7 @@ def main() -> None:
     )
     backend.start()
     try:
-        print("Abre SimRobot, presiona F5 y luego vuelve aca.", flush=True)
+        print("Abre SimRobot y vuelve aca cuando la escena visible ya este cargada.", flush=True)
         input("Cuando la simulacion ya este corriendo, presiona Enter para enviar el reset inicial...")
         print("Enviando reset inicial y esperando confirmacion de SimRobot...", flush=True)
         obs = backend.reset(

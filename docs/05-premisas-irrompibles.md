@@ -80,7 +80,6 @@ joints de piernas
 Si se usa SimRobot visible:
 
 - la ventana correcta debe estar corriendo
-- hay que presionar `F5`
 - no debe haber otra instancia consumiendo el mismo `RLSharedState`
 
 ## 9. Smoke visual no es entrenamiento

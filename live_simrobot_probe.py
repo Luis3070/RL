@@ -248,7 +248,7 @@ def main() -> None:
     if args.launch:
         print(f"launched={args.simrobot_bin}", flush=True)
     print(f"policy={args.policy}", flush=True)
-    print("If the SimRobot window is open, start the simulation with F5 before expecting observations.", flush=True)
+    print("If the SimRobot window is open, observations should start as soon as the scene finishes loading.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
     if not args.no_reset:

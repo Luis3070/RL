@@ -645,13 +645,39 @@ Ese script:
 
 Uso esperado:
 
-- al abrirse SimRobot, arrancar la simulación con `F5`
+- al abrirse SimRobot, la escena visible debe empezar a correr sola
 - si `RLSkillProvider` está cargado correctamente, el robot visible debe empezar a reaccionar en vivo
 
 Limitación actual:
 
 - este probe visible no hace `reset()` del mundo como el backend embebido
 - sirve para validar visualización/control en vivo, no todavía para episodios RL completos en UI
+
+## Partido híbrido `RL vs B-Human`
+
+También quedó una prueba mixta para observar interacciones reales contra
+`B-Human` sin convertir todo el equipo a RL.
+
+Uso:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/RL
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+python3 run_rl_vs_bhuman_3v3.py --launch --seconds 60
+```
+
+Ese runner:
+
+- abre la escena `RLvsBH3v3_3D.ros2`
+- deja el `player 1` del equipo RL como `B-Human`
+- controla por RL solo `player 2` y `player 3`
+- deja al equipo rival completo en `B-Human`
+- imprime trazas `zk=activo/calls` y eventos `[zweikampf]`
+
+Si sale algo como `zk=0/23`, se interpreta asi:
+
+- `0`: `Zweikampf` no esta activo en esa observacion
+- `23`: la skill ya fue llamada 23 veces en la corrida
 
 ## Estado funcional actual
 

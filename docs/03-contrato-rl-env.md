@@ -150,7 +150,7 @@ pybh.rl_set_action(...)
 pybh.rl_get_obs(...)
 ```
 
-Requiere una ventana viva y `F5`.
+Requiere una ventana viva.
 
 ## Contrato de mundo
 

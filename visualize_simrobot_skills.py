@@ -130,7 +130,7 @@ def main() -> None:
     print(f"profile={args.simrobot_profile}")
     print(f"scene={args.scene}")
     print(f"cycles={args.cycles} steps_per_skill={args.steps_per_skill} hz={args.hz:.1f}")
-    print("If SimRobot is open, press F5 before expecting live motion.")
+    print("If SimRobot is open, live motion should start once the scene finishes loading.")
     backend.start()
     try:
         for cycle in range(max(1, args.cycles)):

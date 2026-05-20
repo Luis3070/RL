@@ -8,7 +8,7 @@ scene = BHUMAN_DIR / "Config/Scenes/RL1v0_3D_extra_dummy_front.ros2"
 simrobot = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 
 proc = subprocess.Popen([str(simrobot), str(scene)])
-print("SimRobot abierto — presiona F5 para arrancar, Ctrl+C para salir")
+print("SimRobot abierto — espera a que la escena cargue y usa Ctrl+C para salir")
 time.sleep(3)
 
 try:
