@@ -17,17 +17,20 @@ from curriculum import (
     get_dynamic_world_update,
     get_stage_spec,
     init_dynamic_world_state,
-    sample_stage_world_spec,
+    sample_stage_world_spec_with_options,
     stage_skill_mask,
 )
 from observation import OBS_FEATURE_NAMES, OBS_SIZE
 from pybh_backend import BackendObservation, PyBHBackend
 from reward import (
+    TAKEOVER_GRACE_STEPS,
     StepContext,
     StepEvaluation,
     build_fallback_action_targets,
     evaluate_step,
+    features_from_obs,
     goal_scored,
+    is_geometric_takeover,
 )
 
 BALL_VEL_NORM = 3000.0
@@ -147,6 +150,10 @@ class RealSimRobotEnv(ParallelEnv):
         self._last_evaluation: Optional[StepEvaluation] = None
         self._episode_step = 0
         self._skill_history: list[str] = []
+        self._trusted_takeover_grace = 0
+        self._post_takeover_finishing_steps = 0
+        self._episode_stage_id = self.stage_spec.stage_id
+        self._episode_stage_spec = self.stage_spec
         self._current_world_spec = None
         self._dynamic_world_state = None
         self._episode_tracker: Dict[str, object] = {}
@@ -166,10 +173,18 @@ class RealSimRobotEnv(ParallelEnv):
         self.agents = list(self.possible_agents)
         self._episode_step = 0
         self._skill_history = []
+        self._trusted_takeover_grace = 0
+        self._post_takeover_finishing_steps = 0
         self._last_evaluation = None
         options = options or {}
-        self._current_world_spec = options.get("world_spec") or sample_stage_world_spec(self.stage_spec.stage_id, self._rng)
-        self._dynamic_world_state = init_dynamic_world_state(self.stage_spec.stage_id, self._current_world_spec, self._rng)
+        self._episode_stage_id = self._sample_episode_stage_id(options)
+        self._episode_stage_spec = get_stage_spec(self._episode_stage_id)
+        self._current_world_spec = options.get("world_spec") or sample_stage_world_spec_with_options(
+            self._episode_stage_id,
+            self._rng,
+            diverse_resets=bool(self.cfg.diverse_stage_resets),
+        )
+        self._dynamic_world_state = init_dynamic_world_state(self._episode_stage_id, self._current_world_spec, self._rng)
         obs = self.backend.reset(world_spec=self._current_world_spec)
         encoded = self._encode_obs(obs)
         self._last_obs = encoded
@@ -185,6 +200,14 @@ class RealSimRobotEnv(ParallelEnv):
             done=False,
         )
         return {"player_1": encoded}, {"player_1": info}
+
+    def _sample_episode_stage_id(self, options: Mapping[str, object]) -> int:
+        if "stage_id" in options:
+            return int(options["stage_id"])
+        probability = float(np.clip(self.cfg.stage0_finish_interleave_probability, 0.0, 1.0))
+        if self.stage_spec.stage_id == 0 and probability > 0.0 and float(self._rng.random()) < probability:
+            return 1
+        return self.stage_spec.stage_id
 
     def step(self, actions):
         if not self.agents:
@@ -265,7 +288,7 @@ class RealSimRobotEnv(ParallelEnv):
 
         dynamic_update_applied = False
         world_update = get_dynamic_world_update(
-            self.stage_spec.stage_id,
+            self._episode_stage_id,
             self._episode_step,
             robot_x=obs.robot_x,
             robot_y=obs.robot_y,
@@ -284,8 +307,21 @@ class RealSimRobotEnv(ParallelEnv):
         prev_skill_name = self._skill_history[-1] if self._skill_history else None
         skill_history = tuple((*self._skill_history, executed_action.skill_name))
 
+        # Takeover commitment latch: once a stable trusted takeover has occurred,
+        # keep treating the robot as committed for a short grace window as long as
+        # the ball stays geometrically in front, so a brief perception-trust
+        # dropout does not flip the dribble reward sign (see reward.evaluate_step).
+        takeover_committed = bool(
+            self._trusted_takeover_grace > 0
+            and is_geometric_takeover(features_from_obs(obs))
+        )
+        finishing_active = bool(
+            self.cfg.post_takeover_progress_enabled
+            and self._post_takeover_finishing_steps > 0
+        )
+
         step_ctx = StepContext(
-            stage=self.stage_spec.stage_id,
+            stage=self._episode_stage_id,
             episode_step=self._episode_step,
             max_episode_steps=self.cfg.max_episode_steps,
             prev_obs=self._last_backend_obs,
@@ -306,8 +342,19 @@ class RealSimRobotEnv(ParallelEnv):
             policy_skill_prob_dribble=float(policy_skill_probs.get("dribble", 0.0)),
             policy_skill_prob_shoot=float(policy_skill_probs.get("shoot", 0.0)),
             handoff_override_applied=handoff_override_applied,
+            takeover_committed=takeover_committed,
+            post_takeover_finishing_active=finishing_active,
         )
-        evaluation = evaluate_step(step_ctx, self.stage_spec.reward_weights)
+        evaluation = evaluate_step(step_ctx, self._episode_stage_spec.reward_weights)
+        if evaluation.stable_trusted_takeover:
+            self._trusted_takeover_grace = TAKEOVER_GRACE_STEPS
+            self._post_takeover_finishing_steps = max(
+                self._post_takeover_finishing_steps,
+                int(self.cfg.post_takeover_progress_window_steps),
+            )
+        else:
+            self._trusted_takeover_grace = max(0, self._trusted_takeover_grace - 1)
+            self._post_takeover_finishing_steps = max(0, self._post_takeover_finishing_steps - 1)
         if _STEP_PROFILE:
             _t2 = time.perf_counter()
         encoded = self._encode_obs(obs)
@@ -332,7 +379,7 @@ class RealSimRobotEnv(ParallelEnv):
         self._skill_history.append(executed_action.skill_name)
 
         prestage_takeover_done = (
-            self.stage_spec.stage_id < 0
+            self._episode_stage_id < 0
             and evaluation.takeover_envelope
             and evaluation.prev_takeover_envelope
         )
@@ -430,7 +477,7 @@ class RealSimRobotEnv(ParallelEnv):
         )
 
     def project_action(self, action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[StructuredSkillAction, bool]:
-        if action.skill_name in self.stage_spec.active_skill_names:
+        if action.skill_name in self._episode_stage_spec.active_skill_names:
             return action, False
 
         # Always project to walk (not preferred_skill) so telemetry reflects what
@@ -474,7 +521,7 @@ class RealSimRobotEnv(ParallelEnv):
         return repaired, True, f"{policy_action.skill_name}_heuristic_anchor"
 
     def _should_force_dribble_handoff(self, obs: BackendObservation) -> bool:
-        if self.stage_spec.stage_id != 0 or "dribble" not in self.stage_spec.active_skill_names:
+        if self._episode_stage_id != 0 or "dribble" not in self._episode_stage_spec.active_skill_names:
             return False
         if self._last_evaluation is None:
             return False
@@ -584,6 +631,7 @@ class RealSimRobotEnv(ParallelEnv):
             "corridor_keep_steps": 0,
             "dynamic_updates": 0,
             "post_takeover_progress_sum": 0.0,
+            "post_takeover_finishing_steps": 0,
             "synthetic_pose_steps": 0,
             "synthetic_ball_steps": 0,
             "obs_mode_estimated_steps": 0,
@@ -663,6 +711,7 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["policy_target_quality_count"] += 1
         if dynamic_update_applied:
             tracker["dynamic_updates"] += 1
+        tracker["post_takeover_finishing_steps"] += int(bool(step_ctx.post_takeover_finishing_active))
         tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
         tracker["synthetic_ball_steps"] += int(bool(step_ctx.obs.synthetic_ball_observation))
         tracker["obs_mode_estimated_steps"] += int(int(step_ctx.obs.obs_export_mode) == 0)
@@ -916,13 +965,17 @@ class RealSimRobotEnv(ParallelEnv):
         )
 
         clean_walk = bool(walk_steps > 0 and walk_compat_rate >= 0.7 and tracker["thrash_count"] == 0)
-        if self.stage_spec.stage_id < 0:
+        if self._episode_stage_id < 0:
             clean_takeover = bool(takeover_success and tracker["thrash_count"] == 0 and tracker["collision_count"] == 0)
         else:
+            # Tolerate a small incompatibility fraction instead of requiring
+            # exactly zero: one walk/stand step in the stable envelope used to
+            # zero the whole episode, masking otherwise-clean handoffs and
+            # leaving no gradient signal for partial success.
             clean_takeover = bool(
                 takeover_success
-                and tracker["incompatible_takeover_requests"] == 0
-                and tracker["policy_incompatible_takeover_requests"] == 0
+                and incompatible_takeover_rate <= 0.15
+                and policy_incompatible_takeover_rate <= 0.15
             )
         clean_finish = bool(
             tracker["good_finish_steps"] > 0
@@ -932,15 +985,15 @@ class RealSimRobotEnv(ParallelEnv):
         clean_episode = bool(clean_takeover and clean_finish and tracker["collision_count"] == 0)
 
         obstacle_clearance_success = 0.0
-        if self.stage_spec.stage_id >= 2 and tracker["obstacle_present_steps"] > 0:
+        if self._episode_stage_id >= 2 and tracker["obstacle_present_steps"] > 0:
             obstacle_clearance_success = float(clean_takeover and tracker["collision_count"] == 0 and tracker["clearance_positive_steps"] > 0)
 
         corridor_keep_rate = 0.0
-        if self.stage_spec.stage_id >= 3 and tracker["obstacle_present_steps"] > 0:
+        if self._episode_stage_id >= 3 and tracker["obstacle_present_steps"] > 0:
             corridor_keep_rate = float(tracker["corridor_keep_steps"] / tracker["obstacle_present_steps"])
 
         dynamic_obstacle_success = 0.0
-        if self.stage_spec.stage_id >= 3 and tracker["dynamic_updates"] > 0:
+        if self._episode_stage_id >= 3 and tracker["dynamic_updates"] > 0:
             dynamic_obstacle_success = float(clean_takeover and tracker["collision_count"] == 0 and corridor_keep_rate >= 0.5)
 
         stability_score = float(
@@ -955,7 +1008,7 @@ class RealSimRobotEnv(ParallelEnv):
         )
 
         return {
-            "stage_id": float(self.stage_spec.stage_id),
+            "stage_id": float(self._episode_stage_id),
             "steps": float(self._episode_step),
             "episode_reward_mean": float(tracker["reward_total"] / steps),
             "episode_reward_total": float(tracker["reward_total"]),
@@ -1000,6 +1053,7 @@ class RealSimRobotEnv(ParallelEnv):
             "dynamic_obstacle_success": dynamic_obstacle_success,
             "corridor_keep_rate": corridor_keep_rate,
             "ball_progress_post_takeover_mean": float(tracker["post_takeover_progress_sum"] / steps),
+            "post_takeover_finishing_rate": float(tracker["post_takeover_finishing_steps"] / steps),
             "stability_score": stability_score,
             "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
             "handoff_override_rate": float(tracker["handoff_override_count"] / steps),
@@ -1088,10 +1142,10 @@ class RealSimRobotEnv(ParallelEnv):
             "obs_feature_names": OBS_FEATURE_NAMES,
             "backend_mode": self.cfg.backend.mode,
             "configured_obs_mode": self.cfg.backend.obs_mode,
-            "stage_id": self.stage_spec.stage_id,
-            "stage_name": self.stage_spec.name,
-            "active_skill_mask": skill_mask(self.stage_spec.active_skill_names),
-            "stage_skill_mask": stage_skill_mask(self.stage_spec.stage_id),
+            "stage_id": self._episode_stage_id,
+            "stage_name": self._episode_stage_spec.name,
+            "active_skill_mask": skill_mask(self._episode_stage_spec.active_skill_names),
+            "stage_skill_mask": stage_skill_mask(self._episode_stage_id),
             "bridge_obs_ready": obs.obs_ready,
             "bridge_frame": obs.frame,
             "obs_export_mode": int(obs.obs_export_mode),

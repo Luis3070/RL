@@ -149,6 +149,10 @@ class EnvConfig:
     parallel_player_numbers: tuple[int, ...] = (PLAYER_NUMBER,)
     active_skill_names: tuple[str, ...] = ("walk", "dribble", "shoot")
     enable_handoff_override: bool = False
+    diverse_stage_resets: bool = True
+    stage0_finish_interleave_probability: float = 0.0
+    post_takeover_progress_enabled: bool = True
+    post_takeover_progress_window_steps: int = 120
     reward_goal_bonus: float = 5.0
     reward_progress_scale: float = 0.003
     reward_step_penalty: float = 0.01
@@ -197,7 +201,7 @@ class TrainConfig:
     learning_rate: float = 1e-4
     discount_factor: float = 0.99
     gae_lambda: float = 0.95
-    entropy_loss_scale: float = 0.01
+    entropy_loss_scale: float = 0.03
     param_log_prob_weight: float = 0.10
     value_loss_scale: float = 0.5
     ratio_clip: float = 0.2
@@ -207,6 +211,10 @@ class TrainConfig:
     checkpoint_interval: int = 5000
     eval_interval: int = 5000
     eval_episodes: int = 8
+    bc_competence_beta_max: float = 0.08
+    bc_competence_beta_min: float = 0.005
+    bc_competence_half_life_evals: float = 3.0
+    bc_param_loss_scale: float = 0.35
     initial_stage_id: int = -1
     max_stage_id: int = 4
     auto_promote: bool = True

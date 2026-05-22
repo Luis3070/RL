@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import importlib
+import copy
+import json
 import os
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -12,6 +13,7 @@ from typing import Any, Dict, Mapping
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
 
 from skrl.envs.wrappers.torch import wrap_env
@@ -44,7 +46,7 @@ class ScriptRunConfig:
     smoke_steps: int = TRAIN.smoke_steps
     train_steps: int = 800_000
     learner_device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
-    stage_id: int = -1
+    stage_id: int = 0
     max_stage_id: int = 4
     save_telemetry: bool = True
     save_plots: bool = True
@@ -59,8 +61,23 @@ class ScriptRunConfig:
     checkpoint_interval: int = 5_000
     eval_episodes: int = 4
     abort_on_wire_fail: bool = False
-    bc_warm_start: bool = False
+    bc_warm_start: bool = True
     bc_checkpoint_path: str | None = None
+    bc_replay: bool = True
+    bc_replay_dataset_path: str | None = None
+    bc_replay_steps: int = 75_000
+    bc_replay_weight: float = 0.03
+    bc_replay_batch_size: int = 128
+    bc_replay_updates: int = 4
+    bc_replay_learning_rate: float = 1e-4
+    bc_beta_max: float = TRAIN.bc_competence_beta_max
+    bc_beta_min: float = TRAIN.bc_competence_beta_min
+    bc_competence_half_life_evals: float = TRAIN.bc_competence_half_life_evals
+    bc_param_loss_scale: float = TRAIN.bc_param_loss_scale
+    diverse_stage_resets: bool = ENV.diverse_stage_resets
+    stage0_finish_interleave_probability: float = ENV.stage0_finish_interleave_probability
+    post_takeover_progress_enabled: bool = ENV.post_takeover_progress_enabled
+    post_takeover_progress_window_steps: int = ENV.post_takeover_progress_window_steps
     parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     visible_parallel_display_base: int = 410
 
@@ -128,9 +145,42 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         capture_eval_steps=_env_bool("RL_CAPTURE_EVAL_STEPS", cfg.capture_eval_steps),
         abort_on_wire_fail=_env_bool("RL_ABORT_ON_WIRE_FAIL", cfg.abort_on_wire_fail),
         bc_warm_start=_env_bool("RL_BC_WARM_START", cfg.bc_warm_start),
+        bc_replay=_env_bool("RL_BC_REPLAY", cfg.bc_replay),
     )
     if bc_checkpoint_path := os.environ.get("RL_BC_CHECKPOINT"):
         cfg = replace(cfg, bc_checkpoint_path=bc_checkpoint_path)
+    if bc_replay_dataset_path := os.environ.get("RL_BC_REPLAY_DATASET"):
+        cfg = replace(cfg, bc_replay_dataset_path=bc_replay_dataset_path)
+    if bc_replay_steps := os.environ.get("RL_BC_REPLAY_STEPS"):
+        cfg = replace(cfg, bc_replay_steps=int(bc_replay_steps))
+    if bc_replay_weight := os.environ.get("RL_BC_REPLAY_WEIGHT"):
+        cfg = replace(cfg, bc_replay_weight=float(bc_replay_weight))
+    if bc_replay_batch_size := os.environ.get("RL_BC_REPLAY_BATCH_SIZE"):
+        cfg = replace(cfg, bc_replay_batch_size=int(bc_replay_batch_size))
+    if bc_replay_updates := os.environ.get("RL_BC_REPLAY_UPDATES"):
+        cfg = replace(cfg, bc_replay_updates=int(bc_replay_updates))
+    if bc_replay_learning_rate := os.environ.get("RL_BC_REPLAY_LR"):
+        cfg = replace(cfg, bc_replay_learning_rate=float(bc_replay_learning_rate))
+    if bc_beta_max := os.environ.get("RL_BC_BETA_MAX"):
+        cfg = replace(cfg, bc_beta_max=float(bc_beta_max))
+    if bc_beta_min := os.environ.get("RL_BC_BETA_MIN"):
+        cfg = replace(cfg, bc_beta_min=float(bc_beta_min))
+    if bc_half_life := os.environ.get("RL_BC_COMPETENCE_HALF_LIFE_EVALS"):
+        cfg = replace(cfg, bc_competence_half_life_evals=float(bc_half_life))
+    if bc_param_loss_scale := os.environ.get("RL_BC_PARAM_LOSS_SCALE"):
+        cfg = replace(cfg, bc_param_loss_scale=float(bc_param_loss_scale))
+    cfg = replace(
+        cfg,
+        diverse_stage_resets=_env_bool("RL_DIVERSE_STAGE_RESETS", cfg.diverse_stage_resets),
+        post_takeover_progress_enabled=_env_bool(
+            "RL_POST_TAKEOVER_PROGRESS_ENABLED",
+            cfg.post_takeover_progress_enabled,
+        ),
+    )
+    if interleave := os.environ.get("RL_STAGE0_FINISH_INTERLEAVE_PROB"):
+        cfg = replace(cfg, stage0_finish_interleave_probability=float(interleave))
+    if finishing_window := os.environ.get("RL_POST_TAKEOVER_PROGRESS_WINDOW_STEPS"):
+        cfg = replace(cfg, post_takeover_progress_window_steps=int(finishing_window))
     if telemetry_tag := os.environ.get("RL_TELEMETRY_TAG"):
         cfg = replace(cfg, telemetry_tag=telemetry_tag)
     if experiment_name := os.environ.get("RL_EXPERIMENT_NAME"):
@@ -338,6 +388,9 @@ class ValueNetwork(DeterministicMixin, Model):
 
 def make_env_config(stage_id: int, backend_cfg: BackendConfig) -> EnvConfig:
     stage_spec = get_stage_spec(stage_id)
+    active_skill_names = stage_spec.active_skill_names
+    if stage_id == 0 and float(getattr(ENV, "stage0_finish_interleave_probability", 0.0)) > 0.0:
+        active_skill_names = get_stage_spec(1).active_skill_names
     stage_backend_cfg = replace(
         backend_cfg,
         simrobot_scene_path=get_stage_scene_path(stage_id, backend_cfg.simrobot_profile),
@@ -346,7 +399,7 @@ def make_env_config(stage_id: int, backend_cfg: BackendConfig) -> EnvConfig:
         ENV,
         stage_id=stage_id,
         backend=stage_backend_cfg,
-        active_skill_names=stage_spec.active_skill_names,
+        active_skill_names=active_skill_names,
     )
 
 
@@ -568,7 +621,7 @@ def _append_csv_row(path: Path, row: Mapping[str, Any]) -> None:
     pd = _pd()
     new_df = pd.DataFrame([dict(row)])
     if path.exists():
-        existing = pd.read_csv(path)
+        existing = pd.read_csv(path, low_memory=False)
         combined = pd.concat([existing, new_df], ignore_index=True, sort=False)
     else:
         combined = new_df
@@ -830,6 +883,7 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "dynamic_obstacle_success",
         "corridor_keep_rate",
         "ball_progress_post_takeover_mean",
+        "post_takeover_finishing_rate",
         "stability_score",
         "skill_projection_rate",
         "handoff_override_rate",
@@ -1032,6 +1086,260 @@ def load_bc_warm_start(
     return resolved_path
 
 
+def clone_frozen_policy_reference(policy: PolicyNetwork) -> PolicyNetwork:
+    reference = copy.deepcopy(policy)
+    reference.eval()
+    for parameter in reference.parameters():
+        parameter.requires_grad_(False)
+    return reference
+
+
+def _latest_teacher_bc_dataset() -> Path | None:
+    root = RUNS_DIR.parent / "runs" / "teacher_bc_dataset"
+    candidates = sorted(root.glob("dataset_*/samples.npz"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _bc_param_mask(skill_ids: torch.Tensor) -> torch.Tensor:
+    masks = torch.zeros((len(SKILL_ORDER), 4), dtype=torch.float32, device=skill_ids.device)
+    masks[SKILL_ORDER.index("walk")] = torch.tensor([1.0, 1.0, 1.0, 0.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("dribble")] = torch.tensor([0.0, 0.0, 1.0, 0.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("shoot")] = torch.tensor([1.0, 1.0, 1.0, 0.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("pass")] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("block")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("mark")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
+    masks[SKILL_ORDER.index("observe")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
+    return masks[skill_ids]
+
+
+def _stage_skill_logits(skill_logits: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+    masks = []
+    for stage_id in stages.detach().cpu().tolist():
+        masks.append(skill_mask(get_stage_spec(int(stage_id)).active_skill_names))
+    stage_masks = torch.as_tensor(np.asarray(masks), dtype=skill_logits.dtype, device=skill_logits.device)
+    return skill_logits.masked_fill(stage_masks <= 0.0, -1.0e9)
+
+
+class BCReplayRegularizer:
+    def __init__(
+        self,
+        policy: PolicyNetwork,
+        reference_policy: PolicyNetwork,
+        *,
+        dataset_path: str | Path | None,
+        device: str,
+        learning_rate: float,
+        batch_size: int,
+        beta_max: float,
+        beta_min: float,
+        param_loss_scale: float,
+        updates_per_rollout: int,
+        seed: int,
+    ):
+        resolved_path = Path(dataset_path).expanduser() if dataset_path else _latest_teacher_bc_dataset()
+        if resolved_path is None:
+            raise FileNotFoundError(
+                "RL_BC_REPLAY=1 was requested, but no teacher BC dataset was found. "
+                "Set RL_BC_REPLAY_DATASET=/path/to/samples.npz or run teacher_dataset.py first."
+            )
+        resolved_path = resolved_path.resolve()
+        data = np.load(resolved_path, allow_pickle=True)
+        observations = data["observations"].astype(np.float32)
+        actions = data["actions"].astype(np.float32)
+        stages = data["stages"].astype(np.int64)
+        weights = data["weights"].astype(np.float32)
+        valid = np.flatnonzero(weights > 0.0)
+        if valid.size == 0:
+            raise ValueError(f"BC replay dataset has no positive-weight samples: {resolved_path}")
+        self.path = resolved_path
+        self.policy = policy
+        self.reference_policy = reference_policy
+        self.device = device
+        self.batch_size = int(batch_size)
+        self.base_learning_rate = float(learning_rate)
+        self.beta_max = max(float(beta_max), 0.0)
+        self.beta_min = max(float(beta_min), 0.0)
+        self.param_loss_scale = float(param_loss_scale)
+        self.updates_per_rollout = int(updates_per_rollout)
+        self.current_beta = self.beta_max
+        self.rng = np.random.default_rng(seed)
+        self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=self.base_learning_rate, weight_decay=1e-5)
+        self.observations = torch.as_tensor(observations, dtype=torch.float32, device=device)
+        self.actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
+        self.stages = torch.as_tensor(stages, dtype=torch.long, device=device)
+        self.weights = torch.as_tensor(weights, dtype=torch.float32, device=device)
+        self.indices_by_stage_skill: dict[tuple[int, int], np.ndarray] = {}
+        skill_ids = np.clip(np.rint(actions[:, 0]).astype(np.int64), 0, len(SKILL_ORDER) - 1)
+        for stage_id in sorted(set(stages[valid].tolist())):
+            for skill_id in sorted(set(skill_ids[valid].tolist())):
+                idx = valid[(stages[valid] == stage_id) & (skill_ids[valid] == skill_id)]
+                if idx.size:
+                    self.indices_by_stage_skill[(int(stage_id), int(skill_id))] = idx
+        self.available_stages = sorted({stage_id for stage_id, _ in self.indices_by_stage_skill})
+        self.skill_class_weights = self._skill_class_weights(skill_ids[valid], weights[valid])
+
+    def set_beta(self, beta: float) -> None:
+        self.current_beta = float(np.clip(beta, self.beta_min, self.beta_max))
+        lr_scale = self.current_beta / max(self.beta_max, 1e-8)
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.base_learning_rate * lr_scale
+
+    @staticmethod
+    def _skill_class_weights(skill_ids: np.ndarray, weights: np.ndarray) -> torch.Tensor:
+        counts = np.zeros(len(SKILL_ORDER), dtype=np.float32)
+        for skill_id, weight in zip(skill_ids, weights):
+            counts[int(skill_id)] += float(weight)
+        nonzero = counts[counts > 0.0]
+        if nonzero.size == 0:
+            return torch.ones(len(SKILL_ORDER), dtype=torch.float32)
+        median = float(np.median(nonzero))
+        class_weights = np.ones(len(SKILL_ORDER), dtype=np.float32)
+        active = counts > 0.0
+        class_weights[active] = np.sqrt(median / np.maximum(counts[active], 1.0))
+        return torch.as_tensor(np.clip(class_weights, 0.35, 4.0), dtype=torch.float32)
+
+    def _skill_mix(self, stage_id: int) -> tuple[tuple[str, float], ...]:
+        if stage_id <= 0:
+            return (("dribble", 0.55), ("walk", 0.40), ("stand", 0.05))
+        if stage_id == 1:
+            return (("walk", 0.42), ("dribble", 0.38), ("shoot", 0.20))
+        if stage_id == 2:
+            return (("walk", 0.42), ("dribble", 0.33), ("shoot", 0.25))
+        return (("dribble", 0.45), ("walk", 0.35), ("shoot", 0.20))
+
+    def _sample_indices(self, stage_id: int) -> np.ndarray:
+        chunks: list[np.ndarray] = []
+        remaining = self.batch_size
+        if stage_id not in self.available_stages:
+            earlier_stages = [candidate for candidate in self.available_stages if candidate <= stage_id]
+            stage_id = earlier_stages[-1] if earlier_stages else self.available_stages[0]
+        for skill_name, fraction in self._skill_mix(stage_id):
+            skill_id = SKILL_ORDER.index(skill_name)
+            candidates = self.indices_by_stage_skill.get((stage_id, skill_id))
+            if candidates is None or candidates.size == 0:
+                continue
+            count = max(1, int(round(self.batch_size * fraction)))
+            count = min(count, remaining) if remaining > 0 else count
+            probs = self.weights[candidates].detach().cpu().numpy().astype(np.float64)
+            probs = probs / max(float(probs.sum()), 1e-12)
+            chunks.append(self.rng.choice(candidates, size=count, replace=True, p=probs))
+            remaining -= count
+        if not chunks:
+            candidates = np.concatenate(
+                [idx for (candidate_stage, _), idx in self.indices_by_stage_skill.items() if candidate_stage == stage_id]
+            )
+            chunks.append(self.rng.choice(candidates, size=self.batch_size, replace=True))
+        batch = np.concatenate(chunks)
+        if batch.size < self.batch_size:
+            extra = self.rng.choice(batch, size=self.batch_size - batch.size, replace=True)
+            batch = np.concatenate([batch, extra])
+        self.rng.shuffle(batch)
+        return batch[: self.batch_size]
+
+    def _loss(self, idx: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        obs = self.observations[idx]
+        actions = self.actions[idx]
+        stages = self.stages[idx]
+        sample_weights = self.weights[idx]
+        skill_targets = torch.clamp(actions[:, 0].round().long(), min=0, max=len(SKILL_ORDER) - 1)
+        skill_logits, outputs = self.policy.compute({"observations": obs}, role="policy")
+        with torch.no_grad():
+            reference_logits, reference_outputs = self.reference_policy.compute({"observations": obs}, role="policy")
+        masked_logits = _stage_skill_logits(skill_logits, stages)
+        reference_masked_logits = _stage_skill_logits(reference_logits, stages)
+        current_log_probs = F.log_softmax(masked_logits, dim=-1)
+        current_probs = current_log_probs.exp()
+        reference_log_probs = F.log_softmax(reference_masked_logits, dim=-1)
+        kl_per_sample = torch.sum(current_probs * (current_log_probs - reference_log_probs), dim=-1)
+        ce = F.cross_entropy(
+            masked_logits,
+            skill_targets,
+            weight=self.skill_class_weights.to(device=obs.device),
+            reduction="none",
+        )
+        param_mask = _bc_param_mask(skill_targets)
+        finish_skill_mask = (
+            (skill_targets == SKILL_ORDER.index("dribble"))
+            | (skill_targets == SKILL_ORDER.index("shoot"))
+        ).to(dtype=sample_weights.dtype)
+        param_raw = F.mse_loss(outputs["param_mean"], reference_outputs["param_mean"], reduction="none") * param_mask
+        param_loss_per_sample = param_raw.sum(dim=-1) / torch.clamp(param_mask.sum(dim=-1), min=1.0)
+        param_active = (param_mask.sum(dim=-1) > 0.0).to(dtype=sample_weights.dtype) * finish_skill_mask
+        normalized_weights = sample_weights / torch.clamp(sample_weights.mean(), min=1e-6)
+        kl_loss = (kl_per_sample * normalized_weights).mean()
+        skill_loss = (ce * normalized_weights).mean()
+        param_loss = (param_loss_per_sample * normalized_weights * param_active).sum() / torch.clamp(
+            (normalized_weights * param_active).sum(), min=1.0
+        )
+        loss = kl_loss + self.param_loss_scale * param_loss
+        with torch.no_grad():
+            predictions = torch.argmax(masked_logits, dim=-1)
+            accuracy = (predictions == skill_targets).to(dtype=torch.float32)
+            weighted_accuracy = (accuracy * sample_weights).sum() / torch.clamp(sample_weights.sum(), min=1e-6)
+        return loss, {
+            "loss": float(loss.detach().cpu().item()),
+            "kl_loss": float(kl_loss.detach().cpu().item()),
+            "skill_loss": float(skill_loss.detach().cpu().item()),
+            "param_loss": float(param_loss.detach().cpu().item()),
+            "skill_acc": float(weighted_accuracy.detach().cpu().item()),
+        }
+
+    def step(self, *, stage_id: int, beta: float | None = None) -> dict[str, float]:
+        if beta is not None:
+            self.set_beta(beta)
+        if self.current_beta <= 0.0 or self.updates_per_rollout <= 0:
+            return {}
+        metrics: list[dict[str, float]] = []
+        self.policy.train()
+        for _ in range(max(1, self.updates_per_rollout)):
+            batch = self._sample_indices(stage_id)
+            idx = torch.as_tensor(batch, dtype=torch.long, device=self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss, row = self._loss(idx)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            row["beta"] = float(self.current_beta)
+            metrics.append(row)
+        return {
+            "loss": float(np.mean([row["loss"] for row in metrics])),
+            "kl_loss": float(np.mean([row["kl_loss"] for row in metrics])),
+            "param_loss": float(np.mean([row["param_loss"] for row in metrics])),
+            "skill_acc": float(np.mean([row["skill_acc"] for row in metrics])),
+            "beta": float(self.current_beta),
+        }
+
+
+class BCCompetenceGate:
+    def __init__(self, *, beta_max: float, beta_min: float, half_life_evals: float):
+        self.beta_max = max(float(beta_max), 0.0)
+        self.beta_min = max(float(beta_min), 0.0)
+        self.competence_ema = 0.0
+        self.initialized = False
+        half_life = max(float(half_life_evals), 1e-6)
+        self.alpha = 1.0 - float(np.exp(np.log(0.5) / half_life))
+
+    def beta(self) -> float:
+        raw = self.beta_max * (1.0 - self.competence_ema)
+        return float(np.clip(raw, self.beta_min, self.beta_max))
+
+    def update(self, summary: Mapping[str, object]) -> dict[str, float]:
+        competence = float(summary.get("dribble_compat_rate", 0.0))
+        if competence <= 0.0:
+            competence = float(summary.get("clean_takeover_rate", 0.0))
+        competence = float(np.clip(competence, 0.0, 1.0))
+        if not self.initialized:
+            self.competence_ema = competence
+            self.initialized = True
+        else:
+            self.competence_ema = (1.0 - self.alpha) * self.competence_ema + self.alpha * competence
+        return {
+            "bc_competence": competence,
+            "bc_competence_ema": float(self.competence_ema),
+            "bc_beta": self.beta(),
+        }
+
+
 def print_eval_summary(
     stage_id: int,
     timestep: int,
@@ -1055,6 +1363,8 @@ def print_eval_summary(
     ball_trusted_rate = float(summary.get("ball_trusted_rate", 0.0))
     ball_rescued_rate = float(summary.get("ball_rescued_rate", 0.0))
     ball_confidence_score_mean = float(summary.get("ball_confidence_score_mean", 0.0))
+    bc_beta = float(summary.get("bc_beta", 0.0))
+    bc_competence_ema = float(summary.get("bc_competence_ema", 0.0))
     policy_loss = _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss")
     value_loss = _extract_agent_stat(agent, f"Loss / Value loss ({agent_id})", "Loss / Value loss", "value_loss")
     entropy = _extract_agent_stat(
@@ -1075,6 +1385,7 @@ def print_eval_summary(
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
         f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
         f"ball_conf={ball_confidence_score_mean:.3f} "
+        f"bc_beta={bc_beta:.4f} bc_ema={bc_competence_ema:.3f} "
         f"time_to_takeover={mean_time_to_takeover:.1f} stability={stability_score:.3f} "
         f"policy_loss={policy_loss:.4f} value_loss={value_loss:.4f} entropy={entropy:.4f} "
         f"wire={wire_audit.get('wire_audit_status', 'UNKNOWN')}",
@@ -1372,6 +1683,17 @@ def run_training(
     abort_on_wire_fail: bool = False,
     bc_warm_start: bool = False,
     bc_checkpoint_path: str | None = None,
+    bc_replay: bool = False,
+    bc_replay_dataset_path: str | None = None,
+    bc_replay_steps: int = 75_000,
+    bc_replay_weight: float = 0.03,
+    bc_replay_batch_size: int = 128,
+    bc_replay_updates: int = 1,
+    bc_replay_learning_rate: float = 3e-5,
+    bc_beta_max: float = TRAIN.bc_competence_beta_max,
+    bc_beta_min: float = TRAIN.bc_competence_beta_min,
+    bc_competence_half_life_evals: float = TRAIN.bc_competence_half_life_evals,
+    bc_param_loss_scale: float = TRAIN.bc_param_loss_scale,
 ) -> None:
     backend_cfg = replace(
         ENV.backend,
@@ -1386,6 +1708,7 @@ def run_training(
     env_cfg = make_env_config(current_stage, backend_cfg)
     raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
     agent, checkpoint_models = build_mappo(wrapped_env, device, TRAIN, env_cfg.active_skill_names)
+    frozen_bc_policy = None
     if bc_warm_start:
         loaded_bc_path = load_bc_warm_start(
             checkpoint_models,
@@ -1393,7 +1716,35 @@ def run_training(
             device=device,
             active_skill_names=env_cfg.active_skill_names,
         )
+        frozen_bc_policy = clone_frozen_policy_reference(checkpoint_models["policy"])
         print(f"[bc-warm-start] loaded={loaded_bc_path}", flush=True)
+    elif bc_replay:
+        frozen_bc_policy = clone_frozen_policy_reference(checkpoint_models["policy"])
+    bc_regularizer = None
+    bc_gate = BCCompetenceGate(
+        beta_max=bc_beta_max,
+        beta_min=bc_beta_min,
+        half_life_evals=bc_competence_half_life_evals,
+    )
+    if bc_replay:
+        bc_regularizer = BCReplayRegularizer(
+            checkpoint_models["policy"],
+            frozen_bc_policy,
+            dataset_path=bc_replay_dataset_path,
+            device=device,
+            learning_rate=bc_replay_learning_rate,
+            batch_size=bc_replay_batch_size,
+            beta_max=bc_beta_max,
+            beta_min=bc_beta_min,
+            param_loss_scale=bc_param_loss_scale,
+            updates_per_rollout=bc_replay_updates,
+            seed=TRAIN.seed + 991,
+        )
+        print(
+            f"[bc-replay] dataset={bc_regularizer.path} beta=[{bc_beta_min:.4f},{bc_beta_max:.4f}] "
+            f"batch={bc_replay_batch_size} updates={bc_replay_updates} lr={bc_replay_learning_rate}",
+            flush=True,
+        )
     trainer_cfg = SequentialTrainerCfg(
         timesteps=timesteps,
         headless=True,
@@ -1453,6 +1804,17 @@ def run_training(
             agent.post_interaction(timestep=timestep, timesteps=timesteps)
 
             if (timestep + 1) % TRAIN.rollout_steps == 0:
+                if bc_regularizer is not None:
+                    bc_metrics = bc_regularizer.step(stage_id=current_stage, beta=bc_gate.beta())
+                    replay_log_interval = max(TRAIN.rollout_steps, TRAIN.rollout_steps * 20)
+                    if bc_metrics and (timestep + 1) % replay_log_interval == 0:
+                        print(
+                            f"[bc-replay] step={timestep + 1} stage={current_stage} "
+                            f"beta={bc_metrics['beta']:.4f} loss={bc_metrics['loss']:.4f} "
+                            f"kl={bc_metrics['kl_loss']:.4f} param={bc_metrics['param_loss']:.4f} "
+                            f"skill_acc={bc_metrics['skill_acc']:.3f}",
+                            flush=True,
+                        )
                 _ploss = _extract_agent_stat(
                     agent,
                     f"Loss / Policy loss ({agent_id})",
@@ -1499,7 +1861,16 @@ def run_training(
                 timesteps=timesteps,
             )
             wire_audit = build_wire_audit(eval_summary, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
+            bc_gate_metrics = bc_gate.update(eval_summary)
+            eval_summary.update(bc_gate_metrics)
             print_eval_summary(current_stage, timestep + 1, eval_summary, agent, wire_audit=wire_audit)
+            if bc_regularizer is not None:
+                bc_regularizer.set_beta(float(bc_gate_metrics["bc_beta"]))
+                print(
+                    f"[bc-gate] step={timestep + 1} competence={bc_gate_metrics['bc_competence']:.3f} "
+                    f"ema={bc_gate_metrics['bc_competence_ema']:.3f} beta={bc_gate_metrics['bc_beta']:.4f}",
+                    flush=True,
+                )
             if telemetry_paths is not None:
                 eval_row = _build_eval_summary_row(
                     timestep=timestep + 1,
@@ -1557,6 +1928,8 @@ def run_training(
                 raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
                 if hasattr(checkpoint_models["policy"], "set_active_skill_names"):
                     checkpoint_models["policy"].set_active_skill_names(env_cfg.active_skill_names)
+                if frozen_bc_policy is not None and hasattr(frozen_bc_policy, "set_active_skill_names"):
+                    frozen_bc_policy.set_active_skill_names(env_cfg.active_skill_names)
                 observations, infos = wrapped_env.reset()
     finally:
         wrapped_env.close()
@@ -1579,6 +1952,10 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         ENV,
         max_episode_steps=run_cfg.max_episode_steps,
         parallel_player_numbers=run_cfg.parallel_player_numbers,
+        diverse_stage_resets=run_cfg.diverse_stage_resets,
+        stage0_finish_interleave_probability=run_cfg.stage0_finish_interleave_probability,
+        post_takeover_progress_enabled=run_cfg.post_takeover_progress_enabled,
+        post_takeover_progress_window_steps=run_cfg.post_takeover_progress_window_steps,
     )
     backend_cfg = replace(
         effective_env.backend,
@@ -1603,7 +1980,11 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         f"embedded_3d_preflight={int(bool(run_cfg.embedded_3d_preflight))} "
         f"train_steps={effective_train.trainer_timesteps} rollout={effective_train.rollout_steps} "
         f"eval_interval={effective_train.eval_interval} checkpoint_interval={effective_train.checkpoint_interval} "
-        f"bc_warm_start={int(bool(run_cfg.bc_warm_start))}",
+        f"bc_warm_start={int(bool(run_cfg.bc_warm_start))} "
+        f"bc_replay={int(bool(run_cfg.bc_replay))} "
+        f"bc_beta=[{run_cfg.bc_beta_min:.4f},{run_cfg.bc_beta_max:.4f}] "
+        f"diverse_resets={int(bool(run_cfg.diverse_stage_resets))} "
+        f"post_takeover_progress={int(bool(run_cfg.post_takeover_progress_enabled))}",
         flush=True,
     )
 
@@ -1629,8 +2010,6 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 telemetry_paths=telemetry_paths,
                 save_plots=run_cfg.save_plots,
                 abort_on_wire_fail=run_cfg.abort_on_wire_fail,
-                bc_warm_start=run_cfg.bc_warm_start,
-                bc_checkpoint_path=run_cfg.bc_checkpoint_path,
             )
         else:
             run_training(
@@ -1647,6 +2026,19 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 telemetry_paths=telemetry_paths,
                 save_plots=run_cfg.save_plots,
                 abort_on_wire_fail=run_cfg.abort_on_wire_fail,
+                bc_warm_start=run_cfg.bc_warm_start,
+                bc_checkpoint_path=run_cfg.bc_checkpoint_path,
+                bc_replay=run_cfg.bc_replay,
+                bc_replay_dataset_path=run_cfg.bc_replay_dataset_path,
+                bc_replay_steps=run_cfg.bc_replay_steps,
+                bc_replay_weight=run_cfg.bc_replay_weight,
+                bc_replay_batch_size=run_cfg.bc_replay_batch_size,
+                bc_replay_updates=run_cfg.bc_replay_updates,
+                bc_replay_learning_rate=run_cfg.bc_replay_learning_rate,
+                bc_beta_max=run_cfg.bc_beta_max,
+                bc_beta_min=run_cfg.bc_beta_min,
+                bc_competence_half_life_evals=run_cfg.bc_competence_half_life_evals,
+                bc_param_loss_scale=run_cfg.bc_param_loss_scale,
             )
     finally:
         if "runtime" in locals() and runtime is not None:
