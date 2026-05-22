@@ -103,20 +103,20 @@ _STAGE_SPECS = {
             progress_ball=1.35,
             align_ball=0.9,
             enter_takeover=2.4,
-            hold_takeover=0.55,
-            approach_ball=0.16,
-            good_walk=0.70,
+            hold_takeover=0.90,
+            approach_ball=0.10,
+            good_walk=0.30,
             bad_walk=-0.65,
             idle_stand=-0.35,
-            walk_persistence=0.14,
-            good_dribble=1.00,
-            bad_dribble=-1.15,
+            walk_persistence=0.05,
+            good_dribble=1.30,
+            bad_dribble=-0.85,
             projection_penalty=-0.10,
             skill_switch=-0.05,
             thrash=-1.0,
             goal=2.0,
             timeout=-2.0,
-            ball_progress_post_takeover=0.35,
+            ball_progress_post_takeover=0.80,
             preferred_skill_match=0.10,
             dribble_handoff=1.60,
             missed_dribble_handoff=-0.45,
@@ -342,6 +342,7 @@ def _sample_pose_ball_pair(
     robot_xy_bounds: tuple[float, float, float, float],
     line_angle_range_deg: float,
     heading_noise_deg: float,
+    ball_jitter_mm: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     x_min, x_max, y_min, y_max = robot_xy_bounds
     radius_min = min(float(radius_min_mm), float(radius_max_mm))
@@ -350,11 +351,21 @@ def _sample_pose_ball_pair(
         robot_y = float(rng.uniform(y_min, y_max))
         radius = float(rng.uniform(radius_min, radius_max_mm))
         line_angle = float(rng.uniform(-math.radians(line_angle_range_deg), math.radians(line_angle_range_deg)))
-        ball_x = robot_x + radius * math.cos(line_angle)
-        ball_y = robot_y + radius * math.sin(line_angle)
+        jitter_x = float(rng.uniform(-ball_jitter_mm, ball_jitter_mm)) if ball_jitter_mm > 0.0 else 0.0
+        jitter_y = float(rng.uniform(-ball_jitter_mm, ball_jitter_mm)) if ball_jitter_mm > 0.0 else 0.0
+        ball_x = robot_x + radius * math.cos(line_angle) + jitter_x
+        ball_y = robot_y + radius * math.sin(line_angle) + jitter_y
         if abs(ball_x) > FIELD_X_HALF - 200.0 or abs(ball_y) > FIELD_Y_HALF - 200.0:
             continue
-        robot_theta = line_angle + float(rng.uniform(-math.radians(heading_noise_deg), math.radians(heading_noise_deg)))
+        # For the widened stage-0/1 reset regime, vary whether the robot starts
+        # aligned to the ball approach line or partly to the goal-ball line.
+        goal_heading = math.atan2(-ball_y, GOAL_X - ball_x)
+        heading_center = (
+            line_angle
+            if heading_noise_deg <= 18.0
+            else float(rng.uniform(min(line_angle, goal_heading), max(line_angle, goal_heading)))
+        )
+        robot_theta = heading_center + float(rng.uniform(-math.radians(heading_noise_deg), math.radians(heading_noise_deg)))
         return (
             np.array([ball_x, ball_y], dtype=np.float32),
             np.array([robot_x, robot_y], dtype=np.float32),
@@ -465,6 +476,20 @@ def init_dynamic_world_state(stage_id: int, world_spec: WorldSpec, rng: np.rando
 
 
 def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpec:
+    # Legacy entry point: preserves the original (narrow) reset distribution for
+    # offline callers (teacher_dataset.py, heuristic_agent_experiment.py) so BC
+    # dataset generation stays reproducible. The RL training env opts into the
+    # widened WS2 regime explicitly via sample_stage_world_spec_with_options(
+    # diverse_resets=cfg.diverse_stage_resets).
+    return sample_stage_world_spec_with_options(stage_id, rng, diverse_resets=False)
+
+
+def sample_stage_world_spec_with_options(
+    stage_id: int,
+    rng: np.random.Generator,
+    *,
+    diverse_resets: bool = True,
+) -> WorldSpec:
     stage = get_stage_spec(stage_id)
     if stage.stage_id == -1:
         ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
@@ -482,8 +507,9 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
             radius_min_mm=stage.ball_radius_min_mm or 700.0,
             radius_max_mm=stage.ball_radius_max_mm or 1600.0,
             robot_xy_bounds=(-1500.0, -500.0, -550.0, 550.0),
-            line_angle_range_deg=18.0,
-            heading_noise_deg=12.0,
+            line_angle_range_deg=42.0 if diverse_resets else 18.0,
+            heading_noise_deg=35.0 if diverse_resets else 12.0,
+            ball_jitter_mm=80.0 if diverse_resets else 0.0,
         )
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 1:
@@ -492,8 +518,9 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
             radius_min_mm=stage.ball_radius_min_mm or 900.0,
             radius_max_mm=stage.ball_radius_max_mm or 2400.0,
             robot_xy_bounds=(-2100.0, -550.0, -800.0, 800.0),
-            line_angle_range_deg=28.0,
-            heading_noise_deg=18.0,
+            line_angle_range_deg=55.0 if diverse_resets else 28.0,
+            heading_noise_deg=45.0 if diverse_resets else 18.0,
+            ball_jitter_mm=100.0 if diverse_resets else 0.0,
         )
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 2:
@@ -701,11 +728,11 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             _ball_semantics_ok(metrics, trusted_min=0.65, rescued_max=0.30, confidence_min=0.55)
             and _behavior_is_stable(metrics, thrash_max=0.08, collision_max=0.10)
             and _metric(metrics, "episode_reward_mean", -999.0) >= -0.25
-            and _metric(metrics, "stability_score") >= 0.45
-            and _metric(metrics, "takeover_success_rate") >= 0.80
-            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 65.0
-            and _policy_incompatible_takeover_rate(metrics) <= 0.08
-            and _metric(metrics, "dribble_compat_rate") >= 0.50
+            and _metric(metrics, "stability_score") >= 0.50
+            and _metric(metrics, "takeover_success_rate") >= 0.75
+            and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 95.0
+            and _policy_incompatible_takeover_rate(metrics) <= 0.12
+            and _metric(metrics, "dribble_compat_rate") >= 0.55
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
             and _metric(metrics, "handoff_override_rate", 1.0) <= 0.08
             and _metric(metrics, "target_repair_rate", 1.0) <= 0.20
