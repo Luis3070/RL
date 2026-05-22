@@ -14,6 +14,19 @@ EPS = 1e-6
 ACTIVE_SKILL_NAMES = ("walk", "dribble", "shoot")
 BALL_VISIBLE_MAX_AGE_MS = 1200.0
 BALL_TRUSTED_MAX_AGE_MS = 600.0
+# Number of steps a takeover stays "committed" after the last trusted-takeover
+# step, so a brief perception dropout doesn't flip the dribble reward sign while
+# the ball is still geometrically in front of the robot.
+TAKEOVER_GRACE_STEPS = 6
+
+# good_dribble saturation: full per-step credit while establishing and briefly
+# holding the handoff, then taper toward a floor so the agent cannot farm
+# unbounded reward by camping in the dribble skill (which curbs over-dribbling and
+# keeps the clean walk->dribble handoff the dominant behaviour). The run resets to
+# 0 whenever the executed skill changes, so each fresh handoff earns full credit.
+GOOD_DRIBBLE_FULL_STEPS = 8
+GOOD_DRIBBLE_TAPER_STEPS = 24.0
+GOOD_DRIBBLE_FLOOR = 0.3
 
 _APPROACH_OFFSET_X = -210.0   # mm: ideal approach offset from ball along field-x
 _APPROACH_RADIUS_MM = 600.0   # mm: distance at which approach quality → 0
@@ -137,6 +150,8 @@ class StepContext:
     policy_skill_prob_dribble: float = 0.0
     policy_skill_prob_shoot: float = 0.0
     handoff_override_applied: bool = False
+    takeover_committed: bool = False
+    post_takeover_finishing_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,6 +169,7 @@ class StepEvaluation:
     terms: Dict[str, float]
     weighted_terms: Dict[str, float]
     total_reward: float
+    stable_trusted_takeover: bool = False
 
     def as_dict(self) -> Dict[str, object]:
         return {
@@ -222,6 +238,19 @@ def is_takeover_envelope(features: TakeoverFeatures) -> bool:
     )
 
 
+def is_geometric_takeover(features: TakeoverFeatures) -> bool:
+    """Distance/angle-only takeover proximity, independent of ball freshness/trust.
+
+    Used to latch takeover commitment across brief perception dropouts: once the
+    robot has committed to a close ball, geometry (not the perception trust flag)
+    decides whether it is still "on" the ball.
+    """
+    return (
+        features.d_ball_mm <= 450.0
+        and abs(features.a_ball_rad) <= math.radians(35.0)
+    )
+
+
 def is_walk_zone(features: TakeoverFeatures) -> bool:
     # seen_pct removed: same ci-30 incompatibility as is_takeover_envelope.
     return (
@@ -279,6 +308,24 @@ def is_local_thrash(skill_history: Sequence[str]) -> bool:
             ("dribble", "walk", "dribble"),
         ),
     )
+
+
+def _trailing_skill_run(history: Sequence[str], name: str) -> int:
+    """Length of the trailing run of ``name`` at the end of ``history`` (incl. current step)."""
+    run = 0
+    for skill in reversed(tuple(history)):
+        if skill == name:
+            run += 1
+        else:
+            break
+    return run
+
+
+def _dribble_saturation(prior_run: int) -> float:
+    """Per-step good_dribble multiplier: 1.0 for the first GOOD_DRIBBLE_FULL_STEPS,
+    then a linear taper down to GOOD_DRIBBLE_FLOOR over GOOD_DRIBBLE_TAPER_STEPS."""
+    over = max(0, prior_run - GOOD_DRIBBLE_FULL_STEPS)
+    return clip(1.0 - over / GOOD_DRIBBLE_TAPER_STEPS, GOOD_DRIBBLE_FLOOR, 1.0)
 
 
 def heuristic_bias(step_ctx: StepContext) -> Dict[str, float]:
@@ -394,17 +441,27 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     policy_intends_dribble = step_ctx.policy_skill_name == "dribble"
     policy_intends_finish = policy_intends_dribble or step_ctx.policy_skill_name == "shoot"
 
+    # Takeover commitment latch (set by the environment from recent trusted
+    # takeovers + current geometry). While committed, treat trust/confidence as
+    # satisfied and suppress perception penalties so a brief ball-trust dropout
+    # does not flip the dribble reward sign for a correctly-committed robot.
+    committed = bool(step_ctx.takeover_committed)
+    executing_finish = step_ctx.skill_name in {"dribble", "shoot"}
+    trusted_or_committed = ball_trusted or committed
+    confident_or_committed = ball_confident or committed
+    commit_scale = max(fine_scale, 0.6) if committed else fine_scale
+
     progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * progress_scale
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
     enter_takeover = 1.0 if ball_confident and stable_trusted_ball and takeover_envelope and not prev_takeover_envelope else 0.0
     # Walk in the takeover envelope earns bad_walk; hold_takeover only fires for
     # dribble/shoot so the gradient clearly pushes away from walk.
     hold_takeover = (
-        fine_scale
+        commit_scale
         if (
-            ball_confident
-            and stable_trusted_ball
-            and takeover_envelope
+            confident_or_committed
+            and (stable_trusted_ball or committed)
+            and (takeover_envelope or committed)
             and step_ctx.skill_name != "walk"
             and policy_intends_finish
         )
@@ -456,22 +513,26 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         else 0.0
     )
 
+    # Saturating credit: full while establishing/holding the handoff, then tapered
+    # so the policy cannot farm unbounded reward by camping in the dribble skill.
     good_dribble = (
-        fine_scale
+        commit_scale * _dribble_saturation(_trailing_skill_run(step_ctx.skill_history, "dribble"))
         if (
             step_ctx.skill_name == "dribble"
             and policy_intends_dribble
             and not step_ctx.projection_applied
-            and ball_confident
-            and ball_trusted
-            and early_dribble_zone
+            and confident_or_committed
+            and trusted_or_committed
+            and (early_dribble_zone or committed)
         )
         else 0.0
     )
-    bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not early_dribble_zone else 0.0
-    if step_ctx.skill_name == "dribble" and walk_zone and not takeover_envelope:
+    # Geometric out-of-zone dribbling stays penalized (perception-independent), but
+    # the trust surcharge is waived while committed: don't punish a brief dropout.
+    bad_dribble = 1.0 if step_ctx.skill_name == "dribble" and not (early_dribble_zone or committed) else 0.0
+    if step_ctx.skill_name == "dribble" and walk_zone and not takeover_envelope and not committed:
         bad_dribble += 0.45 if step_ctx.stage == 0 else 0.75
-    if step_ctx.skill_name == "dribble" and not ball_trusted:
+    if step_ctx.skill_name == "dribble" and not ball_trusted and not committed:
         bad_dribble += 0.5 if ball_rescued else 0.25
 
     good_shoot = fine_scale if step_ctx.skill_name == "shoot" and ball_confident and ball_trusted and shoot_zone else 0.0
@@ -510,11 +571,19 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
 
     corridor_keep = 1.0 if step_ctx.stage >= 3 and step_ctx.corridor_open else 0.0
 
+    # Latched post-takeover progress: credit goalward ball movement throughout the
+    # environment's finishing window, not only while instantaneously in-envelope.
+    # Still require trusted, non-rescued ball on both frames to avoid rewarding
+    # synthetic/rescued perception drift.
     ball_progress_post_takeover = 0.0
-    if ball_confident and ball_trusted and takeover_envelope:
+    if step_ctx.post_takeover_finishing_active and stable_trusted_ball:
         prev_goal_dist = goal_ball_distance_mm(prev_obs)
         cur_goal_dist = goal_ball_distance_mm(step_ctx.obs)
-        ball_progress_post_takeover = clip((prev_goal_dist - cur_goal_dist) / 300.0, -1.0, 1.0) * fine_scale
+        goalward_progress = prev_goal_dist - cur_goal_dist
+        ball_not_behind_robot = float(step_ctx.obs.ball_rel_x) > -150.0
+        ball_near_play = cur_features.d_ball_mm <= 1400.0
+        if goalward_progress > 0.0 and ball_not_behind_robot and ball_near_play:
+            ball_progress_post_takeover = clip(goalward_progress / 300.0, 0.0, 0.75) * progress_scale
 
     first_to_ball_reward = 1.0 if step_ctx.stage >= 4 and step_ctx.first_to_ball else 0.0
     bad_duel_penalty = 1.0 if step_ctx.stage >= 4 and step_ctx.bad_duel else 0.0
@@ -552,8 +621,11 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         )
         else 0.0
     )
+    # Waive the rescued-ball penalty for a robot actively finishing inside a
+    # committed takeover: the perception blip is not its fault and penalizing it
+    # would teach the policy to abandon the handoff whenever trust flickers.
     rescued_severity = 0.0
-    if ball_rescued:
+    if ball_rescued and not (committed and executing_finish):
         if cur_features.d_ball_mm <= 450.0:
             rescued_severity = 1.0
         elif cur_features.d_ball_mm <= 700.0:
@@ -570,7 +642,9 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     collapsed_ball = 1.0 if bool(step_ctx.obs.ball_observation_collapsed) else 0.0
     corrected_ball = (
         1.0
-        if bool(step_ctx.obs.corrected_exported_ball) and not bool(step_ctx.obs.ball_observation_collapsed)
+        if bool(step_ctx.obs.corrected_exported_ball)
+        and not bool(step_ctx.obs.ball_observation_collapsed)
+        and not (committed and executing_finish)
         else 0.0
     )
     too_close_walk = (
@@ -589,7 +663,12 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         if (
             step_ctx.stage in {0, 1}
             and stable_trusted_takeover
-            and step_ctx.policy_skill_name == "walk"
+            # Any non-finish skill in a stable takeover is a missed handoff: standing
+            # on the ball must be penalized like walking, otherwise "stand" is a
+            # zero-reward / zero-penalty escape that dodges bad_walk and bad_dribble
+            # (the agent learns to park on the ball -> policy_incompat stays high,
+            # clean_takeover stays 0). Mirrors environment.py's incompatible count.
+            and step_ctx.policy_skill_name not in {"dribble", "shoot"}
             and not step_ctx.projection_applied
         )
         else 0.0
@@ -674,6 +753,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         terms=terms,
         weighted_terms=weighted_terms,
         total_reward=total_reward,
+        stable_trusted_takeover=stable_trusted_takeover,
     )
 
 
