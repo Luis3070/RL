@@ -1018,6 +1018,11 @@ class RealSimRobotEnv(ParallelEnv):
             "clean_episode": float(clean_episode),
             "collision_episode": collision_episode,
             "takeover_success": float(takeover_success),
+            # Disambiguates policy_incompatible_takeover_rate==0: with the max(1,..)
+            # denominator, "no takeover at all" reads identically to "clean takeover".
+            # Condition incompat metrics on this to tell failure (never reached the
+            # ball) apart from success (dribbled cleanly).
+            "takeover_occurred": float(tracker["stable_takeover_steps"] > 0),
             "goal_rate": float(tracker["goal"]),
             "thrash_rate": thrash_rate,
             "mean_time_to_takeover": mean_time_to_takeover,

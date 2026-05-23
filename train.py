@@ -18,6 +18,7 @@ from torch.distributions import Categorical, Normal
 
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
+from skrl.resources.preprocessors.torch import RunningStandardScaler
 from skrl.models.torch import DeterministicMixin, Model
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
@@ -53,13 +54,13 @@ class ScriptRunConfig:
     capture_eval_steps: bool = True
     telemetry_tag: str = "overnight_stage0_to_3"
     experiment_name: str = TRAIN.experiment_name
-    max_episode_steps: int = 220
+    max_episode_steps: int = 400
     rollout_steps: int = 256
     learning_epochs: int = 4
     mini_batches: int = 4
     eval_interval: int = 5_000
     checkpoint_interval: int = 5_000
-    eval_episodes: int = 4
+    eval_episodes: int = 8
     abort_on_wire_fail: bool = False
     bc_warm_start: bool = True
     bc_checkpoint_path: str | None = None
@@ -262,7 +263,10 @@ class PolicyNetwork(Model):
         )
         self.skill_head = nn.Linear(hidden_size, self.num_skills)
         self.param_head = nn.Linear(hidden_size, self.num_params)
-        self.log_std_parameter = nn.Parameter(torch.full((self.num_params,), -0.5, dtype=torch.float32))
+        # Init below the std ceiling (see act()) so residual-param exploration starts
+        # moderate (std≈0.41) rather than at the cap; precise dribble targets need a
+        # low residual std, otherwise every dribble nudges the ball randomly.
+        self.log_std_parameter = nn.Parameter(torch.full((self.num_params,), -0.9, dtype=torch.float32))
         self.param_log_prob_weight = float(param_log_prob_weight)
         self._distribution: HybridPolicyDistribution | None = None
         action_low = torch.as_tensor(action_space.low, dtype=torch.float32, device=self.device)
@@ -302,7 +306,11 @@ class PolicyNetwork(Model):
     def act(self, inputs, role=""):
         skill_logits, outputs = self.compute(inputs, role)
         param_mean = outputs["param_mean"]
-        log_std = torch.clamp(outputs["log_std"], min=-2.0, max=0.0)
+        # max=-0.7 caps residual std at exp(-0.7)≈0.50. The entropy bonus (needed to
+        # keep the SKILL head exploring) also inflates the continuous head and used to
+        # pin std at the old ceiling of 1.0 (exp(0)) — maximum noise on every dribble
+        # target, which prevented controlled goalward ball progress (clean_finish≈0).
+        log_std = torch.clamp(outputs["log_std"], min=-2.0, max=-0.7)
         outputs["log_std"] = log_std
 
         masked_skill_logits = self._masked_skill_logits(skill_logits)
@@ -475,6 +483,11 @@ def build_mappo(
 
     empty_agent_kwargs = {uid: ({}, {}) for uid in env.possible_agents}
     empty_preprocessor_kwargs = {uid: {} for uid in env.possible_agents}
+    # Return (value) normalization: the perception-coupled reward has high variance
+    # (value_loss spiked 8->322 across evals), which destabilizes the critic and the
+    # policy advantages. A RunningStandardScaler on the value target keeps returns on
+    # a stable scale so one bad-perception rollout can't dominate the gradient.
+    value_preprocessor_kwargs = {uid: {"size": 1, "device": device} for uid in env.possible_agents}
     cfg = MAPPO_CFG(
         experiment={
             "directory": str(RUNS_DIR),
@@ -491,7 +504,8 @@ def build_mappo(
         gae_lambda=train_cfg.gae_lambda,
         observation_preprocessor_kwargs=empty_preprocessor_kwargs,
         state_preprocessor_kwargs=empty_preprocessor_kwargs,
-        value_preprocessor_kwargs=empty_preprocessor_kwargs,
+        value_preprocessor=RunningStandardScaler,
+        value_preprocessor_kwargs=value_preprocessor_kwargs,
         entropy_loss_scale=train_cfg.entropy_loss_scale,
         value_loss_scale=train_cfg.value_loss_scale,
         grad_norm_clip=train_cfg.grad_norm_clip,
@@ -1705,6 +1719,12 @@ def run_training(
         embedded_3d_preflight=embedded_3d_preflight,
     )
     current_stage = stage_id
+    # Require N consecutive eval passes of the promotion gate before advancing.
+    # Promotion has no demotion, so a single lucky (good-perception) eval could
+    # over-promote into a stage the policy can't actually hold and corrupt the
+    # time-to-promotion signal. Tunable via RL_PROMOTION_CONFIRM_EVALS (1 = old behavior).
+    promotion_confirm_evals = max(1, int(os.environ.get("RL_PROMOTION_CONFIRM_EVALS", "2")))
+    consecutive_promotion_passes = 0
     env_cfg = make_env_config(current_stage, backend_cfg)
     raw_env, wrapped_env, eval_wrapper = build_env(env_cfg)
     agent, checkpoint_models = build_mappo(wrapped_env, device, TRAIN, env_cfg.active_skill_names)
@@ -1918,10 +1938,28 @@ def run_training(
             _policy_healthy = not np.isnan(
                 _extract_agent_stat(agent, f"Loss / Policy loss ({agent_id})", "Loss / Policy loss", "policy_loss")
             )
-            if TRAIN.auto_promote and _policy_healthy and current_stage < max_stage_id and promote_stage(current_stage, promotion_metrics, stage_history):
+            gate_pass = bool(
+                TRAIN.auto_promote
+                and _policy_healthy
+                and current_stage < max_stage_id
+                and promote_stage(current_stage, promotion_metrics, stage_history)
+            )
+            consecutive_promotion_passes = consecutive_promotion_passes + 1 if gate_pass else 0
+            if gate_pass and consecutive_promotion_passes < promotion_confirm_evals:
+                print(
+                    f"[curriculum] promotion_gate_passed stage={current_stage} at_step={timestep + 1} "
+                    f"({consecutive_promotion_passes}/{promotion_confirm_evals}) — confirming before promote",
+                    flush=True,
+                )
+            if gate_pass and consecutive_promotion_passes >= promotion_confirm_evals:
                 stage_history[current_stage] = dict(promotion_metrics)
                 current_stage += 1
-                print(f"[curriculum] promoted_to_stage={current_stage} at_step={timestep + 1}", flush=True)
+                consecutive_promotion_passes = 0
+                print(
+                    f"[curriculum] promoted_to_stage={current_stage} at_step={timestep + 1} "
+                    f"(after {promotion_confirm_evals} consecutive gate passes)",
+                    flush=True,
+                )
                 wrapped_env.close()
                 raw_env.close()
                 env_cfg = make_env_config(current_stage, backend_cfg)

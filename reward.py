@@ -560,7 +560,18 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         )
         else 0.0
     )
-    thrash = 1.0 if is_local_thrash(step_ctx.skill_history) else 0.0
+    # Thrash only penalizes genuine indecision OUTSIDE a committed takeover. Inside
+    # a committed takeover (geometric envelope + recent trust) the walk<->dribble
+    # A-B-A is legitimate ball re-engagement after the ball briefly leaves the tight
+    # envelope, not flicker — penalizing it taught the agent to freeze into a single
+    # skill. The valid walk->dribble handoff is likewise exempt.
+    thrash = (
+        1.0
+        if is_local_thrash(step_ctx.skill_history)
+        and not committed
+        and not valid_dribble_handoff
+        else 0.0
+    )
     goal_reward = 1.0 if step_ctx.goal_scored else 0.0
     timeout_penalty = 1.0 if step_ctx.timeout else 0.0
     collision_penalty = 1.0 if step_ctx.collision else 0.0
@@ -621,11 +632,16 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         )
         else 0.0
     )
-    # Waive the rescued-ball penalty for a robot actively finishing inside a
-    # committed takeover: the perception blip is not its fault and penalizing it
-    # would teach the policy to abandon the handoff whenever trust flickers.
+    # Waive the rescued/corrected-ball penalties when the perception blip is not the
+    # policy's fault: (a) actively finishing inside a committed takeover, or
+    # (b) legitimately walking toward the ball during approach (it should keep
+    # heading to the ball's last-known spot, not be punished for a trust flicker).
+    # Penalizing these taught the agent to abandon approach/handoff whenever trust
+    # flickered, which made every low-trust episode structurally unwinnable.
+    legit_approach = step_ctx.skill_name == "walk" and not takeover_envelope
+    perception_blip_waived = (committed and executing_finish) or legit_approach
     rescued_severity = 0.0
-    if ball_rescued and not (committed and executing_finish):
+    if ball_rescued and not perception_blip_waived:
         if cur_features.d_ball_mm <= 450.0:
             rescued_severity = 1.0
         elif cur_features.d_ball_mm <= 700.0:
@@ -644,7 +660,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         1.0
         if bool(step_ctx.obs.corrected_exported_ball)
         and not bool(step_ctx.obs.ball_observation_collapsed)
-        and not (committed and executing_finish)
+        and not perception_blip_waived
         else 0.0
     )
     too_close_walk = (
