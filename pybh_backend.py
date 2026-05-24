@@ -867,10 +867,14 @@ class PyBHBackend:
                 # Otherwise the visible SimRobot can resume root-assisted walking
                 # immediately after reset and drift away before the reset obs check.
                 self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
-                request_id = self._visible_simrobot_reset(world_spec)
-                self._wait_for_visible_world_request(request_id=request_id)
-                self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
                 try:
+                    request_id = self._visible_simrobot_reset(world_spec)
+                    # World-request ack wait moved INSIDE the retry: a timeout here
+                    # (slot dropped/slow to ack the teleport) used to escape the retry
+                    # loop and crash the whole run mid-overnight. Now it re-issues a
+                    # fresh reset request on the next attempt instead.
+                    self._wait_for_visible_world_request(request_id=request_id)
+                    self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
                     obs = self._wait_for_visible_reset_obs(robot_target)
                     self._last_obs = obs
                     return obs

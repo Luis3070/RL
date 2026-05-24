@@ -23,7 +23,7 @@ from skrl.models.torch import DeterministicMixin, Model
 from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
-from action import SKILL_ORDER, StructuredSkillAction, action_to_numpy, skill_mask
+from action import ACTION_PARAM_MASKS, SKILL_ORDER, StructuredSkillAction, action_to_numpy, skill_mask
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
@@ -51,7 +51,8 @@ class ScriptRunConfig:
     max_stage_id: int = 4
     save_telemetry: bool = True
     save_plots: bool = True
-    capture_eval_steps: bool = True
+    capture_eval_steps: bool = False
+    pack_parallel_eval: bool = True
     telemetry_tag: str = "overnight_stage0_to_3"
     experiment_name: str = TRAIN.experiment_name
     max_episode_steps: int = 400
@@ -74,6 +75,7 @@ class ScriptRunConfig:
     bc_beta_max: float = TRAIN.bc_competence_beta_max
     bc_beta_min: float = TRAIN.bc_competence_beta_min
     bc_competence_half_life_evals: float = TRAIN.bc_competence_half_life_evals
+    bc_skill_loss_scale: float = TRAIN.bc_skill_loss_scale
     bc_param_loss_scale: float = TRAIN.bc_param_loss_scale
     diverse_stage_resets: bool = ENV.diverse_stage_resets
     stage0_finish_interleave_probability: float = ENV.stage0_finish_interleave_probability
@@ -144,6 +146,7 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         save_telemetry=_env_bool("RL_SAVE_TELEMETRY", cfg.save_telemetry),
         save_plots=_env_bool("RL_SAVE_PLOTS", cfg.save_plots),
         capture_eval_steps=_env_bool("RL_CAPTURE_EVAL_STEPS", cfg.capture_eval_steps),
+        pack_parallel_eval=_env_bool("RL_PACK_PARALLEL_EVAL", cfg.pack_parallel_eval),
         abort_on_wire_fail=_env_bool("RL_ABORT_ON_WIRE_FAIL", cfg.abort_on_wire_fail),
         bc_warm_start=_env_bool("RL_BC_WARM_START", cfg.bc_warm_start),
         bc_replay=_env_bool("RL_BC_REPLAY", cfg.bc_replay),
@@ -168,6 +171,8 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         cfg = replace(cfg, bc_beta_min=float(bc_beta_min))
     if bc_half_life := os.environ.get("RL_BC_COMPETENCE_HALF_LIFE_EVALS"):
         cfg = replace(cfg, bc_competence_half_life_evals=float(bc_half_life))
+    if bc_skill_loss_scale := os.environ.get("RL_BC_SKILL_LOSS_SCALE"):
+        cfg = replace(cfg, bc_skill_loss_scale=float(bc_skill_loss_scale))
     if bc_param_loss_scale := os.environ.get("RL_BC_PARAM_LOSS_SCALE"):
         cfg = replace(cfg, bc_param_loss_scale=float(bc_param_loss_scale))
     cfg = replace(
@@ -228,15 +233,25 @@ def _coerce_scalar_metric(value: Any) -> float:
 
 
 class HybridPolicyDistribution:
-    def __init__(self, skill_distribution: Categorical, param_distribution: Normal, param_entropy_weight: float):
+    def __init__(
+        self,
+        skill_distribution: Categorical,
+        param_distribution: Normal,
+        param_entropy_weight: float,
+        param_mask: torch.Tensor | None = None,
+    ):
         self.skill_distribution = skill_distribution
         self.param_distribution = param_distribution
         self.param_entropy_weight = float(param_entropy_weight)
+        self.param_mask = param_mask
         self.stddev = param_distribution.stddev
 
     def entropy(self) -> torch.Tensor:
+        param_entropy = self.param_distribution.entropy()
+        if self.param_mask is not None:
+            param_entropy = param_entropy * self.param_mask.to(dtype=param_entropy.dtype, device=param_entropy.device)
         return self.skill_distribution.entropy().unsqueeze(-1) + (
-            self.param_entropy_weight * self.param_distribution.entropy().sum(dim=-1, keepdim=True)
+            self.param_entropy_weight * param_entropy.sum(dim=-1, keepdim=True)
         )
 
 
@@ -274,6 +289,12 @@ class PolicyNetwork(Model):
         self.register_buffer("param_low", action_low[1:].clone())
         self.register_buffer("param_high", action_high[1:].clone())
         self.register_buffer("active_skill_mask", torch.ones(self.num_skills, dtype=torch.float32, device=self.device))
+        param_skill_masks = torch.as_tensor(
+            [ACTION_PARAM_MASKS.get(name, (0.0, 0.0, 0.0, 0.0)) for name in SKILL_ORDER],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.register_buffer("param_skill_masks", param_skill_masks, persistent=False)
         with torch.no_grad():
             # Separate heads keep discrete skill selection gradients from being
             # entangled with BHuman's continuous target parameters.
@@ -292,6 +313,10 @@ class PolicyNetwork(Model):
     def _masked_skill_logits(self, skill_logits: torch.Tensor) -> torch.Tensor:
         mask = self.active_skill_mask.to(device=skill_logits.device, dtype=skill_logits.dtype)
         return skill_logits.masked_fill(mask.unsqueeze(0) <= 0.0, -1.0e9)
+
+    def _param_mask_for_skill_ids(self, skill_ids: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+        masks = self.param_skill_masks.to(device=skill_ids.device, dtype=dtype)
+        return masks[skill_ids]
 
     def compute(self, inputs, role=""):
         observations = inputs["observations"]
@@ -332,11 +357,16 @@ class PolicyNetwork(Model):
             skill_ids = torch.clamp(flat[:, 0].round().long(), min=0, max=self.num_skills - 1)
             params = torch.clamp(flat[:, 1:], min=self.param_low, max=self.param_high)
 
+        param_mask = self._param_mask_for_skill_ids(skill_ids, dtype=param_mean.dtype)
+        params = params * param_mask
+        self._distribution.param_mask = param_mask
         skill_log_prob = skill_distribution.log_prob(skill_ids).unsqueeze(-1)
-        param_log_prob = param_distribution.log_prob(params).sum(dim=-1, keepdim=True)
+        param_log_prob = (param_distribution.log_prob(params) * param_mask).sum(dim=-1, keepdim=True)
         weighted_param_log_prob = self.param_log_prob_weight * param_log_prob
         actions = torch.cat((skill_ids.to(dtype=param_mean.dtype).unsqueeze(-1), params), dim=-1)
         skill_probs = torch.softmax(masked_skill_logits, dim=-1)
+        mean_skill_ids = torch.argmax(masked_skill_logits, dim=-1)
+        mean_param_mask = self._param_mask_for_skill_ids(mean_skill_ids, dtype=param_mean.dtype)
 
         outputs.update(
             {
@@ -349,9 +379,10 @@ class PolicyNetwork(Model):
                 "masked_skill_logits": masked_skill_logits,
                 "skill_probs": skill_probs,
                 "skill_entropy": skill_distribution.entropy().unsqueeze(-1),
-                "param_entropy": param_distribution.entropy().sum(dim=-1, keepdim=True),
+                "param_entropy": (param_distribution.entropy() * param_mask).sum(dim=-1, keepdim=True),
+                "param_mask": param_mask,
                 "mean_actions": torch.cat(
-                    (torch.argmax(masked_skill_logits, dim=-1, keepdim=True).to(dtype=param_mean.dtype), param_mean),
+                    (mean_skill_ids.unsqueeze(-1).to(dtype=param_mean.dtype), param_mean * mean_param_mask),
                     dim=-1,
                 ),
             }
@@ -632,13 +663,31 @@ def _write_run_config(
 
 
 def _append_csv_row(path: Path, row: Mapping[str, Any]) -> None:
+    _append_csv_rows(path, [row])
+
+
+def _append_csv_rows(path: Path, rows: list[Mapping[str, Any]]) -> None:
+    if not rows:
+        return
     pd = _pd()
-    new_df = pd.DataFrame([dict(row)])
-    if path.exists():
-        existing = pd.read_csv(path, low_memory=False)
-        combined = pd.concat([existing, new_df], ignore_index=True, sort=False)
-    else:
-        combined = new_df
+    new_df = pd.DataFrame([dict(row) for row in rows])
+    if not path.exists():
+        new_df.to_csv(path, index=False)
+        return
+
+    # Fast path for stable telemetry schemas: append without rereading the full
+    # CSV.  The old path read + rewrote growing eval files once per step row,
+    # which made long runs slow down quadratically.
+    existing_columns = list(pd.read_csv(path, nrows=0).columns)
+    new_columns = list(new_df.columns)
+    if all(column in existing_columns for column in new_columns):
+        new_df.reindex(columns=existing_columns).to_csv(path, mode="a", header=False, index=False)
+        return
+
+    # Rare schema expansion fallback: pay the full rewrite once for this batch
+    # so older rows receive the new columns.
+    existing = pd.read_csv(path, low_memory=False)
+    combined = pd.concat([existing, new_df], ignore_index=True, sort=False)
     combined.to_csv(path, index=False)
 
 
@@ -861,6 +910,7 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "clean_walk",
         "clean_takeover",
         "clean_finish",
+        "shoot_finish",
         "clean_episode",
         "collision_episode",
         "takeover_success",
@@ -879,6 +929,13 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "walk_compat_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
+        "shoot_finish_steps",
+        "shoot_zone_rate",
+        "shoot_distance_ready_rate",
+        "shoot_angle_ready_rate",
+        "shoot_fresh_ready_rate",
+        "shoot_open_ready_rate",
+        "shoot_geometry_ready_rate",
         "bad_walk_rate",
         "bad_dribble_rate",
         "bad_shoot_rate",
@@ -953,6 +1010,7 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
     summary["clean_walk_rate"] = summary.get("clean_walk", 0.0)
     summary["clean_takeover_rate"] = summary.get("clean_takeover", 0.0)
     summary["clean_finish_rate"] = summary.get("clean_finish", 0.0)
+    summary["shoot_finish_rate"] = summary.get("shoot_finish", 0.0)
     summary["clean_episode_rate"] = summary.get("clean_episode", 0.0)
     summary["collision_rate"] = summary.get("collision_episode", 0.0)
     summary["takeover_success_rate"] = summary.get("takeover_success", 0.0)
@@ -984,6 +1042,8 @@ def evaluate_agent(
     stage_id: int,
     timestep: int,
     timesteps: int,
+    capture_steps: bool = True,
+    pack_parallel: bool = False,
 ) -> tuple[Dict[str, float], list[Mapping[str, object]]]:
     previous_mode = getattr(agent, "training", None)
     agent.enable_training_mode(False)
@@ -1029,10 +1089,34 @@ def evaluate_agent(
             payloads[agent_id] = payload
         return payloads
 
-    episode_results = [
-        eval_env.collect_episode(policy_fn, seed=TRAIN.seed + episode_idx, capture_steps=True)
-        for episode_idx in range(episodes)
-    ]
+    if pack_parallel and len(eval_env.possible_agents) > 1 and not capture_steps:
+        episode_results = []
+        batch_index = 0
+        while len(episode_results) < episodes:
+            # Offset the base seed by collected samples; the parallel env adds
+            # slot index on reset, keeping per-slot eval seeds deterministic.
+            batch_results = eval_env.collect_parallel_episode_batch(
+                policy_fn,
+                seed=TRAIN.seed + len(episode_results),
+            )
+            if not batch_results:
+                batch_results = [
+                    eval_env.collect_episode(
+                        policy_fn,
+                        seed=TRAIN.seed + len(episode_results),
+                        capture_steps=False,
+                    )
+                ]
+            episode_results.extend(batch_results)
+            batch_index += 1
+            if batch_index > episodes:
+                break
+        episode_results = episode_results[:episodes]
+    else:
+        episode_results = [
+            eval_env.collect_episode(policy_fn, seed=TRAIN.seed + episode_idx, capture_steps=capture_steps)
+            for episode_idx in range(episodes)
+        ]
     summary = _aggregate_eval_metrics(episode_results)
     summary["stage_id"] = float(stage_id)
 
@@ -1115,14 +1199,11 @@ def _latest_teacher_bc_dataset() -> Path | None:
 
 
 def _bc_param_mask(skill_ids: torch.Tensor) -> torch.Tensor:
-    masks = torch.zeros((len(SKILL_ORDER), 4), dtype=torch.float32, device=skill_ids.device)
-    masks[SKILL_ORDER.index("walk")] = torch.tensor([1.0, 1.0, 1.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("dribble")] = torch.tensor([0.0, 0.0, 1.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("shoot")] = torch.tensor([1.0, 1.0, 1.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("pass")] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("block")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("mark")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("observe")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
+    masks = torch.as_tensor(
+        [ACTION_PARAM_MASKS.get(name, (0.0, 0.0, 0.0, 0.0)) for name in SKILL_ORDER],
+        dtype=torch.float32,
+        device=skill_ids.device,
+    )
     return masks[skill_ids]
 
 
@@ -1146,6 +1227,7 @@ class BCReplayRegularizer:
         batch_size: int,
         beta_max: float,
         beta_min: float,
+        skill_loss_scale: float,
         param_loss_scale: float,
         updates_per_rollout: int,
         seed: int,
@@ -1173,6 +1255,7 @@ class BCReplayRegularizer:
         self.base_learning_rate = float(learning_rate)
         self.beta_max = max(float(beta_max), 0.0)
         self.beta_min = max(float(beta_min), 0.0)
+        self.skill_loss_scale = float(skill_loss_scale)
         self.param_loss_scale = float(param_loss_scale)
         self.updates_per_rollout = int(updates_per_rollout)
         self.current_beta = self.beta_max
@@ -1258,13 +1341,14 @@ class BCReplayRegularizer:
         skill_targets = torch.clamp(actions[:, 0].round().long(), min=0, max=len(SKILL_ORDER) - 1)
         skill_logits, outputs = self.policy.compute({"observations": obs}, role="policy")
         with torch.no_grad():
-            reference_logits, reference_outputs = self.reference_policy.compute({"observations": obs}, role="policy")
+            reference_logits, _ = self.reference_policy.compute({"observations": obs}, role="policy")
         masked_logits = _stage_skill_logits(skill_logits, stages)
         reference_masked_logits = _stage_skill_logits(reference_logits, stages)
         current_log_probs = F.log_softmax(masked_logits, dim=-1)
         current_probs = current_log_probs.exp()
         reference_log_probs = F.log_softmax(reference_masked_logits, dim=-1)
         kl_per_sample = torch.sum(current_probs * (current_log_probs - reference_log_probs), dim=-1)
+        param_targets = torch.clamp(actions[:, 1:], min=-1.0, max=1.0)
         ce = F.cross_entropy(
             masked_logits,
             skill_targets,
@@ -1272,20 +1356,19 @@ class BCReplayRegularizer:
             reduction="none",
         )
         param_mask = _bc_param_mask(skill_targets)
-        finish_skill_mask = (
-            (skill_targets == SKILL_ORDER.index("dribble"))
-            | (skill_targets == SKILL_ORDER.index("shoot"))
-        ).to(dtype=sample_weights.dtype)
-        param_raw = F.mse_loss(outputs["param_mean"], reference_outputs["param_mean"], reduction="none") * param_mask
+        # The KL term keeps the warm-start checkpoint nearby, but residual params
+        # must be pulled toward the teacher labels. Matching the frozen policy here
+        # preserves any bad target drift already present in the checkpoint.
+        param_raw = F.smooth_l1_loss(outputs["param_mean"], param_targets, reduction="none") * param_mask
         param_loss_per_sample = param_raw.sum(dim=-1) / torch.clamp(param_mask.sum(dim=-1), min=1.0)
-        param_active = (param_mask.sum(dim=-1) > 0.0).to(dtype=sample_weights.dtype) * finish_skill_mask
+        param_active = (param_mask.sum(dim=-1) > 0.0).to(dtype=sample_weights.dtype)
         normalized_weights = sample_weights / torch.clamp(sample_weights.mean(), min=1e-6)
         kl_loss = (kl_per_sample * normalized_weights).mean()
         skill_loss = (ce * normalized_weights).mean()
         param_loss = (param_loss_per_sample * normalized_weights * param_active).sum() / torch.clamp(
             (normalized_weights * param_active).sum(), min=1.0
         )
-        loss = kl_loss + self.param_loss_scale * param_loss
+        loss = kl_loss + self.skill_loss_scale * skill_loss + self.param_loss_scale * param_loss
         with torch.no_grad():
             predictions = torch.argmax(masked_logits, dim=-1)
             accuracy = (predictions == skill_targets).to(dtype=torch.float32)
@@ -1318,6 +1401,7 @@ class BCReplayRegularizer:
         return {
             "loss": float(np.mean([row["loss"] for row in metrics])),
             "kl_loss": float(np.mean([row["kl_loss"] for row in metrics])),
+            "skill_loss": float(np.mean([row["skill_loss"] for row in metrics])),
             "param_loss": float(np.mean([row["param_loss"] for row in metrics])),
             "skill_acc": float(np.mean([row["skill_acc"] for row in metrics])),
             "beta": float(self.current_beta),
@@ -1367,6 +1451,7 @@ def print_eval_summary(
     clean_takeover_rate = float(summary.get("clean_takeover_rate", 0.0))
     takeover_success_rate = float(summary.get("takeover_success_rate", 0.0))
     clean_finish_rate = float(summary.get("clean_finish_rate", 0.0))
+    shoot_finish_rate = float(summary.get("shoot_finish_rate", 0.0))
     policy_incompatible_takeover_rate = float(summary.get("policy_incompatible_takeover_rate", 0.0))
     handoff_override_rate = float(summary.get("handoff_override_rate", 0.0))
     target_repair_rate = float(summary.get("target_repair_rate", 0.0))
@@ -1393,7 +1478,7 @@ def print_eval_summary(
         f"step={timestep} stage={stage_id} "
         f"reward_mean={reward_mean:.3f} "
         f"takeover_clean={clean_takeover_rate:.3f} takeover_success={takeover_success_rate:.3f} "
-        f"finish={clean_finish_rate:.3f} "
+        f"finish={clean_finish_rate:.3f} shoot_finish={shoot_finish_rate:.3f} "
         f"policy_incompat={policy_incompatible_takeover_rate:.3f} "
         f"override={handoff_override_rate:.3f} repair={target_repair_rate:.3f} "
         f"thrash={thrash_rate:.3f} collision={collision_rate:.3f} "
@@ -1557,6 +1642,8 @@ def _append_eval_episode_rows(
     stage_id: int,
     episode_results: list[Mapping[str, object]],
 ) -> None:
+    episode_rows: list[Dict[str, Any]] = []
+    step_rows: list[Dict[str, Any]] = []
     for episode_index, result in enumerate(episode_results):
         episode_row: Dict[str, Any] = {
             "timestep": int(timestep),
@@ -1568,7 +1655,7 @@ def _append_eval_episode_rows(
         episode_row.update(_flatten_mapping("episode_metrics", result.get("episode_metrics", {})))
         episode_row.update(_flatten_mapping("reward_terms_sum", result.get("reward_terms_sum", {})))
         episode_row.update(_flatten_mapping("reward_weighted_terms_sum", result.get("reward_weighted_terms_sum", {})))
-        _append_csv_row(paths.eval_episodes_csv, episode_row)
+        episode_rows.append(episode_row)
 
         for step_record in result.get("step_records", []):
             step_row = {
@@ -1577,7 +1664,9 @@ def _append_eval_episode_rows(
                 "episode_index": int(episode_index),
             }
             step_row.update(step_record)
-            _append_csv_row(paths.eval_episodes_csv.with_name("eval_episode_steps.csv"), step_row)
+            step_rows.append(step_row)
+    _append_csv_rows(paths.eval_episodes_csv, episode_rows)
+    _append_csv_rows(paths.eval_episodes_csv.with_name("eval_episode_steps.csv"), step_rows)
 
 
 def run_smoke(
@@ -1707,7 +1796,10 @@ def run_training(
     bc_beta_max: float = TRAIN.bc_competence_beta_max,
     bc_beta_min: float = TRAIN.bc_competence_beta_min,
     bc_competence_half_life_evals: float = TRAIN.bc_competence_half_life_evals,
+    bc_skill_loss_scale: float = TRAIN.bc_skill_loss_scale,
     bc_param_loss_scale: float = TRAIN.bc_param_loss_scale,
+    capture_eval_steps: bool = True,
+    pack_parallel_eval: bool = False,
 ) -> None:
     backend_cfg = replace(
         ENV.backend,
@@ -1756,13 +1848,15 @@ def run_training(
             batch_size=bc_replay_batch_size,
             beta_max=bc_beta_max,
             beta_min=bc_beta_min,
+            skill_loss_scale=bc_skill_loss_scale,
             param_loss_scale=bc_param_loss_scale,
             updates_per_rollout=bc_replay_updates,
             seed=TRAIN.seed + 991,
         )
         print(
             f"[bc-replay] dataset={bc_regularizer.path} beta=[{bc_beta_min:.4f},{bc_beta_max:.4f}] "
-            f"batch={bc_replay_batch_size} updates={bc_replay_updates} lr={bc_replay_learning_rate}",
+            f"batch={bc_replay_batch_size} updates={bc_replay_updates} lr={bc_replay_learning_rate} "
+            f"skill_scale={bc_skill_loss_scale:.3f} param_scale={bc_param_loss_scale:.3f}",
             flush=True,
         )
     trainer_cfg = SequentialTrainerCfg(
@@ -1879,6 +1973,8 @@ def run_training(
                 stage_id=current_stage,
                 timestep=timestep + 1,
                 timesteps=timesteps,
+                capture_steps=capture_eval_steps,
+                pack_parallel=pack_parallel_eval,
             )
             wire_audit = build_wire_audit(eval_summary, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
             bc_gate_metrics = bc_gate.update(eval_summary)
@@ -2021,8 +2117,12 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         f"bc_warm_start={int(bool(run_cfg.bc_warm_start))} "
         f"bc_replay={int(bool(run_cfg.bc_replay))} "
         f"bc_beta=[{run_cfg.bc_beta_min:.4f},{run_cfg.bc_beta_max:.4f}] "
+        f"bc_skill_scale={run_cfg.bc_skill_loss_scale:.3f} "
+        f"bc_param_scale={run_cfg.bc_param_loss_scale:.3f} "
         f"diverse_resets={int(bool(run_cfg.diverse_stage_resets))} "
-        f"post_takeover_progress={int(bool(run_cfg.post_takeover_progress_enabled))}",
+        f"post_takeover_progress={int(bool(run_cfg.post_takeover_progress_enabled))} "
+        f"capture_eval_steps={int(bool(run_cfg.capture_eval_steps))} "
+        f"pack_parallel_eval={int(bool(run_cfg.pack_parallel_eval))}",
         flush=True,
     )
 
@@ -2076,7 +2176,10 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
                 bc_beta_max=run_cfg.bc_beta_max,
                 bc_beta_min=run_cfg.bc_beta_min,
                 bc_competence_half_life_evals=run_cfg.bc_competence_half_life_evals,
+                bc_skill_loss_scale=run_cfg.bc_skill_loss_scale,
                 bc_param_loss_scale=run_cfg.bc_param_loss_scale,
+                capture_eval_steps=run_cfg.capture_eval_steps,
+                pack_parallel_eval=run_cfg.pack_parallel_eval,
             )
     finally:
         if "runtime" in locals() and runtime is not None:

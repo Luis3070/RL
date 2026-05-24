@@ -171,3 +171,64 @@ class RealSimRobotEnvWrapper:
             "final_info": final_info,
             "step_records": step_records,
         }
+
+    def collect_parallel_episode_batch(self, policy_fn, seed=None) -> list[dict]:
+        """Collect finished episode metrics from all parallel slots in one eval batch.
+
+        The visible training env already steps one independent SimRobot slot per
+        agent.  Standard eval uses only player_1, which wastes the other slots.
+        This batch collector preserves the environment/action/observation path
+        and simply returns every slot that reached an episode boundary.
+        """
+        obs, infos = self.reset(seed=seed)
+        rewards = {agent: 0.0 for agent in self.possible_agents}
+        steps = 0
+        reward_terms_sum = {agent: defaultdict(float) for agent in self.possible_agents}
+        weighted_terms_sum = {agent: defaultdict(float) for agent in self.possible_agents}
+        final_infos = {}
+
+        while self.agents:
+            action_dict = policy_fn(obs, infos)
+            obs, step_rewards, terminateds, truncateds, infos = self.step(action_dict)
+            steps += 1
+            for agent, value in step_rewards.items():
+                rewards[agent] += float(value)
+            for agent, info in infos.items():
+                final_infos[agent] = info
+                for key, value in info.get("reward_terms", {}).items():
+                    reward_terms_sum[agent][key] += float(value)
+                for key, value in info.get("reward_weighted_terms", {}).items():
+                    weighted_terms_sum[agent][key] += float(value)
+            if not self.agents or any(terminateds.values()) or any(truncateds.values()):
+                break
+
+        results: list[dict] = []
+        for agent in self.possible_agents:
+            final_info = final_infos.get(agent)
+            if final_info is None:
+                continue
+            episode_metrics = dict(final_info.get("episode_metrics", {}))
+            if not episode_metrics:
+                continue
+            results.append(
+                {
+                    "steps": steps,
+                    "mean_reward": float(rewards.get(agent, 0.0)),
+                    "total_rewards": {agent: float(rewards.get(agent, 0.0))},
+                    "reward_terms_sum": dict(reward_terms_sum[agent]),
+                    "reward_weighted_terms_sum": dict(weighted_terms_sum[agent]),
+                    "episode_metrics": episode_metrics,
+                    "ball_semantics": {
+                        "ball_trusted_rate": float(episode_metrics.get("ball_trusted_rate", 0.0)),
+                        "ball_rescued_rate": float(episode_metrics.get("ball_rescued_rate", 0.0)),
+                        "ball_confidence_score_mean": float(episode_metrics.get("ball_confidence_score_mean", 0.0)),
+                        "first_trusted_ball_after_reset_ms": float(
+                            episode_metrics.get("first_trusted_ball_after_reset_ms", 0.0)
+                        ),
+                    },
+                    "final_info": final_info,
+                    "parallel_agent_id": agent,
+                    "step_records": [],
+                }
+            )
+        return results

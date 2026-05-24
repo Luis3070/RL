@@ -11,7 +11,15 @@ import gymnasium as gym
 import numpy as np
 from pettingzoo import ParallelEnv
 
-from action import SKILL_ORDER, SkillType, StructuredSkillAction, action_from_mapping, action_from_numpy, skill_mask
+from action import (
+    SKILL_ORDER,
+    SkillType,
+    StructuredSkillAction,
+    action_from_mapping,
+    action_from_numpy,
+    action_param_mask,
+    skill_mask,
+)
 from config import ACTION, ENV
 from curriculum import (
     get_dynamic_world_update,
@@ -464,6 +472,10 @@ class RealSimRobotEnv(ParallelEnv):
         residual_x = float(np.clip(raw_action.target_x, -1.0, 1.0))
         residual_y = float(np.clip(raw_action.target_y, -1.0, 1.0))
         residual_theta = float(np.clip(raw_action.target_theta, -1.0, 1.0))
+        param_mask = action_param_mask(raw_action.skill_name)
+        residual_x *= float(param_mask[0])
+        residual_y *= float(param_mask[1])
+        residual_theta *= float(param_mask[2])
         anchors = build_fallback_action_targets(raw_action.skill_name, obs)
         target_x = float(anchors["target_x"] + residual_x * ACTION.residual_x_range)
         target_y = float(anchors["target_y"] + residual_y * ACTION.residual_y_range)
@@ -473,7 +485,7 @@ class RealSimRobotEnv(ParallelEnv):
             target_x=float(np.clip(target_x, -ACTION.x_range, ACTION.x_range)),
             target_y=float(np.clip(target_y, -ACTION.y_range, ACTION.y_range)),
             target_theta=target_theta,
-            pass_target=raw_action.pass_target,
+            pass_target=int(raw_action.pass_target) if float(param_mask[3]) > 0.0 else 0,
         )
 
     def project_action(self, action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[StructuredSkillAction, bool]:
@@ -602,6 +614,11 @@ class RealSimRobotEnv(ParallelEnv):
             "walk_steps": 0,
             "dribble_steps": 0,
             "shoot_steps": 0,
+            "shoot_distance_ready_steps": 0,
+            "shoot_angle_ready_steps": 0,
+            "shoot_fresh_ready_steps": 0,
+            "shoot_open_ready_steps": 0,
+            "shoot_geometry_ready_steps": 0,
             "good_walk_steps": 0,
             "good_dribble_steps": 0,
             "good_shoot_steps": 0,
@@ -623,6 +640,7 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_walk_in_stable_takeover_steps": 0,
             "policy_stand_in_stable_takeover_steps": 0,
             "good_finish_steps": 0,
+            "shoot_finish_steps": 0,
             "goal": False,
             "collision_count": 0,
             "thrash_count": 0,
@@ -794,6 +812,15 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["dribble_zone_steps"] += 1
         if evaluation.shoot_zone:
             tracker["shoot_zone_steps"] += 1
+        shoot_distance_ready = evaluation.features.d_ball_mm <= 380.0
+        shoot_angle_ready = abs(evaluation.features.a_ball_rad) <= math.radians(25.0)
+        shoot_fresh_ready = evaluation.features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
+        shoot_open_ready = evaluation.features.shot_open >= 0.6 or evaluation.features.score_now
+        tracker["shoot_distance_ready_steps"] += int(shoot_distance_ready)
+        tracker["shoot_angle_ready_steps"] += int(shoot_angle_ready)
+        tracker["shoot_fresh_ready_steps"] += int(shoot_fresh_ready)
+        tracker["shoot_open_ready_steps"] += int(shoot_open_ready)
+        tracker["shoot_geometry_ready_steps"] += int(shoot_distance_ready and shoot_angle_ready and shoot_fresh_ready)
         if evaluation.features.front_obstacle_count > 0 or evaluation.features.front_obstacle_mm > 0.0:
             tracker["obstacle_present_steps"] += 1
 
@@ -831,6 +858,8 @@ class RealSimRobotEnv(ParallelEnv):
 
         if evaluation.terms["good_shoot"] > 0.0 or evaluation.terms["good_dribble"] > 0.0:
             tracker["good_finish_steps"] += 1
+        if evaluation.terms["good_shoot"] > 0.0:
+            tracker["shoot_finish_steps"] += 1
         if evaluation.terms["collision"] > 0.0:
             tracker["collision_count"] += 1
         if evaluation.terms["thrash"] > 0.0:
@@ -977,10 +1006,22 @@ class RealSimRobotEnv(ParallelEnv):
                 and incompatible_takeover_rate <= 0.15
                 and policy_incompatible_takeover_rate <= 0.15
             )
+        # thrash_rate-based gate (was thrash_count <= 1, which is unreachable at a
+        # normal thrash_rate of ~0.07 ≈ 17 thrash steps/episode and made clean_finish
+        # structurally 0 even when the dribble genuinely advanced the ball past the
+        # 0.2 progress bar). Mirrors the de-brittled clean_takeover and the stage-1
+        # _behavior_is_stable threshold (thrash_max=0.10).
         clean_finish = bool(
             tracker["good_finish_steps"] > 0
             and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
-            and tracker["thrash_count"] <= 1
+            and thrash_rate <= 0.10
+        )
+        # Shoot-aware finish for stage 1+: clean_finish can be satisfied by
+        # dribble/progress only, which is useful but overstates shooting sanity.
+        shoot_finish = bool(
+            tracker["shoot_finish_steps"] > 0
+            and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
+            and thrash_rate <= 0.10
         )
         clean_episode = bool(clean_takeover and clean_finish and tracker["collision_count"] == 0)
 
@@ -1015,6 +1056,7 @@ class RealSimRobotEnv(ParallelEnv):
             "clean_walk": float(clean_walk),
             "clean_takeover": float(clean_takeover),
             "clean_finish": float(clean_finish),
+            "shoot_finish": float(shoot_finish),
             "clean_episode": float(clean_episode),
             "collision_episode": collision_episode,
             "takeover_success": float(takeover_success),
@@ -1038,6 +1080,13 @@ class RealSimRobotEnv(ParallelEnv):
             "walk_compat_rate": walk_compat_rate,
             "dribble_compat_rate": dribble_compat_rate,
             "shoot_compat_rate": shoot_compat_rate,
+            "shoot_finish_steps": float(tracker["shoot_finish_steps"]),
+            "shoot_zone_rate": float(tracker["shoot_zone_steps"] / steps),
+            "shoot_distance_ready_rate": float(tracker["shoot_distance_ready_steps"] / steps),
+            "shoot_angle_ready_rate": float(tracker["shoot_angle_ready_steps"] / steps),
+            "shoot_fresh_ready_rate": float(tracker["shoot_fresh_ready_steps"] / steps),
+            "shoot_open_ready_rate": float(tracker["shoot_open_ready_steps"] / steps),
+            "shoot_geometry_ready_rate": float(tracker["shoot_geometry_ready_steps"] / steps),
             "bad_walk_rate": bad_walk_rate,
             "bad_dribble_rate": bad_dribble_rate,
             "bad_shoot_rate": bad_shoot_rate,

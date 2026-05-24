@@ -71,6 +71,7 @@ class RewardWeights:
     missed_dribble_handoff: float = 0.0
     dribble_skill_intent: float = 0.0
     shoot_skill_intent: float = 0.0
+    missed_shoot: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -111,6 +112,7 @@ class RewardWeights:
             "missed_dribble_handoff": self.missed_dribble_handoff,
             "dribble_skill_intent": self.dribble_skill_intent,
             "shoot_skill_intent": self.shoot_skill_intent,
+            "missed_shoot": self.missed_shoot,
         }
 
 
@@ -260,13 +262,16 @@ def is_walk_zone(features: TakeoverFeatures) -> bool:
 
 
 def is_shoot_zone(features: TakeoverFeatures) -> bool:
-    # seen_pct removed: same ci-30 incompatibility. t_seen_ms <= 300 keeps the
-    # shoot zone intentionally tight (ball must be very fresh to shoot).
+    # Loosened so shot opportunities are actually reachable: the old zone
+    # (d<=320, angle<=20, t_seen<=300, shot_open>=0.7) was so tight the agent never
+    # got a clean setup, so every shoot landed out-of-zone -> bad_shoot -> shoot was
+    # never reinforced (shoot_compat=0 across 240k steps). Freshness aligned with the
+    # trusted window (600ms) keeps it honest without being structurally unreachable.
     return (
-        features.d_ball_mm <= 320.0
-        and abs(features.a_ball_rad) <= math.radians(20.0)
-        and features.t_seen_ms <= 300.0
-        and (features.shot_open >= 0.7 or features.score_now)
+        features.d_ball_mm <= 380.0
+        and abs(features.a_ball_rad) <= math.radians(25.0)
+        and features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
+        and (features.shot_open >= 0.6 or features.score_now)
     )
 
 
@@ -535,11 +540,21 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     if step_ctx.skill_name == "dribble" and not ball_trusted and not committed:
         bad_dribble += 0.5 if ball_rescued else 0.25
 
-    good_shoot = fine_scale if step_ctx.skill_name == "shoot" and ball_confident and ball_trusted and shoot_zone else 0.0
+    # Shoot mirrors the dribble treatment: commit_scale + tolerate a brief trust
+    # dropout while committed, so a valid in-zone shot is not zeroed (and the trust
+    # surcharge not stacked) by single-frame perception flicker.
+    good_shoot = (
+        commit_scale
+        if step_ctx.skill_name == "shoot"
+        and (ball_trusted or committed)
+        and (ball_confident or committed)
+        and shoot_zone
+        else 0.0
+    )
     bad_shoot = 1.0 if step_ctx.skill_name == "shoot" and not shoot_zone else 0.0
-    if step_ctx.skill_name == "shoot" and walk_zone and not shoot_zone:
+    if step_ctx.skill_name == "shoot" and walk_zone and not shoot_zone and not committed:
         bad_shoot += 0.75 if step_ctx.stage >= 1 else 0.35
-    if step_ctx.skill_name == "shoot" and not ball_trusted:
+    if step_ctx.skill_name == "shoot" and not ball_trusted and not committed:
         bad_shoot += 0.5 if ball_rescued else 0.25
     projection_penalty = 1.0 if step_ctx.projection_applied else 0.0
 
@@ -707,8 +722,23 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
             else (1.0 if step_ctx.policy_skill_name == "shoot" else 0.0),
             0.0,
             1.0,
-        ) * fine_scale
-        if step_ctx.stage >= 1 and ball_confident and ball_trusted and shoot_zone
+        ) * commit_scale
+        if step_ctx.stage >= 1 and (ball_trusted or committed) and shoot_zone
+        else 0.0
+    )
+    # Positive pressure to take an open shot: penalize NOT shooting when in a genuine
+    # shoot opportunity (in the shoot zone with a trusted/committed ball). Analog of
+    # missed_dribble_handoff — without it, dribbling past an open shot pays fully and
+    # the agent never chooses shoot.
+    missed_shoot = (
+        1.0
+        if (
+            step_ctx.stage >= 1
+            and shoot_zone
+            and (ball_trusted or committed)
+            and step_ctx.policy_skill_name != "shoot"
+            and not step_ctx.projection_applied
+        )
         else 0.0
     )
 
@@ -750,6 +780,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
         "missed_dribble_handoff": missed_dribble_handoff,
         "dribble_skill_intent": dribble_skill_intent,
         "shoot_skill_intent": shoot_skill_intent,
+        "missed_shoot": missed_shoot,
     }
     weight_map = weights.as_dict()
     weighted_terms = {name: float(weight_map.get(name, 0.0) * value) for name, value in terms.items()}

@@ -31,6 +31,26 @@ class SkillType(IntEnum):
 SKILL_ORDER = tuple(skill.public_name for skill in SkillType)
 DEFAULT_TRAIN_SKILLS = ("stand", "walk", "shoot", "pass", "dribble")
 
+# Continuous action parameters are [target_x, target_y, target_theta, pass_target].
+# The teacher dataset fixes several residual dimensions at exactly zero; leaving
+# them stochastic lets PPO drift into targets the environment may hide in training
+# but single-slot evaluation exposes. Keep one shared mask for policy loss, BC, and
+# backend decoding so "dead" dimensions are genuinely pinned.
+ACTION_PARAM_MASKS = {
+    "stand": (0.0, 0.0, 0.0, 0.0),
+    "walk": (0.0, 1.0, 1.0, 0.0),
+    "shoot": (0.0, 0.0, 0.0, 0.0),
+    "pass": (0.0, 0.0, 0.0, 1.0),
+    "dribble": (0.0, 1.0, 0.0, 0.0),
+    "block": (0.0, 1.0, 0.0, 0.0),
+    "mark": (0.0, 1.0, 0.0, 0.0),
+    "observe": (0.0, 0.0, 0.0, 0.0),
+}
+
+
+def action_param_mask(skill_name: str) -> tuple[float, float, float, float]:
+    return ACTION_PARAM_MASKS.get(skill_name, (0.0, 0.0, 0.0, 0.0))
+
 
 @dataclass(frozen=True)
 class StructuredSkillAction:
@@ -113,4 +133,3 @@ def action_to_numpy(action: StructuredSkillAction) -> np.ndarray:
 def skill_mask(active_skills: Iterable[str]) -> np.ndarray:
     allowed = set(active_skills)
     return np.asarray([1.0 if name in allowed else 0.0 for name in SKILL_ORDER], dtype=np.float32)
-

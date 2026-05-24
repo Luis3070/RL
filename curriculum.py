@@ -145,16 +145,23 @@ _STAGE_SPECS = {
             progress_ball=1.1,
             align_ball=0.75,
             enter_takeover=2.2,
-            hold_takeover=0.4,
+            # Smooth the stage-0 -> stage-1 reward cliff: the old jump (good_dribble
+            # 1.3->0.9, bad_dribble -0.85->-1.6, good_walk 0.30->0.45) punished the
+            # promoted handoff policy into walk. Keep dribble/holding closer to stage 0.
+            hold_takeover=0.6,
             approach_ball=0.08,
-            good_walk=0.45,
+            good_walk=0.35,
             bad_walk=-0.8,
             idle_stand=-0.60,
             walk_persistence=0.20,
-            good_dribble=0.9,
-            bad_dribble=-1.6,
-            good_shoot=1.3,
-            bad_shoot=-2.2,
+            good_dribble=1.1,
+            bad_dribble=-1.0,
+            # Make shoot learnable: bad_shoot -2.2 made any off-zone shoot
+            # catastrophic so the agent never explored it (shoot_compat stayed 0 and
+            # the stage 1->2 shoot gate was unreachable). Soften the deterrent and
+            # raise the good_shoot payoff + shoot intent pull.
+            good_shoot=1.5,
+            bad_shoot=-0.9,
             projection_penalty=-0.15,
             skill_switch=-0.3,
             thrash=-0.4,
@@ -167,10 +174,11 @@ _STAGE_SPECS = {
             corrected_ball=-0.25,
             too_close_walk=-0.45,
             lost_trusted_ball=-0.20,
-            dribble_handoff=0.75,
+            dribble_handoff=1.1,
             missed_dribble_handoff=-0.25,
             dribble_skill_intent=0.20,
-            shoot_skill_intent=0.45,
+            shoot_skill_intent=0.7,
+            missed_shoot=-0.3,
         ),
     ),
     2: StageSpec(
@@ -214,6 +222,7 @@ _STAGE_SPECS = {
             missed_dribble_handoff=-0.20,
             dribble_skill_intent=0.20,
             shoot_skill_intent=0.45,
+            missed_shoot=-0.3,
         ),
     ),
     3: StageSpec(
@@ -258,6 +267,7 @@ _STAGE_SPECS = {
             missed_dribble_handoff=-0.20,
             dribble_skill_intent=0.20,
             shoot_skill_intent=0.50,
+            missed_shoot=-0.3,
         ),
         dynamic_update_interval_steps=4,
     ),
@@ -303,6 +313,7 @@ _STAGE_SPECS = {
             missed_dribble_handoff=-0.20,
             dribble_skill_intent=0.15,
             shoot_skill_intent=0.70,
+            missed_shoot=-0.3,
         ),
         dynamic_update_interval_steps=4,
     ),
@@ -713,6 +724,13 @@ def _skill_not_collapsed(
     )
 
 
+def _shoot_finish_ok(metrics: Mapping[str, float], *, min_rate: float) -> bool:
+    if "shoot_finish_rate" in metrics:
+        return _metric(metrics, "shoot_finish_rate", 0.0) >= min_rate
+    # Backward-compatible fallback for older telemetry before shoot_finish existed.
+    return _metric(metrics, "shoot_compat_rate", 0.0) >= min_rate
+
+
 def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[int, Mapping[str, float]]) -> bool:
     if stage_id == -1:
         return (
@@ -731,7 +749,11 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
             and _metric(metrics, "stability_score") >= 0.50
             and _metric(metrics, "takeover_success_rate") >= 0.75
             and _metric(metrics, "mean_time_to_takeover", float("inf")) <= 95.0
-            and _policy_incompatible_takeover_rate(metrics) <= 0.12
+            # Aligned with the de-brittled clean_takeover gate (environment.py allows
+            # incompat <= 0.15): an agent already producing "clean" takeovers by that
+            # definition should be promotable. Was 0.12, which blocked agents hovering
+            # at ~0.13 despite clean_takeover_rate of 0.75.
+            and _policy_incompatible_takeover_rate(metrics) <= 0.15
             and _metric(metrics, "dribble_compat_rate") >= 0.55
             and _metric(metrics, "bad_walk_rate", 1.0) <= 0.45
             and _metric(metrics, "handoff_override_rate", 1.0) <= 0.08
@@ -758,6 +780,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.60
+            and _shoot_finish_ok(metrics, min_rate=0.10)
             and _metric(metrics, "takeover_success_rate") >= 0.80
             and _metric(metrics, "dribble_compat_rate") >= 0.65
             and _metric(metrics, "bad_dribble_rate", 1.0) <= 0.20
@@ -785,6 +808,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.40
+            and _shoot_finish_ok(metrics, min_rate=0.05)
             and _metric(metrics, "target_repair_rate", 1.0) <= 0.10
             and _metric(metrics, "policy_target_error_mean", 9999.0) <= 480.0
             and _skill_not_collapsed(metrics, dribble_prob_max=0.92, dribble_rate_max=0.94)
@@ -808,6 +832,7 @@ def promote_stage(stage_id: int, metrics: Mapping[str, float], history: Mapping[
                 )
             )
             and _metric(metrics, "clean_finish_rate") >= 0.40
+            and _shoot_finish_ok(metrics, min_rate=0.05)
             and _metric(metrics, "dynamic_obstacle_success") >= 0.20
             and _metric(metrics, "target_repair_rate", 1.0) <= 0.08
             and _metric(metrics, "policy_target_error_mean", 9999.0) <= 450.0

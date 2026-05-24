@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from action import SKILL_ORDER, skill_mask
+from action import ACTION_PARAM_MASKS, SKILL_ORDER, skill_mask
 from config import ACTION, ROOT_DIR, TRAIN
 from curriculum import get_stage_spec
 from train import PolicyNetwork, RUNS_DIR, ValueNetwork
@@ -78,13 +78,11 @@ def _make_spaces(observation_size: int) -> tuple[gym.spaces.Box, gym.spaces.Box,
 
 
 def _param_mask_for_skills(skill_ids: torch.Tensor) -> torch.Tensor:
-    masks = torch.zeros((len(SKILL_ORDER), 4), dtype=torch.float32, device=skill_ids.device)
-    masks[SKILL_ORDER.index("walk")] = torch.tensor([1.0, 1.0, 1.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("dribble")] = torch.tensor([0.0, 0.0, 1.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("pass")] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("block")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("mark")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
-    masks[SKILL_ORDER.index("observe")] = torch.tensor([1.0, 1.0, 0.0, 0.0], device=skill_ids.device)
+    masks = torch.as_tensor(
+        [ACTION_PARAM_MASKS.get(name, (0.0, 0.0, 0.0, 0.0)) for name in SKILL_ORDER],
+        dtype=torch.float32,
+        device=skill_ids.device,
+    )
     return masks[skill_ids]
 
 

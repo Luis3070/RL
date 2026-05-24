@@ -228,6 +228,9 @@ def _live_rollout(
                 "ball_visible": int(bool(info.get("ball_visible_mask", False))),
                 "ball_rescued": int(bool(info.get("ball_rescued_mask", False))),
                 "ball_confidence_score": float(info.get("ball_confidence_score", 0.0)),
+                "can_score_now": int(bool(raw_obs.get("can_score_now", False))),
+                "shot_quality_no_obstacles": float(raw_obs.get("shot_quality_no_obstacles", 0.0)),
+                "shot_opening_with_obstacles": float(raw_obs.get("shot_opening_with_obstacles", 0.0)),
                 "ball_distance_mm": _ball_distance_from_info(info),
                 "ball_rel_x": float(raw_obs.get("ball_rel_x", 0.0)),
                 "ball_rel_y": float(raw_obs.get("ball_rel_y", 0.0)),
@@ -347,6 +350,7 @@ def _print_health(summary: Mapping[str, float]) -> None:
         "takeover_success_rate",
         "clean_takeover_rate",
         "clean_finish_rate",
+        "shoot_finish_rate",
         "incompatible_takeover_rate",
         "walk_in_stable_takeover_rate",
         "stand_in_stable_takeover_rate",
@@ -355,6 +359,13 @@ def _print_health(summary: Mapping[str, float]) -> None:
         "policy_stand_in_stable_takeover_rate",
         "dribble_compat_rate",
         "shoot_compat_rate",
+        "shoot_finish_steps",
+        "shoot_zone_rate",
+        "shoot_distance_ready_rate",
+        "shoot_angle_ready_rate",
+        "shoot_fresh_ready_rate",
+        "shoot_open_ready_rate",
+        "shoot_geometry_ready_rate",
         "bad_dribble_rate",
         "bad_walk_rate",
         "handoff_override_rate",
@@ -388,14 +399,14 @@ def main() -> None:
     # Edit these values directly from the IDE. No argparse on purpose.
     CHECKPOINT_PATH: Path | None = None
     # Exampl
-    # CHECKPOINT_PATH = Path("runs/pybh_mappo_takeover_ppo/checkpoint_stage0_step50000.pt")
+    #CHECKPOINT_PATH = Path("/home/luis/GitHub/RL/runs/pybh_mappo_takeover_ppo/checkpoint_stage0_step80000.pt")
 
     EXPERIMENT_NAME = "pybh_mappo_takeover_ppo"
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
     STAGE_ID: int | None = None  # None means use checkpoint metadata.
     SEED = 42
 
-    LIVE_STEPS = 220
+    LIVE_STEPS = 400
     LIVE_SLEEP_SECONDS = 0.06
     METRIC_EPISODES = 2
 
@@ -403,7 +414,7 @@ def main() -> None:
     OBS_MODE = "corrected"
     SIMROBOT_PROFILE = "3d_visible"
     SIMROBOT_LAUNCH = True
-    MAX_EPISODE_STEPS = 220
+    MAX_EPISODE_STEPS = 400
 
     checkpoint_path = _latest_checkpoint(EXPERIMENT_NAME) if CHECKPOINT_PATH is None else _resolve_repo_path(CHECKPOINT_PATH)
     checkpoint = _load_checkpoint_metadata(checkpoint_path, DEVICE)

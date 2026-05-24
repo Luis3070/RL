@@ -96,7 +96,18 @@ class ActionConfig:
     x_range: float = FIELD_X_HALF
     y_range: float = FIELD_Y_HALF
     theta_range: float = math.pi
-    residual_x_range: float = 650.0
+    # NOTE: do NOT tighten residual_y/theta on a warm-start — the policy's continuous
+    # outputs are calibrated to these scales. Halving them (450->300, 0.75->0.5)
+    # invalidated the 720k warm-start, rescaled the *used* targets, and collapsed the
+    # agent to walk. residual_y/theta carry the teacher's real target signal.
+    #
+    # residual_x is the EXCEPTION: the teacher's target_x residual is identically 0
+    # across all 4749 demos (it always uses the anchor = ball + approach offset), but
+    # the policy was free to drift target_x to -1, placing the approach target ~650mm
+    # behind the ball -> the single-slot "dizzy" stall. Pinning the range to 0 forces
+    # target_x = anchor (exactly what the teacher does), nullifying that dead, drifting
+    # dimension WITHOUT touching the used y/theta scales. This is safe on a warm-start.
+    residual_x_range: float = 0.0
     residual_y_range: float = 450.0
     residual_theta_range: float = 0.75
     max_pass_target: int = 4
@@ -214,6 +225,7 @@ class TrainConfig:
     bc_competence_beta_max: float = 0.08
     bc_competence_beta_min: float = 0.005
     bc_competence_half_life_evals: float = 3.0
+    bc_skill_loss_scale: float = 0.20
     bc_param_loss_scale: float = 0.35
     initial_stage_id: int = -1
     max_stage_id: int = 4
