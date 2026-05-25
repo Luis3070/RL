@@ -22,7 +22,12 @@ GOAL_X = 4500.0
 GOAL_Y_HALF = 750.0
 MM_PER_M = 1000.0
 DT = 0.033
-MAX_EPISODE_STEPS = 400
+# 800 (was 400): the natural walk->dribble->drive->shoot chain needs time to complete
+# from a moderate ball-to-goal distance. The teacher drives the ball ~10-30mm/dribble-step,
+# so reaching goal from ~1-1.8m plus the approach leg needs more than 400 steps. The
+# finishing window (post_takeover_progress_window_steps) re-arms on each stable takeover,
+# so it stays valid inside the longer episode; timeout still fires only at the budget.
+MAX_EPISODE_STEPS = 800
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,13 @@ class EnvConfig:
     enable_handoff_override: bool = False
     diverse_stage_resets: bool = True
     stage0_finish_interleave_probability: float = 0.0
+    # Reduced 0.25->0.10: the drive curriculum reset now starts the ball at a moderate
+    # ball-to-goal distance so the FULL chain (incl. the finish) is trained in normal
+    # episodes. Heavy near-goal-only finish interleaving over-weighted shoot and starved
+    # the natural walk/dribble (the dataset-bias problem we just unwound).
+    stage1_finish_interleave_probability: float = 0.10
+    stage2_finish_interleave_probability: float = 0.10
+    stage3_finish_interleave_probability: float = 0.15
     post_takeover_progress_enabled: bool = True
     post_takeover_progress_window_steps: int = 120
     reward_goal_bonus: float = 5.0

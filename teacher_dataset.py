@@ -19,10 +19,17 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from action import SKILL_ORDER
-from config import ENV, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X, ROOT_DIR
-from curriculum import get_stage_scene_path, get_stage_spec, sample_stage_world_spec
+from config import ENV, ROOT_DIR
+from curriculum import (
+    get_stage_scene_path,
+    get_stage_spec,
+    sample_finish_sequence_world_spec,
+    sample_finish_world_spec,
+    sample_preshoot_dribble_world_spec,
+    sample_stage_world_spec,
+)
 from environment import RealSimRobotEnv
-from pybh_backend import BackendObservation, WorldSpec, WorldPlayerSpec, build_world_spec
+from pybh_backend import BackendObservation, WorldSpec
 from teacher_policy import obs_from_raw_mapping, teacher_policy_payload
 
 # Edit these constants directly for production collection.
@@ -36,28 +43,48 @@ STAGE_TRAJECTORIES = {
     2: 1,
     3: 1,
 }
-MAX_STEPS_PER_EPISODE = int(os.getenv("RL_TEACHER_MAX_STEPS", "360"))
+# 700 (was 360): match the longer training budget so the teacher can DRIVE the ball to
+# goal and finish within a collection episode (the full chain, not a truncated approach).
+MAX_STEPS_PER_EPISODE = int(os.getenv("RL_TEACHER_MAX_STEPS", "700"))
 SEED_BASE = 93000
 OUTPUT_ROOT = ROOT_DIR / "runs" / "teacher_bc_dataset"
 MIN_SAMPLE_WEIGHT_CONFIDENCE = 0.35
 SEED_STRATEGY = os.getenv("RL_TEACHER_SEED_STRATEGY", "stratified")
 SEED_SCAN_LIMIT = int(os.getenv("RL_TEACHER_SEED_SCAN_LIMIT", "3000"))
 MAX_EPISODE_ATTEMPT_MULTIPLIER = int(os.getenv("RL_TEACHER_MAX_ATTEMPT_MULTIPLIER", "4"))
+# Reduced near-goal shoot-scenario multipliers (were 8/6/4/4 = 22 near-goal episodes per
+# unit, which dominated collection and starved natural walk/dribble -> dribble came out at
+# only 593 samples). The drive curriculum now produces the full walk->dribble->drive->shoot
+# chain in the *natural* "curriculum" episodes, so these near-goal scenarios only need to
+# top up shoot/contrast coverage, not dominate.
+SHOOT_SEQUENCE_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_SHOOT_SEQUENCE_EPISODES_PER_STAGE", "2"))
+PRESHOOT_DRIBBLE_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_PRESHOOT_DRIBBLE_EPISODES_PER_STAGE", "2"))
+SHOOT_FINISH_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_SHOOT_FINISH_EPISODES_PER_STAGE", "1"))
+SHOOT_CONTRAST_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_SHOOT_CONTRAST_EPISODES_PER_STAGE", "1"))
+SHOOT_CONTRAST_MAX_STEPS = int(os.getenv("RL_TEACHER_SHOOT_CONTRAST_MAX_STEPS", "90"))
+SHOOT_CONTRAST_STOP_ON_SHOOT = os.getenv("RL_TEACHER_SHOOT_CONTRAST_STOP_ON_SHOOT", "1") == "1"
 
 STAGE_DISTANCE_BANDS_MM = {
     -1: ((300.0, 650.0), (650.0, 950.0), (950.0, 1200.0)),
     0: ((700.0, 1000.0), (1000.0, 1300.0), (1300.0, 1600.0)),
-    1: ((900.0, 1200.0), (1200.0, 1700.0), (1700.0, 2400.0)),
-    2: ((1200.0, 1700.0), (1700.0, 2400.0), (2400.0, 3200.0)),
+    # Stage 1/2 now use the drive curriculum: ROBOT-to-ball distance is the approach leg
+    # (~650-1050mm, sample_stage_world_spec diverse=False), so the seed-stratification bands
+    # match that range (the old 900-3200mm bands never filled -> full 3000-seed scan + no
+    # stratification). Ball-to-GOAL drive diversity comes from the reset rng.
+    1: ((650.0, 800.0), (800.0, 920.0), (920.0, 1050.0)),
+    2: ((650.0, 800.0), (800.0, 920.0), (920.0, 1050.0)),
     3: ((600.0, 1200.0), (1200.0, 2200.0), (2200.0, 3500.0)),
     4: ((600.0, 1200.0), (1200.0, 2200.0), (2200.0, 3500.0)),
 }
 
+# Rebalanced: prioritize DRIBBLE (the drive — the behavior the agent lost) and pull back the
+# shoot inflation (shoot now arrives naturally at the end of each completable drive chain, so
+# it no longer needs to be force-collected via near-goal scenarios).
 DEFAULT_STAGE_MIN_SKILL_COUNTS = {
     0: {"walk": 20, "dribble": 20},
-    1: {"walk": 20, "dribble": 20, "shoot": 5},
-    2: {"walk": 20, "dribble": 20, "shoot": 5},
-    3: {"walk": 20, "dribble": 20, "shoot": 5},
+    1: {"walk": 140, "dribble": 220, "shoot": 90},
+    2: {"walk": 120, "dribble": 190, "shoot": 80},
+    3: {"walk": 120, "dribble": 190, "shoot": 80},
 }
 
 
@@ -77,31 +104,6 @@ def _stage_trajectories_from_env() -> dict[int, int]:
 def _world_distance_for_seed(stage_id: int, seed: int) -> float:
     world_spec = sample_stage_world_spec(stage_id, np.random.default_rng(seed))
     return float(math.hypot(world_spec.ball_x - world_spec.robot_x, world_spec.ball_y - world_spec.robot_y))
-
-
-def _shoot_world_spec(stage_id: int, seed: int) -> WorldSpec:
-    rng = np.random.default_rng(seed)
-    ball_x = float(rng.uniform(GOAL_X - 950.0, GOAL_X - 520.0))
-    ball_y = float(rng.uniform(-360.0, 360.0))
-    distance = float(rng.uniform(230.0, 300.0))
-    robot_x = ball_x - distance
-    robot_y = ball_y + float(rng.uniform(-55.0, 55.0))
-    robot_theta = math.atan2(ball_y - robot_y, ball_x - robot_x)
-    lateral = 520.0 if ball_y <= 0.0 else -520.0
-    opponents = ()
-    if stage_id >= 2:
-        opponents = (
-            WorldPlayerSpec(number=1, x=ball_x - 900.0, y=ball_y + lateral, theta=0.0),
-            WorldPlayerSpec(number=2, x=ball_x - 250.0, y=ball_y - lateral, theta=0.0),
-        )
-    if stage_id >= 3:
-        opponents = (
-            WorldPlayerSpec(number=1, x=ball_x - 1000.0, y=ball_y + lateral, theta=0.0),
-            WorldPlayerSpec(number=2, x=ball_x - 750.0, y=ball_y - lateral, theta=0.0),
-        )
-    ball_pos = np.asarray([np.clip(ball_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 300.0), np.clip(ball_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0)], dtype=np.float32)
-    robot_pos = np.asarray([np.clip(robot_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 600.0), np.clip(robot_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0)], dtype=np.float32)
-    return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta, opponents=opponents)
 
 
 def _select_stage_seeds(stage_id: int, seed_offset: int, episodes: int) -> list[int]:
@@ -248,9 +250,46 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
         selected_seeds = _select_stage_seeds(stage_id, seed_offset, max_attempts)
         episode_plan: list[tuple[str, int, WorldSpec | None]] = []
         if "shoot" in skill_targets:
-            for shoot_index in range(max(1, episodes)):
+            sequence_episodes = max(1, SHOOT_SEQUENCE_EPISODES_PER_STAGE * max(1, episodes))
+            bridge_episodes = max(1, PRESHOOT_DRIBBLE_EPISODES_PER_STAGE * max(1, episodes))
+            finish_episodes = max(1, SHOOT_FINISH_EPISODES_PER_STAGE * max(1, episodes))
+            contrast_episodes = max(0, SHOOT_CONTRAST_EPISODES_PER_STAGE * max(1, episodes))
+            for sequence_index in range(sequence_episodes):
+                sequence_seed = seed_offset + 80_000 + sequence_index
+                episode_plan.append(
+                    (
+                        "shoot_sequence",
+                        sequence_seed,
+                        sample_finish_sequence_world_spec(stage_id, np.random.default_rng(sequence_seed)),
+                    )
+                )
+            for bridge_index in range(bridge_episodes):
+                bridge_seed = seed_offset + 90_000 + bridge_index
+                episode_plan.append(
+                    (
+                        "pre_shoot_dribble",
+                        bridge_seed,
+                        sample_preshoot_dribble_world_spec(stage_id, np.random.default_rng(bridge_seed)),
+                    )
+                )
+            for shoot_index in range(finish_episodes):
                 shoot_seed = seed_offset + 100_000 + shoot_index
-                episode_plan.append(("shoot_finish", shoot_seed, _shoot_world_spec(stage_id, shoot_seed)))
+                episode_plan.append(
+                    (
+                        "shoot_finish",
+                        shoot_seed,
+                        sample_finish_world_spec(stage_id, np.random.default_rng(shoot_seed), contrast=False),
+                    )
+                )
+            for contrast_index in range(contrast_episodes):
+                contrast_seed = seed_offset + 120_000 + contrast_index
+                episode_plan.append(
+                    (
+                        "shoot_contrast",
+                        contrast_seed,
+                        sample_finish_world_spec(stage_id, np.random.default_rng(contrast_seed), contrast=True),
+                    )
+                )
         episode_plan.extend(("curriculum", seed, None) for seed in selected_seeds)
         seed_distances = {}
         for scenario_type, seed, world_spec in episode_plan:
@@ -310,6 +349,11 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                 ball_distance = _ball_distance(raw_obs)
                 distance_bin = _distance_bin(ball_distance)
                 skill_name = residual_action.skill_name
+                if scenario_type == "shoot_contrast" and SHOOT_CONTRAST_STOP_ON_SHOOT and skill_name == "shoot":
+                    # Contrast episodes are for the decision boundary before a shot is valid.
+                    # Once the teacher has recovered into a valid shot, finish episodes already
+                    # provide cleaner positive labels, so stop instead of diluting negatives.
+                    break
 
                 observations.append(current_obs)
                 actions.append(current_action)
@@ -355,6 +399,9 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                         "ball_confidence_score": float(step_info.get("ball_confidence_score", 0.0)),
                         "ball_trusted_mask": int(bool(step_info.get("ball_trusted_mask", False))),
                         "ball_rescued_mask": int(bool(step_info.get("ball_rescued_mask", False))),
+                        "can_score_now": int(bool(raw_obs.get("can_score_now", False))),
+                        "shot_quality_no_obstacles": float(raw_obs.get("shot_quality_no_obstacles", 0.0)),
+                        "shot_opening_with_obstacles": float(raw_obs.get("shot_opening_with_obstacles", 0.0)),
                         "synthetic_ball_observation": int(bool(step_info.get("synthetic_ball_observation", False))),
                         "synthetic_pose_observation": int(bool(step_info.get("synthetic_pose_observation", False))),
                         "corrected_exported_ball": int(bool(step_info.get("corrected_exported_ball", False))),
@@ -366,6 +413,8 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     },
                 )
                 prev_skill_name = skill_name
+                if scenario_type == "shoot_contrast" and step >= SHOOT_CONTRAST_MAX_STEPS:
+                    break
                 if not env.agents or any(terminateds.values()) or any(truncateds.values()):
                     break
 
@@ -445,6 +494,12 @@ def main() -> None:
         "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
         "seed_strategy": SEED_STRATEGY,
         "seed_scan_limit": SEED_SCAN_LIMIT,
+        "shoot_sequence_episodes_per_stage": SHOOT_SEQUENCE_EPISODES_PER_STAGE,
+        "preshoot_dribble_episodes_per_stage": PRESHOOT_DRIBBLE_EPISODES_PER_STAGE,
+        "shoot_finish_episodes_per_stage": SHOOT_FINISH_EPISODES_PER_STAGE,
+        "shoot_contrast_episodes_per_stage": SHOOT_CONTRAST_EPISODES_PER_STAGE,
+        "shoot_contrast_max_steps": SHOOT_CONTRAST_MAX_STEPS,
+        "shoot_contrast_stop_on_shoot": SHOOT_CONTRAST_STOP_ON_SHOOT,
         "stage_trajectories": _stage_trajectories_from_env(),
         "stages": [],
     }

@@ -18,7 +18,7 @@ from curriculum import get_stage_scene_path, get_stage_spec
 from environment import RealSimRobotEnv
 from teacher_policy import obs_from_raw_mapping, teacher_policy_payload
 
-STAGE_ID = int(os.getenv("RL_TEACHER_EVAL_STAGE_ID", "0"))
+STAGE_ID = int(os.getenv("RL_TEACHER_EVAL_STAGE_ID", "1"))
 MAX_STEPS = int(os.getenv("RL_TEACHER_EVAL_MAX_STEPS", "900"))
 SEED = int(os.getenv("RL_TEACHER_EVAL_SEED", "42000"))
 BACKEND_MODE = os.getenv("RL_TEACHER_BACKEND_MODE", "simrobot_visible")

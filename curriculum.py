@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Mapping
@@ -167,7 +168,13 @@ _STAGE_SPECS = {
             thrash=-0.4,
             goal=4.0,
             timeout=-2.5,
-            ball_progress_post_takeover=0.5,
+            # Drive-to-goal is the production objective but was paid ~1/46th of in-place
+            # dribbling (good_dribble 1.1), so the agent dribbled in place and only scored
+            # when the reset pre-placed the ball at goal (normal-reset goal_rate ~0.09).
+            # Boost the goalward-progress reward to DOMINATE in-place dribbling so the
+            # natural walk->dribble->shoot chain emerges. Paired with the hold_takeover
+            # progress-gate (reward.py) and the 0.75->1.0 progress clip.
+            ball_progress_post_takeover=1.5,
             rescued_ball=-0.30,
             stale_ball=-0.15,
             collapsed_ball=-1.50,
@@ -201,17 +208,22 @@ _STAGE_SPECS = {
             idle_stand=-0.45,
             walk_persistence=0.16,
             good_dribble=1.1,
-            bad_dribble=-1.6,
+            # Smooth the stage1->2 cliff (was -1.6, vs stage1 -1.0): a harsh jump at
+            # promotion re-degenerates the dribble the same way the 0->1 cliff did.
+            bad_dribble=-1.2,
             good_shoot=1.4,
             bad_shoot=-2.0,
             projection_penalty=-0.20,
             collision=-3.0,
             clearance_gain=1.0,
             skill_switch=-0.2,
-            thrash=-1.0,
+            # Smooth the thrash cliff (was -1.0, vs stage1 -0.4) so the promoted policy
+            # is not destabilized at the transition while it is still settling.
+            thrash=-0.6,
             goal=4.5,
             timeout=-2.5,
-            ball_progress_post_takeover=0.7,
+            # Keep drive-to-goal dominant across the transition (see stage 1).
+            ball_progress_post_takeover=1.6,
             rescued_ball=-0.45,
             stale_ball=-0.20,
             collapsed_ball=-1.25,
@@ -245,16 +257,19 @@ _STAGE_SPECS = {
             idle_stand=-0.35,
             walk_persistence=0.12,
             good_dribble=1.4,
-            bad_dribble=-1.7,
+            # Smooth the stage2->3 cliff (was -1.7), keeping adjacent stages close.
+            bad_dribble=-1.3,
             good_shoot=1.5,
             bad_shoot=-2.0,
             projection_penalty=-0.20,
             collision=-3.2,
             clearance_gain=1.0,
             corridor_keep=1.1,
-            ball_progress_post_takeover=1.0,
+            # Keep drive-to-goal dominant across the transition (see stage 1).
+            ball_progress_post_takeover=1.7,
             skill_switch=-0.25,
-            thrash=-1.2,
+            # Smooth the thrash cliff (was -1.2) to match the stage-2 smoothing.
+            thrash=-0.8,
             goal=5.0,
             timeout=-2.5,
             rescued_ball=-0.40,
@@ -298,7 +313,7 @@ _STAGE_SPECS = {
             collision=-3.5,
             clearance_gain=0.8,
             corridor_keep=1.0,
-            ball_progress_post_takeover=1.2,
+            ball_progress_post_takeover=1.8,
             skill_switch=-0.25,
             thrash=-1.4,
             goal=7.0,
@@ -495,6 +510,206 @@ def sample_stage_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpe
     return sample_stage_world_spec_with_options(stage_id, rng, diverse_resets=False)
 
 
+def sample_finish_world_spec(
+    stage_id: int,
+    rng: np.random.Generator,
+    *,
+    contrast: bool = False,
+) -> WorldSpec:
+    """Near-goal finish reset used to make shoot opportunities reachable.
+
+    Normal stage-1/2/3 resets often put the ball several meters from goal, so
+    valid shoot states are rare. Finish interleaves start near an open shot;
+    contrast variants keep the same region but make the approach angle slightly
+    invalid so the teacher can show "do not shoot yet" examples too.
+    """
+    ball_x = float(rng.uniform(GOAL_X - 950.0, GOAL_X - 520.0))
+    ball_y = float(rng.uniform(-360.0, 360.0))
+    distance = float(rng.uniform(230.0, 320.0))
+    lateral_offset = float(rng.uniform(-55.0, 55.0))
+    if contrast:
+        lateral_offset = float(rng.choice((-1.0, 1.0)) * rng.uniform(260.0, 420.0))
+    robot_x = ball_x - distance
+    robot_y = ball_y + lateral_offset
+    if contrast:
+        # Face mostly toward the goal line, not the ball. The lateral offset
+        # then appears as a real bad-angle ball observation for contrastive BC.
+        robot_theta = float(rng.uniform(math.radians(-5.0), math.radians(5.0)))
+    else:
+        robot_theta = math.atan2(ball_y - robot_y, ball_x - robot_x)
+    ball_pos = np.asarray(
+        [
+            np.clip(ball_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 300.0),
+            np.clip(ball_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    robot_pos = np.asarray(
+        [
+            np.clip(robot_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 600.0),
+            np.clip(robot_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    lateral = 520.0 if ball_y <= 0.0 else -520.0
+    opponents: tuple[WorldPlayerSpec, ...] = ()
+    if stage_id >= 2:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 900.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 250.0, y=ball_y - lateral, theta=0.0),
+        )
+    if stage_id >= 3:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 1000.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 750.0, y=ball_y - lateral, theta=0.0),
+        )
+    return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta, opponents=opponents)
+
+
+def sample_finish_sequence_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpec:
+    """Near-goal sequence reset that requires walk->dribble before shooting.
+
+    The ball is still close enough to goal that finishing is reachable, but the
+    robot starts outside the takeover envelope. These episodes teach the whole
+    approach/handoff/finish chain instead of only the final shoot frame.
+    """
+    ball_x = float(rng.uniform(GOAL_X - 1050.0, GOAL_X - 620.0))
+    ball_y = float(rng.uniform(-380.0, 380.0))
+    distance = float(rng.uniform(520.0, 760.0))
+    lateral_offset = float(rng.uniform(-140.0, 140.0))
+    robot_x = ball_x - distance
+    robot_y = ball_y + lateral_offset
+    robot_theta = math.atan2(ball_y - robot_y, ball_x - robot_x) + float(
+        rng.uniform(math.radians(-8.0), math.radians(8.0))
+    )
+    ball_pos = np.asarray(
+        [
+            np.clip(ball_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 300.0),
+            np.clip(ball_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    robot_pos = np.asarray(
+        [
+            np.clip(robot_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 600.0),
+            np.clip(robot_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    lateral = 520.0 if ball_y <= 0.0 else -520.0
+    opponents: tuple[WorldPlayerSpec, ...] = ()
+    if stage_id >= 2:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 900.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 250.0, y=ball_y - lateral, theta=0.0),
+        )
+    if stage_id >= 3:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 1000.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 750.0, y=ball_y - lateral, theta=0.0),
+        )
+    return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta, opponents=opponents)
+
+
+def sample_preshoot_dribble_world_spec(stage_id: int, rng: np.random.Generator) -> WorldSpec:
+    """Near-goal takeover reset that is deliberately not yet a shot.
+
+    These states fill the narrow bridge between approach and shooting: the ball
+    is close and trusted enough for dribble, but outside shoot-zone by either
+    distance or angle. This is the BC antidote to dribble being confused with
+    shoot at the edge of the finish window.
+    """
+    ball_x = float(rng.uniform(GOAL_X - 980.0, GOAL_X - 560.0))
+    ball_y = float(rng.uniform(-360.0, 360.0))
+    use_angle_boundary = bool(rng.random() < 0.5)
+    if use_angle_boundary:
+        distance = float(rng.uniform(270.0, 350.0))
+        relative_angle = float(rng.choice((-1.0, 1.0)) * rng.uniform(math.radians(27.0), math.radians(33.0)))
+    else:
+        distance = float(rng.uniform(395.0, 445.0))
+        relative_angle = float(rng.choice((-1.0, 1.0)) * rng.uniform(math.radians(4.0), math.radians(18.0)))
+    ball_heading = float(rng.uniform(math.radians(-3.0), math.radians(3.0)))
+    robot_theta = ball_heading - relative_angle
+    robot_x = ball_x - distance * math.cos(ball_heading)
+    robot_y = ball_y - distance * math.sin(ball_heading)
+    ball_pos = np.asarray(
+        [
+            np.clip(ball_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 300.0),
+            np.clip(ball_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    robot_pos = np.asarray(
+        [
+            np.clip(robot_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 600.0),
+            np.clip(robot_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    lateral = 520.0 if ball_y <= 0.0 else -520.0
+    opponents: tuple[WorldPlayerSpec, ...] = ()
+    if stage_id >= 2:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 900.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 250.0, y=ball_y - lateral, theta=0.0),
+        )
+    if stage_id >= 3:
+        opponents = (
+            WorldPlayerSpec(number=1, x=ball_x - 1000.0, y=ball_y + lateral, theta=0.0),
+            WorldPlayerSpec(number=2, x=ball_x - 750.0, y=ball_y - lateral, theta=0.0),
+        )
+    return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta, opponents=opponents)
+
+
+# --- Drive curriculum (stage 1/2) -------------------------------------------------
+# The natural walk->dribble->drive->shoot chain only completes when the ball starts
+# close enough to goal that the episode budget allows driving it in. The legacy stage-1/2
+# resets placed the ball by ROBOT-to-ball distance, leaving it 3-6 m from goal where the
+# chain truncates (the teacher drives the ball ~10-30mm/dribble-step but runs out of steps,
+# so neither the teacher demos nor the agent ever complete it). These resets instead control
+# BALL-to-GOAL distance, near-biased so most episodes are completable; widen via
+# RL_DRIVE_GOAL_MAX_MM as competence rises (start moderate ~1.0-1.8m, grow toward ~5.5m).
+DRIVE_GOAL_MIN_MM = float(os.getenv("RL_DRIVE_GOAL_MIN_MM", "1000.0"))
+DRIVE_GOAL_MAX_MM = float(os.getenv("RL_DRIVE_GOAL_MAX_MM", "1800.0"))
+DRIVE_NEAR_BIAS = float(os.getenv("RL_DRIVE_NEAR_BIAS", "1.6"))  # >1 => bias toward shorter (completable)
+
+
+def _sample_drive_curriculum_pair(
+    rng: np.random.Generator, *, diverse_resets: bool
+) -> tuple[np.ndarray, np.ndarray, float]:
+    goal_dist = DRIVE_GOAL_MIN_MM + (DRIVE_GOAL_MAX_MM - DRIVE_GOAL_MIN_MM) * float(rng.random() ** DRIVE_NEAR_BIAS)
+    ball_x = GOAL_X - goal_dist
+    ball_y = float(rng.uniform(-700.0, 700.0)) if diverse_resets else float(rng.uniform(-300.0, 300.0))
+    # Robot a real walk behind the ball, FACING it: a clean approach establishes natural
+    # ball detection from step 1 (kills the stochastic trust dropout the teacher sweep
+    # showed) and provides the walk leg of the chain.
+    approach = float(rng.uniform(600.0, 1500.0)) if diverse_resets else float(rng.uniform(650.0, 1050.0))
+    approach_angle = (
+        float(rng.uniform(math.radians(-35.0), math.radians(35.0)))
+        if diverse_resets
+        else float(rng.uniform(math.radians(-15.0), math.radians(15.0)))
+    )
+    robot_x = ball_x - approach * math.cos(approach_angle)
+    robot_y = ball_y - approach * math.sin(approach_angle)
+    heading_noise = math.radians(20.0 if diverse_resets else 8.0)
+    robot_theta = math.atan2(ball_y - robot_y, ball_x - robot_x) + float(rng.uniform(-heading_noise, heading_noise))
+    ball_pos = np.asarray(
+        [
+            np.clip(ball_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 300.0),
+            np.clip(ball_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    robot_pos = np.asarray(
+        [
+            np.clip(robot_x, -FIELD_X_HALF + 500.0, FIELD_X_HALF - 600.0),
+            np.clip(robot_y, -FIELD_Y_HALF + 500.0, FIELD_Y_HALF - 500.0),
+        ],
+        dtype=np.float32,
+    )
+    return ball_pos, robot_pos, robot_theta
+
+
 def sample_stage_world_spec_with_options(
     stage_id: int,
     rng: np.random.Generator,
@@ -524,25 +739,15 @@ def sample_stage_world_spec_with_options(
         )
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 1:
-        ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
-            rng,
-            radius_min_mm=stage.ball_radius_min_mm or 900.0,
-            radius_max_mm=stage.ball_radius_max_mm or 2400.0,
-            robot_xy_bounds=(-2100.0, -550.0, -800.0, 800.0),
-            line_angle_range_deg=55.0 if diverse_resets else 28.0,
-            heading_noise_deg=45.0 if diverse_resets else 18.0,
-            ball_jitter_mm=100.0 if diverse_resets else 0.0,
-        )
+        # Drive curriculum: ball at a moderate (near-biased) BALL-to-goal distance with the
+        # robot a walk behind it facing it, so the full walk->dribble->drive->shoot chain is
+        # completable within the budget. Replaces the legacy robot-to-ball radius reset that
+        # left the ball 3-6 m from goal (chain truncated -> agent learned dribble-in-place).
+        ball_pos, robot_pos, robot_theta = _sample_drive_curriculum_pair(rng, diverse_resets=diverse_resets)
         return build_world_spec(ball_pos=ball_pos, robot_pos=robot_pos, robot_theta=robot_theta)
     if stage.stage_id == 2:
-        ball_pos, robot_pos, robot_theta = _sample_pose_ball_pair(
-            rng,
-            radius_min_mm=stage.ball_radius_min_mm or 1200.0,
-            radius_max_mm=stage.ball_radius_max_mm or 3200.0,
-            robot_xy_bounds=(-2800.0, -600.0, -1200.0, 1200.0),
-            line_angle_range_deg=55.0,
-            heading_noise_deg=40.0,
-        )
+        # Same drive curriculum, plus static obstacles between robot and ball/goal.
+        ball_pos, robot_pos, robot_theta = _sample_drive_curriculum_pair(rng, diverse_resets=diverse_resets)
         return build_world_spec(
             ball_pos=ball_pos,
             robot_pos=robot_pos,

@@ -79,6 +79,9 @@ class ScriptRunConfig:
     bc_param_loss_scale: float = TRAIN.bc_param_loss_scale
     diverse_stage_resets: bool = ENV.diverse_stage_resets
     stage0_finish_interleave_probability: float = ENV.stage0_finish_interleave_probability
+    stage1_finish_interleave_probability: float = ENV.stage1_finish_interleave_probability
+    stage2_finish_interleave_probability: float = ENV.stage2_finish_interleave_probability
+    stage3_finish_interleave_probability: float = ENV.stage3_finish_interleave_probability
     post_takeover_progress_enabled: bool = ENV.post_takeover_progress_enabled
     post_takeover_progress_window_steps: int = ENV.post_takeover_progress_window_steps
     parallel_player_numbers: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
@@ -185,6 +188,12 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
     )
     if interleave := os.environ.get("RL_STAGE0_FINISH_INTERLEAVE_PROB"):
         cfg = replace(cfg, stage0_finish_interleave_probability=float(interleave))
+    if interleave := os.environ.get("RL_STAGE1_FINISH_INTERLEAVE_PROB"):
+        cfg = replace(cfg, stage1_finish_interleave_probability=float(interleave))
+    if interleave := os.environ.get("RL_STAGE2_FINISH_INTERLEAVE_PROB"):
+        cfg = replace(cfg, stage2_finish_interleave_probability=float(interleave))
+    if interleave := os.environ.get("RL_STAGE3_FINISH_INTERLEAVE_PROB"):
+        cfg = replace(cfg, stage3_finish_interleave_probability=float(interleave))
     if finishing_window := os.environ.get("RL_POST_TAKEOVER_PROGRESS_WINDOW_STEPS"):
         cfg = replace(cfg, post_takeover_progress_window_steps=int(finishing_window))
     if telemetry_tag := os.environ.get("RL_TELEMETRY_TAG"):
@@ -1299,10 +1308,10 @@ class BCReplayRegularizer:
         if stage_id <= 0:
             return (("dribble", 0.55), ("walk", 0.40), ("stand", 0.05))
         if stage_id == 1:
-            return (("walk", 0.42), ("dribble", 0.38), ("shoot", 0.20))
+            return (("walk", 0.30), ("dribble", 0.34), ("shoot", 0.36))
         if stage_id == 2:
-            return (("walk", 0.42), ("dribble", 0.33), ("shoot", 0.25))
-        return (("dribble", 0.45), ("walk", 0.35), ("shoot", 0.20))
+            return (("walk", 0.30), ("dribble", 0.32), ("shoot", 0.38))
+        return (("dribble", 0.36), ("walk", 0.28), ("shoot", 0.36))
 
     def _sample_indices(self, stage_id: int) -> np.ndarray:
         chunks: list[np.ndarray] = []
@@ -2088,6 +2097,9 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         parallel_player_numbers=run_cfg.parallel_player_numbers,
         diverse_stage_resets=run_cfg.diverse_stage_resets,
         stage0_finish_interleave_probability=run_cfg.stage0_finish_interleave_probability,
+        stage1_finish_interleave_probability=run_cfg.stage1_finish_interleave_probability,
+        stage2_finish_interleave_probability=run_cfg.stage2_finish_interleave_probability,
+        stage3_finish_interleave_probability=run_cfg.stage3_finish_interleave_probability,
         post_takeover_progress_enabled=run_cfg.post_takeover_progress_enabled,
         post_takeover_progress_window_steps=run_cfg.post_takeover_progress_window_steps,
     )
@@ -2120,6 +2132,10 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
         f"bc_skill_scale={run_cfg.bc_skill_loss_scale:.3f} "
         f"bc_param_scale={run_cfg.bc_param_loss_scale:.3f} "
         f"diverse_resets={int(bool(run_cfg.diverse_stage_resets))} "
+        f"finish_interleave=[s0:{run_cfg.stage0_finish_interleave_probability:.2f},"
+        f"s1:{run_cfg.stage1_finish_interleave_probability:.2f},"
+        f"s2:{run_cfg.stage2_finish_interleave_probability:.2f},"
+        f"s3:{run_cfg.stage3_finish_interleave_probability:.2f}] "
         f"post_takeover_progress={int(bool(run_cfg.post_takeover_progress_enabled))} "
         f"capture_eval_steps={int(bool(run_cfg.capture_eval_steps))} "
         f"pack_parallel_eval={int(bool(run_cfg.pack_parallel_eval))}",

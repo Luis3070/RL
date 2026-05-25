@@ -25,11 +25,14 @@ from curriculum import (
     get_dynamic_world_update,
     get_stage_spec,
     init_dynamic_world_state,
+    sample_finish_sequence_world_spec,
+    sample_finish_world_spec,
+    sample_preshoot_dribble_world_spec,
     sample_stage_world_spec_with_options,
     stage_skill_mask,
 )
 from observation import OBS_FEATURE_NAMES, OBS_SIZE
-from pybh_backend import BackendObservation, PyBHBackend
+from pybh_backend import BackendObservation, PyBHBackend, WorldSpec
 from reward import (
     TAKEOVER_GRACE_STEPS,
     StepContext,
@@ -187,11 +190,7 @@ class RealSimRobotEnv(ParallelEnv):
         options = options or {}
         self._episode_stage_id = self._sample_episode_stage_id(options)
         self._episode_stage_spec = get_stage_spec(self._episode_stage_id)
-        self._current_world_spec = options.get("world_spec") or sample_stage_world_spec_with_options(
-            self._episode_stage_id,
-            self._rng,
-            diverse_resets=bool(self.cfg.diverse_stage_resets),
-        )
+        self._current_world_spec = options.get("world_spec") or self._sample_episode_world_spec()
         self._dynamic_world_state = init_dynamic_world_state(self._episode_stage_id, self._current_world_spec, self._rng)
         obs = self.backend.reset(world_spec=self._current_world_spec)
         encoded = self._encode_obs(obs)
@@ -216,6 +215,25 @@ class RealSimRobotEnv(ParallelEnv):
         if self.stage_spec.stage_id == 0 and probability > 0.0 and float(self._rng.random()) < probability:
             return 1
         return self.stage_spec.stage_id
+
+    def _sample_episode_world_spec(self) -> WorldSpec:
+        finish_probability = {
+            1: float(getattr(self.cfg, "stage1_finish_interleave_probability", 0.0)),
+            2: float(getattr(self.cfg, "stage2_finish_interleave_probability", 0.0)),
+            3: float(getattr(self.cfg, "stage3_finish_interleave_probability", 0.0)),
+        }.get(self._episode_stage_id, 0.0)
+        if finish_probability > 0.0 and float(self._rng.random()) < float(np.clip(finish_probability, 0.0, 1.0)):
+            draw = float(self._rng.random())
+            if draw < 0.60:
+                return sample_finish_sequence_world_spec(self._episode_stage_id, self._rng)
+            if draw < 0.85:
+                return sample_preshoot_dribble_world_spec(self._episode_stage_id, self._rng)
+            return sample_finish_world_spec(self._episode_stage_id, self._rng)
+        return sample_stage_world_spec_with_options(
+            self._episode_stage_id,
+            self._rng,
+            diverse_resets=bool(self.cfg.diverse_stage_resets),
+        )
 
     def step(self, actions):
         if not self.agents:

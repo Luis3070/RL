@@ -116,11 +116,14 @@ def stage_aware_teacher_action(
     else:
         skill_name = "walk"
 
+    # Drive-commit latch: once driving, keep dribbling through small distance/angle blips
+    # (widened 520->600mm, 45->55deg) so a momentary wobble mid-drive doesn't drop the
+    # teacher back to walk and break the goalward push it demonstrates.
     if (
         prev_skill_name == "dribble"
         and "dribble" in active
-        and features.d_ball_mm <= 520.0
-        and abs(features.a_ball_rad) <= math.radians(45.0)
+        and features.d_ball_mm <= 600.0
+        and abs(features.a_ball_rad) <= math.radians(55.0)
         and features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
         and not shoot_ready
     ):
@@ -146,9 +149,14 @@ def absolute_to_residual_action(action: StructuredSkillAction, obs: BackendObser
             pass_target=action.pass_target,
         )
     anchors = build_fallback_action_targets(action.skill_name, obs)
+    residual_x = 0.0
+    if abs(float(ACTION.residual_x_range)) > 1e-6:
+        residual_x = float(
+            np.clip((float(action.target_x) - float(anchors["target_x"])) / ACTION.residual_x_range, -1.0, 1.0)
+        )
     return StructuredSkillAction(
         skill_type=action.skill_type,
-        target_x=float(np.clip((float(action.target_x) - float(anchors["target_x"])) / ACTION.residual_x_range, -1.0, 1.0)),
+        target_x=residual_x,
         target_y=float(np.clip((float(action.target_y) - float(anchors["target_y"])) / ACTION.residual_y_range, -1.0, 1.0)),
         target_theta=float(
             np.clip(_wrap_angle(float(action.target_theta) - float(anchors["target_theta"])) / ACTION.residual_theta_range, -1.0, 1.0)

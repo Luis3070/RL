@@ -459,8 +459,20 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     progress_ball = clip((prev_features.d_ball_mm - cur_features.d_ball_mm) / 250.0, -1.0, 1.0) * progress_scale
     align_ball = clip((abs(prev_features.a_ball_rad) - abs(cur_features.a_ball_rad)) / math.radians(15.0), -1.0, 1.0) * fine_scale
     enter_takeover = 1.0 if ball_confident and stable_trusted_ball and takeover_envelope and not prev_takeover_envelope else 0.0
+    # Goalward ball movement this step (ball getting closer to the goal line).
+    # Shared by hold_takeover and ball_progress_post_takeover so both reward
+    # DRIVING the ball to goal rather than idling on it.
+    ball_goalward_progress_mm = goal_ball_distance_mm(prev_obs) - goal_ball_distance_mm(step_ctx.obs)
     # Walk in the takeover envelope earns bad_walk; hold_takeover only fires for
-    # dribble/shoot so the gradient clearly pushes away from walk.
+    # dribble/shoot so the gradient clearly pushes away from walk. It is ALSO gated
+    # on goalward ball progress: a flat 0.6/step for merely holding the ball
+    # in-envelope (no progress required) out-paced the <=0.375/step goalward-progress
+    # reward and produced a "hold the ball, don't drive it" optimum -- the agent
+    # only scored when the reset pre-placed the ball at the goal (normal-reset
+    # goal_rate ~0.08 vs ~0.98 near-goal). Now hold_takeover pays for committed
+    # driving, not idling. (No `committed` waiver here: a robot can stay
+    # geometrically committed while idling on the ball, so waiving would reopen the
+    # loophole; a brief perception dropout only forgoes the bonus, never a penalty.)
     hold_takeover = (
         commit_scale
         if (
@@ -469,6 +481,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
             and (takeover_envelope or committed)
             and step_ctx.skill_name != "walk"
             and policy_intends_finish
+            and ball_goalward_progress_mm > 0.0
         )
         else 0.0
     )
@@ -520,8 +533,15 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
 
     # Saturating credit: full while establishing/holding the handoff, then tapered
     # so the policy cannot farm unbounded reward by camping in the dribble skill.
+    # Drive factor: dribbling that moves the ball goalward earns full credit; dribbling
+    # IN PLACE is floored at 0.35 — still rewards the correct skill choice, but no longer
+    # pays the agent to camp on the ball (its dominant failure mode: dribble_compat high but
+    # ball_progress ~0). Pairs with the boosted ball_progress_post_takeover so DRIVING wins.
+    dribble_drive_factor = clip(0.35 + ball_goalward_progress_mm / 45.0, 0.35, 1.0)
     good_dribble = (
-        commit_scale * _dribble_saturation(_trailing_skill_run(step_ctx.skill_history, "dribble"))
+        commit_scale
+        * _dribble_saturation(_trailing_skill_run(step_ctx.skill_history, "dribble"))
+        * dribble_drive_factor
         if (
             step_ctx.skill_name == "dribble"
             and policy_intends_dribble
@@ -603,13 +623,11 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     # synthetic/rescued perception drift.
     ball_progress_post_takeover = 0.0
     if step_ctx.post_takeover_finishing_active and stable_trusted_ball:
-        prev_goal_dist = goal_ball_distance_mm(prev_obs)
-        cur_goal_dist = goal_ball_distance_mm(step_ctx.obs)
-        goalward_progress = prev_goal_dist - cur_goal_dist
+        # Reuse the goalward delta computed above (prev_goal_dist - cur_goal_dist).
         ball_not_behind_robot = float(step_ctx.obs.ball_rel_x) > -150.0
         ball_near_play = cur_features.d_ball_mm <= 1400.0
-        if goalward_progress > 0.0 and ball_not_behind_robot and ball_near_play:
-            ball_progress_post_takeover = clip(goalward_progress / 300.0, 0.0, 0.75) * progress_scale
+        if ball_goalward_progress_mm > 0.0 and ball_not_behind_robot and ball_near_play:
+            ball_progress_post_takeover = clip(ball_goalward_progress_mm / 300.0, 0.0, 1.0) * progress_scale
 
     first_to_ball_reward = 1.0 if step_ctx.stage >= 4 and step_ctx.first_to_ball else 0.0
     bad_duel_penalty = 1.0 if step_ctx.stage >= 4 and step_ctx.bad_duel else 0.0
