@@ -24,6 +24,7 @@ from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_CFG
 from skrl.trainers.torch import SequentialTrainerCfg
 
 from action import ACTION_PARAM_MASKS, SKILL_ORDER, StructuredSkillAction, action_to_numpy, skill_mask
+from observation import ObsIndex
 from config import ENV, TRAIN, BackendConfig, EnvConfig, TrainConfig
 from curriculum import get_stage_scene_path, get_stage_spec, promote_stage
 from environment import RealSimRobotEnv
@@ -33,6 +34,30 @@ from wrapper import RealSimRobotEnvWrapper
 from wire_audit import build_wire_audit
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
+
+# Skill columns the dynamic gate arms/disarms, and the obs columns carrying the
+# gate's armed flags (Design A: baked into the observation).
+_SHOOT_SKILL_IDX = SKILL_ORDER.index("shoot")
+_DRIBBLE_SKILL_IDX = SKILL_ORDER.index("dribble")
+_GATE_OBS_REQUIRED = int(ObsIndex.dribble_armed) + 1
+
+
+def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
+    """Per-step forbid-invalid mask over SKILL_ORDER, read from the baked obs columns.
+
+    Multiplicative (1=allowed, 0=forbidden): shoot/dribble follow their armed flag;
+    every other skill stays 1 so the stage mask alone governs it and walk/stand are
+    never removed. Because it is a pure function of the stored observation, MAPPO's
+    update-time recompute reproduces it exactly. Legacy (pre-gate) observations that
+    lack the armed columns fall back to all-allowed.
+    """
+    batch = observations.shape[0]
+    mask = torch.ones((batch, len(SKILL_ORDER)), dtype=observations.dtype, device=observations.device)
+    if observations.shape[-1] < _GATE_OBS_REQUIRED:
+        return mask
+    mask[:, _SHOOT_SKILL_IDX] = (observations[:, int(ObsIndex.shoot_armed)] >= 0.5).to(mask.dtype)
+    mask[:, _DRIBBLE_SKILL_IDX] = (observations[:, int(ObsIndex.dribble_armed)] >= 0.5).to(mask.dtype)
+    return mask
 
 
 @dataclass(frozen=True)
@@ -55,7 +80,7 @@ class ScriptRunConfig:
     pack_parallel_eval: bool = True
     telemetry_tag: str = "overnight_stage0_to_3"
     experiment_name: str = TRAIN.experiment_name
-    max_episode_steps: int = 400
+    max_episode_steps: int = 800
     rollout_steps: int = 256
     learning_epochs: int = 4
     mini_batches: int = 4
@@ -319,9 +344,13 @@ class PolicyNetwork(Model):
             raise ValueError("Hybrid policy skill mask must enable at least one skill")
         self.active_skill_mask.copy_(mask)
 
-    def _masked_skill_logits(self, skill_logits: torch.Tensor) -> torch.Tensor:
-        mask = self.active_skill_mask.to(device=skill_logits.device, dtype=skill_logits.dtype)
-        return skill_logits.masked_fill(mask.unsqueeze(0) <= 0.0, -1.0e9)
+    def _masked_skill_logits(self, skill_logits: torch.Tensor, observations: torch.Tensor) -> torch.Tensor:
+        stage = self.active_skill_mask.to(device=skill_logits.device, dtype=skill_logits.dtype).unsqueeze(0)
+        gate = gate_skill_mask_from_obs(observations).to(device=skill_logits.device, dtype=skill_logits.dtype)
+        # walk/stand are never removed by the gate and are in every active stage, so
+        # the combined mask always leaves at least one skill enabled.
+        combined = stage * gate
+        return skill_logits.masked_fill(combined <= 0.0, -1.0e9)
 
     def _param_mask_for_skill_ids(self, skill_ids: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
         masks = self.param_skill_masks.to(device=skill_ids.device, dtype=dtype)
@@ -347,7 +376,7 @@ class PolicyNetwork(Model):
         log_std = torch.clamp(outputs["log_std"], min=-2.0, max=-0.7)
         outputs["log_std"] = log_std
 
-        masked_skill_logits = self._masked_skill_logits(skill_logits)
+        masked_skill_logits = self._masked_skill_logits(skill_logits, inputs["observations"])
         skill_distribution = Categorical(logits=masked_skill_logits)
         param_distribution = Normal(param_mean, log_std.exp())
         self._distribution = HybridPolicyDistribution(
@@ -1168,6 +1197,41 @@ def _latest_bc_checkpoint() -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _load_state_dict_obs_padded(
+    model: torch.nn.Module, saved: Mapping[str, torch.Tensor], *, label: str
+) -> None:
+    """Load a checkpoint whose first Linear layer may have fewer input features than
+    the current model (the observation grew). Old input columns are copied verbatim;
+    new columns are zeroed so day-0 behaviour matches the warm-start exactly and PPO
+    later wires the new obs features in organically. Shape-matched params load as usual.
+    """
+    model_sd = model.state_dict()
+    adapted: Dict[str, torch.Tensor] = {}
+    padded: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+    for key, tensor in saved.items():
+        if key not in model_sd:
+            continue
+        target = model_sd[key]
+        if tuple(tensor.shape) == tuple(target.shape):
+            adapted[key] = tensor
+        elif (
+            tensor.dim() == 2
+            and target.dim() == 2
+            and tensor.shape[0] == target.shape[0]
+            and tensor.shape[1] < target.shape[1]
+        ):
+            grown = torch.zeros_like(target)
+            grown[:, : tensor.shape[1]] = tensor.to(device=target.device, dtype=target.dtype)
+            adapted[key] = grown
+            padded.append((key, tuple(tensor.shape), tuple(target.shape)))
+        # else: shape we cannot adapt -> keep fresh init (surfaced as missing below)
+    result = model.load_state_dict(adapted, strict=False)
+    if padded:
+        print(f"[warm-start] {label}: zero-padded grown obs columns -> {padded}")
+    if result.missing_keys:
+        print(f"[warm-start] {label}: kept fresh init for {list(result.missing_keys)}")
+
+
 def load_bc_warm_start(
     models: Mapping[str, torch.nn.Module],
     *,
@@ -1185,9 +1249,9 @@ def load_bc_warm_start(
     checkpoint = torch.load(resolved_path, map_location=device, weights_only=False)
     if "policy_state_dict" not in checkpoint:
         raise KeyError(f"BC checkpoint {resolved_path} does not contain policy_state_dict")
-    models["policy"].load_state_dict(checkpoint["policy_state_dict"])
+    _load_state_dict_obs_padded(models["policy"], checkpoint["policy_state_dict"], label="policy")
     if "value_state_dict" in checkpoint:
-        models["value"].load_state_dict(checkpoint["value_state_dict"], strict=False)
+        _load_state_dict_obs_padded(models["value"], checkpoint["value_state_dict"], label="value")
     if hasattr(models["policy"], "set_active_skill_names"):
         models["policy"].set_active_skill_names(active_skill_names)
     return resolved_path
@@ -1216,12 +1280,30 @@ def _bc_param_mask(skill_ids: torch.Tensor) -> torch.Tensor:
     return masks[skill_ids]
 
 
-def _stage_skill_logits(skill_logits: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+def _stage_skill_logits(
+    skill_logits: torch.Tensor, stages: torch.Tensor, observations: torch.Tensor | None = None
+) -> torch.Tensor:
     masks = []
     for stage_id in stages.detach().cpu().tolist():
         masks.append(skill_mask(get_stage_spec(int(stage_id)).active_skill_names))
     stage_masks = torch.as_tensor(np.asarray(masks), dtype=skill_logits.dtype, device=skill_logits.device)
+    if observations is not None:
+        # Same forbid-invalid gate the rollout policy applies, so the BC targets are
+        # masked over the identical allowed set as the dataset labels were produced under.
+        stage_masks = stage_masks * gate_skill_mask_from_obs(observations).to(dtype=stage_masks.dtype)
     return skill_logits.masked_fill(stage_masks <= 0.0, -1.0e9)
+
+
+def bc_ce_safe_logits(
+    masked_logits: torch.Tensor, raw_logits: torch.Tensor, targets: torch.Tensor
+) -> torch.Tensor:
+    """CE-safe logits: the gate/stage mask stays on every skill EXCEPT the teacher's own
+    label, whose raw logit is restored. Prevents a (transient) teacher/gate disagreement
+    from yielding a ~1e9 cross-entropy spike on a forbidden target. Once the teacher is
+    rewired onto the same gate (so every label is gate-allowed), this is a no-op.
+    """
+    idx = targets.unsqueeze(1)
+    return masked_logits.scatter(1, idx, raw_logits.gather(1, idx))
 
 
 class BCReplayRegularizer:
@@ -1351,15 +1433,15 @@ class BCReplayRegularizer:
         skill_logits, outputs = self.policy.compute({"observations": obs}, role="policy")
         with torch.no_grad():
             reference_logits, _ = self.reference_policy.compute({"observations": obs}, role="policy")
-        masked_logits = _stage_skill_logits(skill_logits, stages)
-        reference_masked_logits = _stage_skill_logits(reference_logits, stages)
+        masked_logits = _stage_skill_logits(skill_logits, stages, obs)
+        reference_masked_logits = _stage_skill_logits(reference_logits, stages, obs)
         current_log_probs = F.log_softmax(masked_logits, dim=-1)
         current_probs = current_log_probs.exp()
         reference_log_probs = F.log_softmax(reference_masked_logits, dim=-1)
         kl_per_sample = torch.sum(current_probs * (current_log_probs - reference_log_probs), dim=-1)
         param_targets = torch.clamp(actions[:, 1:], min=-1.0, max=1.0)
         ce = F.cross_entropy(
-            masked_logits,
+            bc_ce_safe_logits(masked_logits, skill_logits, skill_targets),
             skill_targets,
             weight=self.skill_class_weights.to(device=obs.device),
             reduction="none",
@@ -2083,6 +2165,7 @@ def run_training(
 def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
     effective_train = replace(
         TRAIN,
+        experiment_name=run_cfg.experiment_name,
         trainer_timesteps=run_cfg.train_steps,
         rollout_steps=run_cfg.rollout_steps,
         learning_epochs=run_cfg.learning_epochs,

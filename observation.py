@@ -27,6 +27,12 @@ class ObsIndex(IntEnum):
     nearest_teammate_front_dist = 20
     nearest_opponent_front_dist = 21
     nearest_uncertain_front_dist = 22
+    # Skill-gate state baked into the obs (Design A). The per-step forbid-invalid
+    # mask is derived from these columns, so it is a pure function of the stored
+    # observation and MAPPO's update-time log-prob recompute reproduces it exactly.
+    shoot_armed = 23
+    dribble_armed = 24
+    shoot_arm_progress = 25
 
 
 OBS_FEATURE_NAMES = tuple(index.name for index in ObsIndex)

@@ -16,12 +16,25 @@ import torch.nn.functional as F
 from action import ACTION_PARAM_MASKS, SKILL_ORDER, skill_mask
 from config import ACTION, ROOT_DIR, TRAIN
 from curriculum import get_stage_spec
-from train import PolicyNetwork, RUNS_DIR, ValueNetwork
+from train import (
+    PolicyNetwork,
+    RUNS_DIR,
+    ValueNetwork,
+    _load_state_dict_obs_padded,
+    bc_ce_safe_logits,
+    gate_skill_mask_from_obs,
+)
 
 
 # Edit these constants directly for IDE-driven experiments. Env vars only exist
 # to make overnight runs reproducible from shell scripts.
 DATASET_PATH = os.getenv("RL_BC_DATASET", "")
+# Optional warm-start: initialize the BC policy/value from an existing checkpoint
+# (e.g. the 720k base) before fine-tuning on the dataset, instead of training from
+# scratch. The first Linear layer is zero-padded if the checkpoint has fewer obs
+# columns (23 -> 26), so day-0 behaviour matches the base and BC re-anchors it on the
+# clean drive->shoot data while preserving the base's learned features.
+INIT_CHECKPOINT = os.getenv("RL_BC_INIT_CHECKPOINT", "")
 OUTPUT_ROOT = RUNS_DIR / "bc_warm_start"
 DEVICE = os.getenv("RL_BC_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = int(os.getenv("RL_BC_BATCH_SIZE", "256"))
@@ -99,8 +112,14 @@ def _stage_masks(stages: torch.Tensor) -> torch.Tensor:
     return torch.stack([masks[int(stage_id.item())] for stage_id in stages], dim=0)
 
 
-def _masked_logits(skill_logits: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+def _masked_logits(
+    skill_logits: torch.Tensor, stages: torch.Tensor, observations: torch.Tensor | None = None
+) -> torch.Tensor:
     masks = _stage_masks(stages).to(dtype=skill_logits.dtype)
+    if observations is not None:
+        # Same forbid-invalid gate the RL rollout applies, so BC and RL share mask
+        # semantics and the dataset labels are scored over the identical allowed set.
+        masks = masks * gate_skill_mask_from_obs(observations).to(dtype=masks.dtype)
     return skill_logits.masked_fill(masks <= 0.0, -1.0e9)
 
 
@@ -172,10 +191,15 @@ def _loss_for_batch(
     skill_targets = torch.clamp(actions[:, 0].round().long(), min=0, max=len(SKILL_ORDER) - 1)
     param_targets = torch.clamp(actions[:, 1:], min=-1.0, max=1.0)
     skill_logits, outputs = policy.compute({"observations": observations}, role="policy")
-    masked_skill_logits = _masked_logits(skill_logits, stages)
+    masked_skill_logits = _masked_logits(skill_logits, stages, observations)
     param_mean = outputs["param_mean"]
 
-    ce = F.cross_entropy(masked_skill_logits, skill_targets, weight=class_weights, reduction="none")
+    ce = F.cross_entropy(
+        bc_ce_safe_logits(masked_skill_logits, skill_logits, skill_targets),
+        skill_targets,
+        weight=class_weights,
+        reduction="none",
+    )
     param_mask = _param_mask_for_skills(skill_targets)
     param_raw = F.smooth_l1_loss(param_mean, param_targets, reduction="none") * param_mask
     param_denominator = torch.clamp(param_mask.sum(dim=-1), min=1.0)
@@ -213,7 +237,7 @@ def _validate(
     _, metrics = _loss_for_batch(policy, observations, actions, stages, weights, class_weights)
     skill_targets = torch.clamp(actions[:, 0].round().long(), min=0, max=len(SKILL_ORDER) - 1)
     skill_logits, outputs = policy.compute({"observations": observations}, role="policy")
-    predictions = torch.argmax(_masked_logits(skill_logits, stages), dim=-1)
+    predictions = torch.argmax(_masked_logits(skill_logits, stages, observations), dim=-1)
     param_mask = _param_mask_for_skills(skill_targets)
     param_abs_error = torch.abs(outputs["param_mean"] - torch.clamp(actions[:, 1:], min=-1.0, max=1.0)) * param_mask
 
@@ -263,6 +287,17 @@ def main() -> None:
     )
     policy.set_active_skill_names(SKILL_ORDER)
     value = ValueNetwork(observation_space, state_space, action_space, DEVICE, TRAIN.hidden_size)
+
+    if INIT_CHECKPOINT:
+        init_path = Path(INIT_CHECKPOINT).expanduser().resolve()
+        init_ckpt = torch.load(init_path, map_location=DEVICE, weights_only=False)
+        if "policy_state_dict" not in init_ckpt:
+            raise ValueError(f"RL_BC_INIT_CHECKPOINT {init_path} has no policy_state_dict")
+        _load_state_dict_obs_padded(policy, init_ckpt["policy_state_dict"], label="bc-init policy")
+        if "value_state_dict" in init_ckpt:
+            _load_state_dict_obs_padded(value, init_ckpt["value_state_dict"], label="bc-init value")
+        print(f"[bc] warm-started from {init_path} (obs zero-padded if grown)", flush=True)
+
     optimizer = torch.optim.AdamW(policy.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
     observations = torch.as_tensor(observations_np, dtype=torch.float32, device=DEVICE)

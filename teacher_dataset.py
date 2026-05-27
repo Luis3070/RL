@@ -63,6 +63,23 @@ SHOOT_FINISH_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_SHOOT_FINISH_EPISODE
 SHOOT_CONTRAST_EPISODES_PER_STAGE = int(os.getenv("RL_TEACHER_SHOOT_CONTRAST_EPISODES_PER_STAGE", "1"))
 SHOOT_CONTRAST_MAX_STEPS = int(os.getenv("RL_TEACHER_SHOOT_CONTRAST_MAX_STEPS", "90"))
 SHOOT_CONTRAST_STOP_ON_SHOOT = os.getenv("RL_TEACHER_SHOOT_CONTRAST_STOP_ON_SHOOT", "1") == "1"
+# Per-episode success filter: commit an episode's samples to the dataset only if the
+# teacher actually COMPLETED the chain (scored), so the BC anchor is not poisoned by
+# failed trajectories (pure-walk stalls, in-place dribbling, repeated point-blank
+# misses) — the teacher completes the chain only ~60-70% of the time on noisy SimRobot
+# perception. Applies to chain stages (>=1) and completion-intended scenarios; the
+# deliberately-truncated `shoot_contrast` negatives and the pre-chain stages (<1) are
+# exempt. Metric: clean_finish (default) | goal | either.
+#
+# Default is `clean_finish` to MATCH the stage promotion gate, which judges stage 1
+# on clean_finish_rate>=0.60 with NO goal requirement (curriculum.py): a chain that
+# drives the ball and takes a clean shot IS stage success — conversion at the 2.5-3m
+# shoot band is a kick-alignment refinement, not the stage bar. Empirically the
+# teacher gets clean_finish=1 on ~83% of curriculum episodes (drive->shoot chains)
+# but goal=0 on most far placements, so filtering on `goal` starves the dataset while
+# `clean_finish` keeps the chains and drops only the pure-walk stalls.
+SUCCESS_FILTER_ENABLED = os.getenv("RL_TEACHER_SUCCESS_FILTER", "1") == "1"
+SUCCESS_FILTER_METRIC = os.getenv("RL_TEACHER_SUCCESS_METRIC", "clean_finish")
 
 STAGE_DISTANCE_BANDS_MM = {
     -1: ((300.0, 650.0), (650.0, 950.0), (950.0, 1200.0)),
@@ -229,6 +246,28 @@ def _distance_bin(distance_mm: float) -> str:
     return "full"
 
 
+def _episode_kept(scenario_type: str, stage_id: int, episode_metrics: Mapping[str, float]) -> bool:
+    """Decide whether a collected episode's samples should enter the dataset.
+
+    At chain stages (>=1) we keep only episodes that finished, so failed chains never
+    reach samples.npz / steps.csv. Exemptions: `shoot_contrast` episodes are intentional
+    truncated negatives, and pre-chain stages (<1, no shoot) have no goal to gate on.
+    """
+    if not SUCCESS_FILTER_ENABLED:
+        return True
+    if scenario_type == "shoot_contrast":
+        return True
+    if stage_id < 1:
+        return True
+    goal = float(episode_metrics.get("goal", 0.0)) > 0.0
+    clean_finish = float(episode_metrics.get("clean_finish", 0.0)) > 0.0
+    if SUCCESS_FILTER_METRIC == "clean_finish":
+        return clean_finish
+    if SUCCESS_FILTER_METRIC == "either":
+        return goal or clean_finish
+    return goal
+
+
 def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: int) -> dict[str, object]:
     env = _make_env(stage_id)
     stage = get_stage_spec(stage_id)
@@ -250,9 +289,14 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
         selected_seeds = _select_stage_seeds(stage_id, seed_offset, max_attempts)
         episode_plan: list[tuple[str, int, WorldSpec | None]] = []
         if "shoot" in skill_targets:
-            sequence_episodes = max(1, SHOOT_SEQUENCE_EPISODES_PER_STAGE * max(1, episodes))
-            bridge_episodes = max(1, PRESHOOT_DRIBBLE_EPISODES_PER_STAGE * max(1, episodes))
-            finish_episodes = max(1, SHOOT_FINISH_EPISODES_PER_STAGE * max(1, episodes))
+            # max(0, ...) so each supplementary near-goal scenario can be fully
+            # disabled via its env var. The natural curriculum chain already produces
+            # walk->dribble->shoot->GOAL with real shots, and the near-goal scenarios
+            # were observed to miss (clean_finish but no goal) and corrupt the reset
+            # state for the episodes that follow them.
+            sequence_episodes = max(0, SHOOT_SEQUENCE_EPISODES_PER_STAGE * max(1, episodes))
+            bridge_episodes = max(0, PRESHOOT_DRIBBLE_EPISODES_PER_STAGE * max(1, episodes))
+            finish_episodes = max(0, SHOOT_FINISH_EPISODES_PER_STAGE * max(1, episodes))
             contrast_episodes = max(0, SHOOT_CONTRAST_EPISODES_PER_STAGE * max(1, episodes))
             for sequence_index in range(sequence_episodes):
                 sequence_seed = seed_offset + 80_000 + sequence_index
@@ -307,6 +351,7 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
         kept_episodes = 0
         kept_curriculum_episodes = 0
         attempted_episodes = 0
+        dropped_episodes = 0
         for episode_idx, (scenario_type, seed, world_spec) in enumerate(episode_plan):
             if kept_curriculum_episodes >= episodes and _skill_targets_satisfied(skill_counts, skill_targets):
                 break
@@ -318,6 +363,16 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
             total_reward = 0.0
             episode_skill_counts: Counter[str] = Counter()
             final_info: Mapping[str, object] = {}
+            # Per-episode buffers: samples/rows are only committed to the dataset once
+            # the episode passes the success filter (see _episode_kept), so failed
+            # chains never reach samples.npz / steps.csv.
+            ep_obs: list[np.ndarray] = []
+            ep_actions: list[np.ndarray] = []
+            ep_step_ids: list[int] = []
+            ep_weights: list[float] = []
+            ep_distance_bins: Counter[str] = Counter()
+            ep_quality: Counter[str] = Counter()
+            ep_step_rows: list[Mapping[str, object]] = []
             for step in range(1, MAX_STEPS_PER_EPISODE + 1):
                 info = infos.get(agent_id, {})
                 raw_obs = info.get("raw_obs", {})
@@ -328,6 +383,7 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     backend_obs,
                     stage_id,
                     prev_skill_name,
+                    gate_decision=env.last_gate_decision,
                 )
                 current_obs = np.asarray(obs_dict[agent_id], dtype=np.float32).reshape(-1)
                 current_action = np.asarray(
@@ -355,22 +411,18 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     # provide cleaner positive labels, so stop instead of diluting negatives.
                     break
 
-                observations.append(current_obs)
-                actions.append(current_action)
-                stages.append(stage_id)
-                episode_ids.append(episode_idx)
-                step_ids.append(step)
-                weights.append(weight)
-                skill_counts[skill_name] += 1
+                ep_obs.append(current_obs)
+                ep_actions.append(current_action)
+                ep_step_ids.append(step)
+                ep_weights.append(weight)
                 episode_skill_counts[skill_name] += 1
-                distance_bins[distance_bin] += 1
-                quality_counts["accepted_weighted"] += int(weight > 0.0)
-                quality_counts["full_weight"] += int(weight >= 1.0)
-                quality_counts["low_weight"] += int(0.0 < weight < 1.0)
-                quality_counts["rejected"] += int(weight <= 0.0)
+                ep_distance_bins[distance_bin] += 1
+                ep_quality["accepted_weighted"] += int(weight > 0.0)
+                ep_quality["full_weight"] += int(weight >= 1.0)
+                ep_quality["low_weight"] += int(0.0 < weight < 1.0)
+                ep_quality["rejected"] += int(weight <= 0.0)
 
-                _append_csv_row(
-                    steps_csv,
+                ep_step_rows.append(
                     {
                         "stage_id": stage_id,
                         "episode": episode_idx,
@@ -419,6 +471,7 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     break
 
             episode_metrics = dict(final_info.get("episode_metrics", {})) if final_info else {}
+            kept = _episode_kept(scenario_type, stage_id, episode_metrics)
             _append_csv_row(
                 episodes_csv,
                 {
@@ -426,6 +479,7 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     "episode": episode_idx,
                     "seed": seed,
                     "scenario_type": scenario_type,
+                    "kept": int(kept),
                     "initial_seed_distance_mm": float(seed_distances.get(seed, 0.0)),
                     "steps": sum(episode_skill_counts.values()),
                     "total_reward": total_reward,
@@ -441,15 +495,36 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
                     "stand_steps": episode_skill_counts.get("stand", 0),
                 },
             )
+            # Commit the episode's buffered samples to the dataset only on success; a
+            # dropped episode leaves samples.npz / steps.csv and the skill counters
+            # untouched, so the loop keeps drawing fresh seeds until enough completed
+            # chains accumulate (within max_attempts).
+            if kept:
+                for row in ep_step_rows:
+                    _append_csv_row(steps_csv, row)
+                observations.extend(ep_obs)
+                actions.extend(ep_actions)
+                stages.extend([stage_id] * len(ep_obs))
+                episode_ids.extend([episode_idx] * len(ep_obs))
+                step_ids.extend(ep_step_ids)
+                weights.extend(ep_weights)
+                skill_counts.update(episode_skill_counts)
+                distance_bins.update(ep_distance_bins)
+                quality_counts.update(ep_quality)
+                kept_episodes += 1
+                kept_curriculum_episodes += int(scenario_type == "curriculum")
+            else:
+                dropped_episodes += 1
             print(
                 f"[teacher-dataset] stage={stage_id} attempt={attempted_episodes}/{max_attempts} "
-                f"kept={kept_episodes + 1} curriculum_kept={kept_curriculum_episodes + int(scenario_type == 'curriculum')}/{episodes} "
+                f"{'KEPT' if kept else 'DROP'} goal={float(episode_metrics.get('goal', 0.0)):.0f} "
+                f"clean_finish={float(episode_metrics.get('clean_finish', 0.0)):.0f} "
+                f"kept={kept_episodes} dropped={dropped_episodes} "
+                f"curriculum_kept={kept_curriculum_episodes}/{episodes} "
                 f"steps={sum(episode_skill_counts.values())} "
                 f"skills={dict(episode_skill_counts)} total_skills={dict(skill_counts)}",
                 flush=True,
             )
-            kept_episodes += 1
-            kept_curriculum_episodes += int(scenario_type == "curriculum")
     finally:
         env.close()
     elapsed = time.perf_counter() - started
@@ -458,7 +533,10 @@ def _collect_stage(stage_id: int, episodes: int, output_dir: Path, seed_offset: 
         "episodes": episodes,
         "kept_episodes": kept_episodes,
         "kept_curriculum_episodes": kept_curriculum_episodes,
+        "dropped_episodes": dropped_episodes,
         "attempted_episodes": attempted_episodes,
+        "success_filter_enabled": SUCCESS_FILTER_ENABLED,
+        "success_filter_metric": SUCCESS_FILTER_METRIC,
         "skill_targets": dict(skill_targets),
         "skill_targets_satisfied": _skill_targets_satisfied(skill_counts, skill_targets),
         "selected_seed_distances": {str(seed): float(distance) for seed, distance in seed_distances.items()},
@@ -492,6 +570,8 @@ def main() -> None:
         "simrobot_profile": SIMROBOT_PROFILE,
         "simrobot_launch": SIMROBOT_LAUNCH,
         "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
+        "success_filter_enabled": SUCCESS_FILTER_ENABLED,
+        "success_filter_metric": SUCCESS_FILTER_METRIC,
         "seed_strategy": SEED_STRATEGY,
         "seed_scan_limit": SEED_SCAN_LIMIT,
         "shoot_sequence_episodes_per_stage": SHOOT_SEQUENCE_EPISODES_PER_STAGE,

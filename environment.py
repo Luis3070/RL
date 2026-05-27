@@ -31,6 +31,7 @@ from curriculum import (
     sample_stage_world_spec_with_options,
     stage_skill_mask,
 )
+from gate import GateConfig, SkillGate
 from observation import OBS_FEATURE_NAMES, OBS_SIZE
 from pybh_backend import BackendObservation, PyBHBackend, WorldSpec
 from reward import (
@@ -159,6 +160,10 @@ class RealSimRobotEnv(ParallelEnv):
         self._last_obs: Optional[np.ndarray] = None
         self._last_backend_obs: Optional[BackendObservation] = None
         self._last_evaluation: Optional[StepEvaluation] = None
+        # Unified skill gate: its armed flags are baked into the obs vector so the
+        # policy's per-step forbid-invalid mask is a pure function of the stored obs.
+        self._skill_gate = SkillGate(GateConfig.from_env())
+        self._gate_decision = None
         self._episode_step = 0
         self._skill_history: list[str] = []
         self._trusted_takeover_grace = 0
@@ -171,6 +176,13 @@ class RealSimRobotEnv(ParallelEnv):
         if _STEP_PROFILE:
             self._prof_acc: Dict[str, float] = defaultdict(float)
             self._prof_count = 0
+
+    @property
+    def last_gate_decision(self):
+        """Skill-gate decision for the most recently produced observation. The teacher
+        reads this during collection so its label is consistent with the armed flags
+        baked into the recorded observation (single gate owner = no divergence)."""
+        return self._gate_decision
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -193,6 +205,8 @@ class RealSimRobotEnv(ParallelEnv):
         self._current_world_spec = options.get("world_spec") or self._sample_episode_world_spec()
         self._dynamic_world_state = init_dynamic_world_state(self._episode_stage_id, self._current_world_spec, self._rng)
         obs = self.backend.reset(world_spec=self._current_world_spec)
+        self._skill_gate.reset()
+        self._gate_decision = self._skill_gate.step(obs)
         encoded = self._encode_obs(obs)
         self._last_obs = encoded
         self._last_backend_obs = obs
@@ -383,6 +397,7 @@ class RealSimRobotEnv(ParallelEnv):
             self._post_takeover_finishing_steps = max(0, self._post_takeover_finishing_steps - 1)
         if _STEP_PROFILE:
             _t2 = time.perf_counter()
+        self._gate_decision = self._skill_gate.step(obs)
         encoded = self._encode_obs(obs)
         if _STEP_PROFILE:
             _t3 = time.perf_counter()
@@ -583,6 +598,7 @@ class RealSimRobotEnv(ParallelEnv):
         def norm_dist(value: float) -> float:
             return float(np.clip(value / ACTION.x_range, 0.0, 1.0))
 
+        gate_feats = self._gate_decision.obs_features() if self._gate_decision is not None else [0.0, 0.0, 0.0]
         return np.asarray(
             [
                 obs.robot_x / ACTION.x_range,
@@ -608,6 +624,7 @@ class RealSimRobotEnv(ParallelEnv):
                 norm_dist(obs.nearest_teammate_front_dist),
                 norm_dist(obs.nearest_opponent_front_dist),
                 norm_dist(obs.nearest_uncertain_front_dist),
+                *gate_feats,
             ],
             dtype=np.float32,
         )
@@ -1218,6 +1235,8 @@ class RealSimRobotEnv(ParallelEnv):
             "stage_name": self._episode_stage_spec.name,
             "active_skill_mask": skill_mask(self._episode_stage_spec.active_skill_names),
             "stage_skill_mask": stage_skill_mask(self._episode_stage_id),
+            "shoot_armed_mask": int(bool(self._gate_decision.shoot_armed)) if self._gate_decision is not None else 0,
+            "dribble_armed_mask": int(bool(self._gate_decision.dribble_armed)) if self._gate_decision is not None else 0,
             "bridge_obs_ready": obs.obs_ready,
             "bridge_frame": obs.frame,
             "obs_export_mode": int(obs.obs_export_mode),

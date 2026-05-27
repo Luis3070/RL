@@ -82,7 +82,9 @@ def main() -> None:
             if not isinstance(raw_obs, Mapping):
                 raise RuntimeError("teacher evaluator requires raw_obs in env info")
             backend_obs = obs_from_raw_mapping(raw_obs)
-            payload, absolute_action, residual_action = teacher_policy_payload(backend_obs, STAGE_ID, prev_skill_name)
+            payload, absolute_action, residual_action = teacher_policy_payload(
+                backend_obs, STAGE_ID, prev_skill_name, gate_decision=env.last_gate_decision
+            )
             obs_dict, rewards, terminateds, truncateds, infos = env.step({agent_id: payload})
             step_info = infos.get(agent_id, {})
             reward = float(rewards.get(agent_id, 0.0))

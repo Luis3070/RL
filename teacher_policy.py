@@ -15,13 +15,12 @@ if str(_SCRIPT_DIR) not in sys.path:
 from action import SKILL_ORDER, SkillType, StructuredSkillAction
 from config import ACTION
 from curriculum import get_stage_spec
+from gate import GateDecision, SkillGate
 from pybh_backend import BackendObservation
 from reward import (
     BALL_TRUSTED_MAX_AGE_MS,
     build_fallback_action_targets,
     features_from_obs,
-    is_shoot_zone,
-    is_takeover_envelope,
 )
 
 BALL_SEARCH_MAX_AGE_MS = 1000.0
@@ -29,6 +28,13 @@ OBSTACLE_FRONT_CLOSE_MM = 900.0
 OBSTACLE_LATERAL_SHIFT_MM = 420.0
 TEACHER_ROBUST_TAKEOVER_MM = 560.0
 TEACHER_ROBUST_TAKEOVER_ANGLE_RAD = math.radians(45.0)
+# Natural-perception "ball-blind" threshold: beyond this the robot has not seen the
+# ball on the honest (natural) channel within the gate's engagement grace, so it
+# should actively re-acquire rather than blind-walk (walkTo's head does not reliably
+# keep a ground ball in view). Aligned with GateConfig.dribble_grace_enter_age_ms so
+# the teacher hands a fresh-enough sighting to the gate before it tries to engage.
+NATURAL_BLIND_MAX_AGE_MS = 1500.0
+BALL_SCAN_RANGE_MM = 2500.0  # NAO camera ball-detect range
 
 
 def obs_from_raw_mapping(raw_obs: Mapping[str, object]) -> BackendObservation:
@@ -87,17 +93,43 @@ def stage_aware_teacher_action(
     obs: BackendObservation,
     stage_id: int,
     prev_skill_name: str | None = None,
+    *,
+    gate_decision: GateDecision | None = None,
 ) -> StructuredSkillAction:
     stage = get_stage_spec(stage_id)
     active = set(stage.active_skill_names)
     features = features_from_obs(obs)
+    nat_age_ms = float(getattr(obs, "natural_time_since_ball_seen", 0.0))
+
+    # Thin cold-start fallback: when ball-blind on the NATURAL channel beyond the
+    # engagement grace, actively scan with `observe` to acquire a real sighting (if
+    # the ball is within camera range) instead of blind-walking; otherwise close
+    # distance so it comes into view. `observe` degrades to walk when it is not an
+    # active skill for the stage, so this is inert until observe is enabled.
+    if nat_age_ms > NATURAL_BLIND_MAX_AGE_MS:
+        if "observe" in active and features.d_ball_mm < BALL_SCAN_RANGE_MM:
+            return StructuredSkillAction(skill_type=SkillType.observe)
+        if "walk" in active:
+            return _action_from_anchor("walk", obs, stage_id=stage_id)
+        return StructuredSkillAction(skill_type=SkillType.stand)
 
     if features.t_seen_ms > BALL_SEARCH_MAX_AGE_MS:
         if "walk" in active:
             return _action_from_anchor("walk", obs, stage_id=stage_id)
         return StructuredSkillAction(skill_type=SkillType.stand)
 
-    takeover = is_takeover_envelope(features)
+    # Skill selection flows through the unified SkillGate — the same forbid-invalid
+    # gate the RL policy masks on and the env bakes into the observation. When the
+    # teacher runs inside the env (dataset/eval), the caller passes the env's own
+    # decision so the recorded obs's armed flags exactly permit the recorded label;
+    # otherwise we fall back to a single-step decision (no hysteresis latch). The
+    # drive-commit latch is now the gate's dribble enter/exit hysteresis.
+    if gate_decision is None:
+        gate_decision = SkillGate().step(obs)
+    shoot_ready = gate_decision.shoot_armed
+    takeover = gate_decision.dribble_armed
+
+    # stage>=3 robust takeover: commit on geometry alone across brief perception dips.
     if (
         stage_id >= 3
         and features.d_ball_mm <= TEACHER_ROBUST_TAKEOVER_MM
@@ -105,7 +137,6 @@ def stage_aware_teacher_action(
         and features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
     ):
         takeover = True
-    shoot_ready = is_shoot_zone(features)
 
     if stage_id < 0:
         skill_name = "walk"
@@ -115,19 +146,6 @@ def stage_aware_teacher_action(
         skill_name = "dribble"
     else:
         skill_name = "walk"
-
-    # Drive-commit latch: once driving, keep dribbling through small distance/angle blips
-    # (widened 520->600mm, 45->55deg) so a momentary wobble mid-drive doesn't drop the
-    # teacher back to walk and break the goalward push it demonstrates.
-    if (
-        prev_skill_name == "dribble"
-        and "dribble" in active
-        and features.d_ball_mm <= 600.0
-        and abs(features.a_ball_rad) <= math.radians(55.0)
-        and features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
-        and not shoot_ready
-    ):
-        skill_name = "dribble"
 
     if skill_name not in active:
         skill_name = "walk" if "walk" in active else "stand"
@@ -169,8 +187,10 @@ def teacher_policy_payload(
     obs: BackendObservation,
     stage_id: int,
     prev_skill_name: str | None = None,
+    *,
+    gate_decision: GateDecision | None = None,
 ) -> tuple[dict[str, float | int], StructuredSkillAction, StructuredSkillAction]:
-    absolute_action = stage_aware_teacher_action(obs, stage_id, prev_skill_name)
+    absolute_action = stage_aware_teacher_action(obs, stage_id, prev_skill_name, gate_decision=gate_decision)
     residual_action = absolute_to_residual_action(absolute_action, obs)
     payload = residual_action.as_dict()
     payload["policy_skill_raw"] = float(residual_action.skill_type)
