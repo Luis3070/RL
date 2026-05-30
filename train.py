@@ -695,6 +695,12 @@ def _write_run_config(
             "simrobot_bin": str(backend_cfg.simrobot_bin),
         },
         "parallel_player_numbers": list(run_cfg.parallel_player_numbers),
+        "production_resets": {
+            "enabled": os.environ.get("RL_PRODUCTION_SCENARIO_RESETS", "0"),
+            "scenario_set": os.environ.get("RL_PRODUCTION_SCENARIO_SET", ""),
+            "scenario_filter": os.environ.get("RL_PRODUCTION_SCENARIOS", ""),
+            "scenario_weights": os.environ.get("RL_PRODUCTION_SCENARIO_WEIGHTS", ""),
+        },
         "wire_audit": asdict(train_cfg.wire_audit),
     }
     paths.run_config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

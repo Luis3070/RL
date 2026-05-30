@@ -182,10 +182,9 @@ class VisibleParallelRuntime:
                 shutil.rmtree(config_dst)
             shutil.copytree(config_src, config_dst)
             self._rewrite_settings(config_dst / "settings.cfg", player_number)
-            self._rewrite_scene_robot_name(
-                config_dst / "Scenes" / f"{self.scene_name}.ros2",
-                player_number,
-            )
+            scene_path = config_dst / "Scenes" / f"{self.scene_name}.ros2"
+            self._rewrite_scene_robot_name(scene_path, player_number)
+            self._ensure_stage_obstacle_bodies(scene_path, player_number)
 
     def _taskset_prefix(self, player_number: int) -> list[str]:
         if self._cpu_affinity_map and player_number in self._cpu_affinity_map:
@@ -268,6 +267,53 @@ class VisibleParallelRuntime:
         path.write_text(text, encoding="utf-8")
 
     @staticmethod
+    def _ensure_stage_obstacle_bodies(path: Path, player_number: int) -> None:
+        """Add dummy bodies needed by stage 2+ world resets to per-slot 1v0 scenes.
+
+        Each visible training slot is an independent SimRobot process whose controlled
+        robot number matches the slot/player number.  Stage 2+ reset specs also place
+        support teammates 2/3 and opponent obstacles 1/2.  The fast visible 1v0 scene
+        only contains the controlled robot, so promotion would otherwise fail with
+        "could not find teammate/opponent robot".  We add only non-controlled dummy
+        bodies so the per-slot scene remains small and avoids duplicate robot names.
+        """
+        text = path.read_text(encoding="utf-8")
+        if 'name="robot21"' in text:
+            return
+
+        bodies: list[str] = []
+        for number, y in ((2, -1.1), (3, -2.6)):
+            if int(player_number) == number:
+                continue
+            bodies.append(
+                f'''      <Body ref="NaoDummy" name="robot{number}">
+        <Set name="NaoColor" value="black"/>
+        <Translation x="1.6" y="{y}" z="320mm"/>
+        <Rotation z="180degree"/>
+      </Body>'''
+            )
+        bodies.extend(
+            [
+                '''      <Body ref="NaoDummy" name="robot21">
+        <Set name="NaoColor" value="red"/>
+        <Translation x="-1.6" y="1.1" z="320mm"/>
+        <Rotation z="0degree"/>
+      </Body>''',
+                '''      <Body ref="NaoDummy" name="robot22">
+        <Set name="NaoColor" value="red"/>
+        <Translation x="-1.6" y="2.6" z="320mm"/>
+        <Rotation z="0degree"/>
+      </Body>''',
+            ]
+        )
+        extras = "\n".join(bodies)
+        if '<Compound name="extras"/>' in text:
+            text = text.replace('<Compound name="extras"/>', f'<Compound name="extras">\n{extras}\n    </Compound>')
+        else:
+            text = text.replace('<Compound name="balls">', f'<Compound name="extras">\n{extras}\n    </Compound>\n\n    <Compound name="balls">')
+        path.write_text(text, encoding="utf-8")
+
+    @staticmethod
     def _terminate(process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
             return
@@ -276,7 +322,13 @@ class VisibleParallelRuntime:
             process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5.0)
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                print(
+                    f"[visible-runtime] process did not exit after SIGKILL: pid={process.pid}",
+                    flush=True,
+                )
 
 
 def _replace_cfg_assignment(text: str, key: str, value: str) -> str:

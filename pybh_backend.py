@@ -77,11 +77,18 @@ SYNTHETIC_BALL_WARMUP_STEPS = 12
 # episode. rl_set_dynamic_world(ball=...) does stop it (confirmed empirically), so we
 # re-place and wait until the ground-truth ball is at spec and at rest. Tolerances are
 # in mm and per-obs-read; a settled ball reads <~15mm/read, a rolling one >~80mm/read.
-BALL_SETTLE_POS_TOL_MM = 120.0
-BALL_SETTLE_STILL_TOL_MM = 20.0
-BALL_SETTLE_STILL_FRAMES = 3
-BALL_SETTLE_MAX_REPLACES = 5
-BALL_SETTLE_TIMEOUT_MS = 4000
+BALL_SETTLE_POS_TOL_MM = float(os.environ.get("RL_VISIBLE_BALL_SETTLE_POS_TOL_MM", "180.0"))
+BALL_SETTLE_STILL_TOL_MM = float(os.environ.get("RL_VISIBLE_BALL_SETTLE_STILL_TOL_MM", "20.0"))
+BALL_SETTLE_STILL_FRAMES = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_STILL_FRAMES", "3")))
+BALL_SETTLE_MAX_REPLACES = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_MAX_REPLACES", "10")))
+BALL_SETTLE_TIMEOUT_MS = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_TIMEOUT_MS", "10000")))
+VISIBLE_RESET_MAX_ATTEMPTS = max(1, int(os.environ.get("RL_VISIBLE_RESET_MAX_ATTEMPTS", "8")))
+VISIBLE_BALL_SETTLE_FALLBACK = os.environ.get("RL_VISIBLE_BALL_SETTLE_FALLBACK", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _normalize_angle(theta: float) -> float:
@@ -860,6 +867,15 @@ class PyBHBackend:
                 teammates=teammates,
                 opponents=opponents,
             )
+        if self._uses_visible_simrobot() and world_spec.teammates:
+            # Parallel visible slots use the slot/player number as the controlled
+            # robot number. A curriculum reset can list a support teammate whose
+            # number equals this slot; in that slot it is the controlled robot, not
+            # an extra body to place. Drop it before asking SimRobot for a teammate
+            # body that correctly does not exist.
+            filtered_teammates = tuple(player for player in world_spec.teammates if int(player.number) != self.player_number)
+            if len(filtered_teammates) != len(world_spec.teammates):
+                world_spec = replace(world_spec, teammates=filtered_teammates)
         validate_world_spec(world_spec, mode=self.mode)
         self._world_spec = world_spec
 
@@ -872,9 +888,8 @@ class PyBHBackend:
             return obs
         elif self._uses_visible_simrobot():
             robot_target = np.array([world_spec.robot_x, world_spec.robot_y], dtype=np.float32)
-            _RESET_MAX_ATTEMPTS = 3
             last_exc: Exception | None = None
-            for attempt in range(_RESET_MAX_ATTEMPTS):
+            for attempt in range(VISIBLE_RESET_MAX_ATTEMPTS):
                 # Stop any previous walkTo/dribble command before teleporting.
                 # Otherwise the visible SimRobot can resume root-assisted walking
                 # immediately after reset and drift away before the reset obs check.
@@ -897,7 +912,7 @@ class PyBHBackend:
                     return obs
                 except RuntimeError as exc:
                     last_exc = exc
-                    if attempt < _RESET_MAX_ATTEMPTS - 1:
+                    if attempt < VISIBLE_RESET_MAX_ATTEMPTS - 1:
                         # Clear _last_obs so the next read_obs() uses min_frame=-1 (accept
                         # any frame). Without this, a stale high frame from the failed attempt
                         # can block fresh lower-numbered frames from the retried reset.
@@ -1051,14 +1066,18 @@ class PyBHBackend:
             )
 
         min_frame = self._last_obs.frame if self._last_obs is not None else -1
-        poll_timeout_ms = max(1, min(50, self.obs_timeout_ms // 10 if self.obs_timeout_ms > 0 else 10))
+        visible_step_timeout_ms = max(
+            1,
+            int(os.environ.get("RL_VISIBLE_STEP_OBS_TIMEOUT_MS", str(self.obs_timeout_ms))),
+        )
+        poll_timeout_ms = max(1, min(50, visible_step_timeout_ms // 10 if visible_step_timeout_ms > 0 else 10))
         # Use a deadline-based loop rather than a fixed step count.  During a PPO
         # gradient update the env is idle while SimRobot keeps running: semaphore
         # counts accumulate (one per frame, ~30 Hz).  With a fixed 20-step cap the
         # loop exhausts draining those counts before a fresh frame can arrive.
         # A deadline loop drains stale counts in <1 ms each and still blocks
         # correctly for the next fresh frame within the full obs_timeout window.
-        obs_deadline_s = time.monotonic() + (self.obs_timeout_ms / 1000.0 if self.obs_timeout_ms > 0 else 5.0)
+        obs_deadline_s = time.monotonic() + (visible_step_timeout_ms / 1000.0 if visible_step_timeout_ms > 0 else 5.0)
         last_obs: BackendObservation | None = None
         while time.monotonic() < obs_deadline_s:
             obs = self._stabilize_obs(BackendObservation.from_payload(pybh.rl_get_obs(self.player_number, poll_timeout_ms)))
@@ -1335,9 +1354,11 @@ class PyBHBackend:
         its velocity, so a ball moving from the previous episode's kick rolls (even
         into the goal) at the start of the next episode. We re-place the ball (which
         stops it), then poll the GROUND-TRUTH ball until it holds still at spec for a
-        few consecutive reads, re-placing again if it drifts. Reads the RAW payload
-        (not the synthetic-warmup-stabilized obs) so the settle check sees the true
-        ball. Raises RuntimeError (caught by the reset retry) if it will not settle."""
+        few consecutive reads, re-placing again if it drifts. The visible bridge
+        does not expose a separate ground-truth ball coordinate, so the check is
+        based on the exported ball estimate. If that estimate remains mirrored or
+        stale even after acknowledged dynamic-world placement, return a synthetic
+        reset obs instead of aborting a healthy run."""
         spec_x, spec_y = float(world_spec.ball_x), float(world_spec.ball_y)
         per_try_timeout_ms = max(1, min(100, self.visible_reset_obs_timeout_ms // 20))
         self._replace_visible_ball(spec_x, spec_y)
@@ -1367,10 +1388,61 @@ class PyBHBackend:
                     self._replace_visible_ball(spec_x, spec_y)
                     replaces += 1
                     prev = None
+        if VISIBLE_BALL_SETTLE_FALLBACK and last_obs is not None and last_obs.obs_ready:
+            drift = math.hypot(float(last_obs.ball_x) - spec_x, float(last_obs.ball_y) - spec_y)
+            mirror_drift = math.hypot(float(last_obs.ball_x) + spec_x, float(last_obs.ball_y) + spec_y)
+            status = self._read_world_status()
+            stabilized = self._stabilize_obs(last_obs)
+            rel_x, rel_y = _field_to_robot(
+                float(stabilized.robot_x),
+                float(stabilized.robot_y),
+                float(stabilized.robot_theta),
+                spec_x,
+                spec_y,
+            )
+            print(
+                f"[pybh_backend p={self.player_number}] visible ball settle fallback "
+                f"spec=({spec_x:.0f},{spec_y:.0f}) exported=({last_obs.ball_x:.0f},{last_obs.ball_y:.0f}) "
+                f"estimated=({last_obs.estimated_ball_x:.0f},{last_obs.estimated_ball_y:.0f}) "
+                f"drift={drift:.1f}mm mirror_drift={mirror_drift:.1f}mm "
+                f"source={last_obs.ball_export_source} corrected={int(bool(last_obs.corrected_exported_ball))} "
+                f"seen={last_obs.ball_seen_percentage:.1f} natural_seen={last_obs.natural_ball_seen_percentage:.1f} "
+                f"consistent={int(bool(last_obs.natural_ball_consistent_with_game_state))} status=({status.summary()})",
+                flush=True,
+            )
+            return replace(
+                stabilized,
+                ball_x=spec_x,
+                ball_y=spec_y,
+                ball_rel_x=float(rel_x),
+                ball_rel_y=float(rel_y),
+                ball_end_rel_x=float(rel_x),
+                ball_end_rel_y=float(rel_y),
+                ball_vel_x=0.0,
+                ball_vel_y=0.0,
+                time_since_ball_seen=0.0,
+                time_since_ball_disappeared=0.0,
+                ball_seen_percentage=100.0,
+                ball_consistent_with_game_state=True,
+                synthetic_ball_observation=True,
+                synthetic_ball_reason="visible_reset_settle_fallback",
+            )
         drift_str = "n/a" if last_obs is None else f"{math.hypot(float(last_obs.ball_x) - spec_x, float(last_obs.ball_y) - spec_y):.1f}mm"
+        last_str = (
+            ""
+            if last_obs is None
+            else (
+                f" exported=({last_obs.ball_x:.1f},{last_obs.ball_y:.1f})"
+                f" estimated=({last_obs.estimated_ball_x:.1f},{last_obs.estimated_ball_y:.1f})"
+                f" source={last_obs.ball_export_source}"
+                f" corrected={int(bool(last_obs.corrected_exported_ball))}"
+                f" seen={last_obs.ball_seen_percentage:.1f}"
+                f" consistent={int(bool(last_obs.natural_ball_consistent_with_game_state))}"
+            )
+        )
         raise RuntimeError(
             f"visible ball did not settle at spec=({spec_x:.0f},{spec_y:.0f}) within "
-            f"{BALL_SETTLE_TIMEOUT_MS}ms (replaces={replaces}, final_drift={drift_str})"
+            f"{BALL_SETTLE_TIMEOUT_MS}ms (replaces={replaces}, final_drift={drift_str}{last_str})"
         )
 
     def _stabilize_obs(self, obs: BackendObservation) -> BackendObservation:

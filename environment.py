@@ -34,6 +34,7 @@ from curriculum import (
 from gate import GateConfig, SkillGate
 from observation import OBS_FEATURE_NAMES, OBS_SIZE
 from pybh_backend import BackendObservation, PyBHBackend, WorldSpec
+from production_curriculum import ProductionScenario, production_scenarios, production_topup_scenarios
 from reward import (
     TAKEOVER_GRACE_STEPS,
     StepContext,
@@ -61,6 +62,46 @@ BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
 _STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
 _PROFILE_INTERVAL = int(os.getenv("RL_PROFILE_INTERVAL", "256"))
 POSE_JUMP_WARNING_MM = 350.0
+
+_DEFAULT_PRODUCTION_SCENARIO_WEIGHTS = {
+    "finish_band_2p5_3m_clean": 3.0,
+    "finish_band_2p5_3m_static_lane": 3.0,
+    "preshoot_bad_angle_boundary": 2.0,
+    "dynamic_full_field_pressure": 1.0,
+    "blocked_corridor_repair": 2.0,
+    "finish_near_arm_clean_topup": 3.0,
+    "finish_bridge_clean_topup": 4.0,
+    "finish_bridge_static_topup": 3.0,
+    "blocked_corridor_finish_topup": 2.0,
+    "dynamic_finish_pressure_topup": 3.0,
+}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_csv_env(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _parse_production_weights() -> dict[str, float]:
+    weights = dict(_DEFAULT_PRODUCTION_SCENARIO_WEIGHTS)
+    raw = os.getenv("RL_PRODUCTION_SCENARIO_WEIGHTS", "")
+    for item in raw.split(","):
+        if not item.strip() or ":" not in item:
+            continue
+        name, value = item.split(":", 1)
+        name = name.strip()
+        try:
+            weights[name] = max(0.0, float(value.strip()))
+        except ValueError:
+            continue
+    return weights
 
 
 def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
@@ -171,11 +212,21 @@ class RealSimRobotEnv(ParallelEnv):
         self._episode_stage_id = self.stage_spec.stage_id
         self._episode_stage_spec = self.stage_spec
         self._current_world_spec = None
+        self._production_scenarios, self._production_scenario_weights = self._build_production_scenario_distribution()
+        self._pending_production_scenario: ProductionScenario | None = None
+        self._current_production_scenario: ProductionScenario | None = None
         self._dynamic_world_state = None
         self._episode_tracker: Dict[str, object] = {}
         if _STEP_PROFILE:
             self._prof_acc: Dict[str, float] = defaultdict(float)
             self._prof_count = 0
+        if self._production_scenarios and int(self.cfg.backend.player_number) == 1:
+            raw_weight_map = _parse_production_weights()
+            scenario_text = ", ".join(
+                f"{scenario.name}:{raw_weight_map.get(scenario.name, 1.0):g}"
+                for scenario in self._production_scenarios
+            )
+            print(f"[production-resets] enabled scenarios={scenario_text}", flush=True)
 
     @property
     def last_gate_decision(self):
@@ -200,9 +251,20 @@ class RealSimRobotEnv(ParallelEnv):
         self._post_takeover_finishing_steps = 0
         self._last_evaluation = None
         options = options or {}
+        self._pending_production_scenario = None
+        self._current_production_scenario = None
+        if (
+            self._production_scenarios
+            and "stage_id" not in options
+            and "world_spec" not in options
+        ):
+            self._pending_production_scenario = self._sample_production_scenario()
         self._episode_stage_id = self._sample_episode_stage_id(options)
         self._episode_stage_spec = get_stage_spec(self._episode_stage_id)
-        self._current_world_spec = options.get("world_spec") or self._sample_episode_world_spec()
+        try:
+            self._current_world_spec = options.get("world_spec") or self._sample_episode_world_spec()
+        finally:
+            self._pending_production_scenario = None
         self._dynamic_world_state = init_dynamic_world_state(self._episode_stage_id, self._current_world_spec, self._rng)
         obs = self.backend.reset(world_spec=self._current_world_spec)
         self._skill_gate.reset()
@@ -225,12 +287,17 @@ class RealSimRobotEnv(ParallelEnv):
     def _sample_episode_stage_id(self, options: Mapping[str, object]) -> int:
         if "stage_id" in options:
             return int(options["stage_id"])
+        if self._pending_production_scenario is not None:
+            return int(self._pending_production_scenario.stage_id)
         probability = float(np.clip(self.cfg.stage0_finish_interleave_probability, 0.0, 1.0))
         if self.stage_spec.stage_id == 0 and probability > 0.0 and float(self._rng.random()) < probability:
             return 1
         return self.stage_spec.stage_id
 
     def _sample_episode_world_spec(self) -> WorldSpec:
+        if self._pending_production_scenario is not None:
+            self._current_production_scenario = self._pending_production_scenario
+            return self._pending_production_scenario.world_fn(self._rng)
         finish_probability = {
             1: float(getattr(self.cfg, "stage1_finish_interleave_probability", 0.0)),
             2: float(getattr(self.cfg, "stage2_finish_interleave_probability", 0.0)),
@@ -248,6 +315,42 @@ class RealSimRobotEnv(ParallelEnv):
             self._rng,
             diverse_resets=bool(self.cfg.diverse_stage_resets),
         )
+
+    def _build_production_scenario_distribution(self) -> tuple[list[ProductionScenario], np.ndarray]:
+        if not _env_flag("RL_PRODUCTION_SCENARIO_RESETS", False):
+            return [], np.asarray([], dtype=np.float64)
+
+        scenario_set = os.getenv("RL_PRODUCTION_SCENARIO_SET", "all").strip().lower()
+        set_tokens = {token.strip() for token in scenario_set.replace("+", ",").split(",") if token.strip()}
+        if not set_tokens or "all" in set_tokens or "eval_plus_topup" in set_tokens:
+            set_tokens = {"eval", "topup"}
+
+        scenarios: list[ProductionScenario] = []
+        if {"eval", "production", "grader"} & set_tokens:
+            scenarios.extend(production_scenarios(1))
+        if {"topup", "repair", "bridge"} & set_tokens:
+            scenarios.extend(production_topup_scenarios(1))
+        if not scenarios:
+            raise ValueError(f"RL_PRODUCTION_SCENARIO_SET={scenario_set!r} did not select any scenarios")
+
+        requested_names = _split_csv_env("RL_PRODUCTION_SCENARIOS")
+        if requested_names:
+            scenarios = [scenario for scenario in scenarios if scenario.name in requested_names]
+            if not scenarios:
+                raise ValueError(f"RL_PRODUCTION_SCENARIOS selected no known scenarios: {sorted(requested_names)}")
+
+        weight_map = _parse_production_weights()
+        weights = np.asarray([weight_map.get(scenario.name, 1.0) for scenario in scenarios], dtype=np.float64)
+        if not np.isfinite(weights).all() or float(weights.sum()) <= 0.0:
+            raise ValueError("Production scenario weights must contain at least one positive finite value")
+        weights = weights / float(weights.sum())
+        return scenarios, weights
+
+    def _sample_production_scenario(self) -> ProductionScenario:
+        if not self._production_scenarios:
+            raise RuntimeError("production scenario sampling requested without a scenario pool")
+        index = int(self._rng.choice(len(self._production_scenarios), p=self._production_scenario_weights))
+        return self._production_scenarios[index]
 
     def step(self, actions):
         if not self.agents:
@@ -1085,6 +1188,12 @@ class RealSimRobotEnv(ParallelEnv):
 
         return {
             "stage_id": float(self._episode_stage_id),
+            "production_scenario_active": float(self._current_production_scenario is not None),
+            "production_scenario_name": "" if self._current_production_scenario is None else self._current_production_scenario.name,
+            "production_scenario_obstacles": "" if self._current_production_scenario is None else self._current_production_scenario.obstacles,
+            "production_scenario_contrast": float(
+                self._current_production_scenario is not None and self._current_production_scenario.is_contrast
+            ),
             "steps": float(self._episode_step),
             "episode_reward_mean": float(tracker["reward_total"] / steps),
             "episode_reward_total": float(tracker["reward_total"]),
@@ -1233,6 +1342,12 @@ class RealSimRobotEnv(ParallelEnv):
             "configured_obs_mode": self.cfg.backend.obs_mode,
             "stage_id": self._episode_stage_id,
             "stage_name": self._episode_stage_spec.name,
+            "production_scenario_active": bool(self._current_production_scenario is not None),
+            "production_scenario_name": "" if self._current_production_scenario is None else self._current_production_scenario.name,
+            "production_scenario_obstacles": "" if self._current_production_scenario is None else self._current_production_scenario.obstacles,
+            "production_scenario_contrast": bool(
+                self._current_production_scenario is not None and self._current_production_scenario.is_contrast
+            ),
             "active_skill_mask": skill_mask(self._episode_stage_spec.active_skill_names),
             "stage_skill_mask": stage_skill_mask(self._episode_stage_id),
             "shoot_armed_mask": int(bool(self._gate_decision.shoot_armed)) if self._gate_decision is not None else 0,

@@ -69,6 +69,9 @@ class RealSimRobotEnvWrapper:
                     {
                         "step": int(steps),
                         "configured_obs_mode": info.get("configured_obs_mode"),
+                        "production_scenario_name": info.get("production_scenario_name", ""),
+                        "production_scenario_obstacles": info.get("production_scenario_obstacles", ""),
+                        "production_scenario_contrast": int(bool(info.get("production_scenario_contrast", False))),
                         "reward": float(step_rewards.get(self.possible_agents[0], 0.0)),
                         "policy_skill_name": info.get("policy_skill_name"),
                         "executed_skill_name": info.get("executed_skill_name"),
