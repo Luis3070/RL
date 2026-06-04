@@ -1,0 +1,703 @@
+{
+  "action_shape": [
+    17815,
+    5
+  ],
+  "created_at": "2026-05-27T22:18:56",
+  "dataset_dirs": [
+    "/home/luis/GitHub/RL/runs/fine_tuning_production_dataset/dataset_20260527_083253_sanitized",
+    "/home/luis/GitHub/RL/runs/fine_tuning_production_dataset/dataset_20260527_220501"
+  ],
+  "full_weight_samples": 14792,
+  "observation_shape": [
+    17815,
+    26
+  ],
+  "output_dir": "/home/luis/GitHub/RL/runs/fine_tuning_production_dataset/dataset_20260527_220501_production_merged",
+  "positive_samples": 16402,
+  "positive_skill_counts": {
+    "dribble": 6332,
+    "shoot": 4212,
+    "walk": 5858
+  },
+  "source_summaries": [
+    {
+      "accepted_rate": 0.9210410233789149,
+      "accepted_samples": 10440,
+      "action_shape": [
+        11335,
+        5
+      ],
+      "backend_mode": "simrobot_visible",
+      "band_2p5_3m_sample_rate": 0.4230260255844729,
+      "band_2p5_3m_samples": 4795,
+      "env_stage_id": 4,
+      "episodes_per_scenario": 4,
+      "full_weight_samples": 9145,
+      "global_distance_bins": {
+        "far": 204,
+        "full": 585,
+        "mid": 1194,
+        "near": 3027,
+        "takeover": 6325
+      },
+      "global_gate_bucket_counts": {
+        "dribble_armed": 3658,
+        "none_armed": 5563,
+        "shoot_armed": 2114
+      },
+      "global_gate_label_counts": {
+        "dribble_armed": {
+          "dribble": 3636,
+          "walk": 22
+        },
+        "none_armed": {
+          "dribble": 199,
+          "walk": 5364
+        },
+        "shoot_armed": {
+          "shoot": 2114
+        }
+      },
+      "global_quality_counts": {
+        "accepted_weighted": 10661,
+        "full_weight": 9345,
+        "low_weight": 1316,
+        "rejected": 674
+      },
+      "global_skill_counts": {
+        "dribble": 3835,
+        "shoot": 2114,
+        "walk": 5386
+      },
+      "max_attempt_multiplier": 3,
+      "max_steps_per_episode": 600,
+      "observation_shape": [
+        11335,
+        26
+      ],
+      "output_dir": "/home/luis/GitHub/RL/runs/teacher_production_dataset/dataset_20260527_083253",
+      "production_band_mm": [
+        2500.0,
+        3000.0
+      ],
+      "sanitization": {
+        "accepted_rate_after_sanitization": 0.9210410233789149,
+        "accepted_samples_after_sanitization": 10440,
+        "full_weight_samples_after_sanitization": 9145,
+        "reason": "Zero-weight samples whose teacher label is not a pure function of the baked gate bucket.",
+        "zeroed_gate_mismatch_original_weight_sum": 205.25,
+        "zeroed_gate_mismatch_samples": 221
+      },
+      "sanitized": true,
+      "scenario_names": [
+        "finish_band_2p5_3m_clean",
+        "finish_band_2p5_3m_static_lane",
+        "preshoot_bad_angle_boundary",
+        "dynamic_full_field_pressure",
+        "blocked_corridor_repair"
+      ],
+      "scenarios": [
+        {
+          "attempted_episodes": 8,
+          "band_steps": 1136,
+          "band_steps_attempted": 2610,
+          "distance_bins": {
+            "far": 10,
+            "mid": 211,
+            "near": 1038,
+            "takeover": 900
+          },
+          "drop_reasons": {
+            "no_shoot": 3,
+            "pure_walk_stall": 1
+          },
+          "dropped_episodes": 4,
+          "elapsed_s": 148.05329436299962,
+          "gate_bucket_counts": {
+            "dribble_armed": 596,
+            "none_armed": 1185,
+            "shoot_armed": 378
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 596
+            },
+            "none_armed": {
+              "walk": 1185
+            },
+            "shoot_armed": {
+              "shoot": 378
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 4,
+          "obstacles": "none",
+          "quality_counts": {
+            "accepted_weighted": 2159,
+            "full_weight": 1625,
+            "low_weight": 534,
+            "rejected": 0
+          },
+          "requested_episodes": 4,
+          "samples": 2159,
+          "scenario": "finish_band_2p5_3m_clean",
+          "skill_counts": {
+            "dribble": 596,
+            "shoot": 378,
+            "walk": 1185
+          },
+          "stage_id": 1
+        },
+        {
+          "attempted_episodes": 12,
+          "band_steps": 637,
+          "band_steps_attempted": 3900,
+          "distance_bins": {
+            "far": 76,
+            "mid": 324,
+            "near": 497,
+            "takeover": 479
+          },
+          "drop_reasons": {
+            "no_shoot": 6,
+            "pure_walk_stall": 3
+          },
+          "dropped_episodes": 9,
+          "elapsed_s": 223.95632772199951,
+          "gate_bucket_counts": {
+            "dribble_armed": 330,
+            "none_armed": 834,
+            "shoot_armed": 212
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 330
+            },
+            "none_armed": {
+              "walk": 834
+            },
+            "shoot_armed": {
+              "shoot": 212
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 3,
+          "obstacles": "static",
+          "quality_counts": {
+            "accepted_weighted": 1376,
+            "full_weight": 1374,
+            "low_weight": 2,
+            "rejected": 0
+          },
+          "requested_episodes": 4,
+          "samples": 1376,
+          "scenario": "finish_band_2p5_3m_static_lane",
+          "skill_counts": {
+            "dribble": 330,
+            "shoot": 212,
+            "walk": 834
+          },
+          "stage_id": 2
+        },
+        {
+          "attempted_episodes": 6,
+          "band_steps": 1768,
+          "band_steps_attempted": 1768,
+          "distance_bins": {
+            "full": 491,
+            "mid": 39,
+            "near": 632,
+            "takeover": 2438
+          },
+          "drop_reasons": {},
+          "dropped_episodes": 0,
+          "elapsed_s": 180.850416151,
+          "gate_bucket_counts": {
+            "dribble_armed": 1652,
+            "none_armed": 1578,
+            "shoot_armed": 370
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 1630,
+              "walk": 22
+            },
+            "none_armed": {
+              "dribble": 52,
+              "walk": 1526
+            },
+            "shoot_armed": {
+              "shoot": 370
+            }
+          },
+          "is_contrast": true,
+          "kept_episodes": 6,
+          "obstacles": "dynamic",
+          "quality_counts": {
+            "accepted_weighted": 2948,
+            "full_weight": 2355,
+            "low_weight": 593,
+            "rejected": 652
+          },
+          "requested_episodes": 6,
+          "samples": 3600,
+          "scenario": "preshoot_bad_angle_boundary",
+          "skill_counts": {
+            "dribble": 1682,
+            "shoot": 370,
+            "walk": 1548
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 24,
+          "band_steps": 0,
+          "band_steps_attempted": 1352,
+          "distance_bins": {
+            "far": 118,
+            "full": 94,
+            "mid": 168,
+            "near": 80,
+            "takeover": 140
+          },
+          "drop_reasons": {
+            "no_shoot": 21,
+            "pure_walk_stall": 2
+          },
+          "dropped_episodes": 23,
+          "elapsed_s": 861.0857451539996,
+          "gate_bucket_counts": {
+            "dribble_armed": 54,
+            "none_armed": 501,
+            "shoot_armed": 45
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 54
+            },
+            "none_armed": {
+              "dribble": 6,
+              "walk": 495
+            },
+            "shoot_armed": {
+              "shoot": 45
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 1,
+          "obstacles": "dynamic",
+          "quality_counts": {
+            "accepted_weighted": 600,
+            "full_weight": 565,
+            "low_weight": 35,
+            "rejected": 0
+          },
+          "requested_episodes": 8,
+          "samples": 600,
+          "scenario": "dynamic_full_field_pressure",
+          "skill_counts": {
+            "dribble": 60,
+            "shoot": 45,
+            "walk": 495
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 12,
+          "band_steps": 1254,
+          "band_steps_attempted": 2246,
+          "distance_bins": {
+            "mid": 452,
+            "near": 780,
+            "takeover": 2368
+          },
+          "drop_reasons": {
+            "no_shoot": 5,
+            "pure_walk_stall": 1
+          },
+          "dropped_episodes": 6,
+          "elapsed_s": 453.0923069800001,
+          "gate_bucket_counts": {
+            "dribble_armed": 1026,
+            "none_armed": 1465,
+            "shoot_armed": 1109
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 1026
+            },
+            "none_armed": {
+              "dribble": 141,
+              "walk": 1324
+            },
+            "shoot_armed": {
+              "shoot": 1109
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 6,
+          "obstacles": "blocking",
+          "quality_counts": {
+            "accepted_weighted": 3578,
+            "full_weight": 3426,
+            "low_weight": 152,
+            "rejected": 22
+          },
+          "requested_episodes": 6,
+          "samples": 3600,
+          "scenario": "blocked_corridor_repair",
+          "skill_counts": {
+            "dribble": 1167,
+            "shoot": 1109,
+            "walk": 1324
+          },
+          "stage_id": 4
+        }
+      ],
+      "seed_base": 770000,
+      "simrobot_launch": true,
+      "simrobot_profile": "3d_visible",
+      "source_dataset": "/home/luis/GitHub/RL/runs/teacher_production_dataset/dataset_20260527_083253",
+      "success_filter_enabled": true,
+      "success_filter_metric": "clean_finish",
+      "total_samples": 11335
+    },
+    {
+      "accepted_rate": 0.9200617283950617,
+      "accepted_samples": 5962,
+      "action_shape": [
+        6480,
+        5
+      ],
+      "backend_mode": "simrobot_visible",
+      "band_2p5_3m_sample_rate": 0.34089506172839507,
+      "band_2p5_3m_samples": 2209,
+      "env_stage_id": 4,
+      "episodes_per_scenario": 4,
+      "full_weight_samples": 5647,
+      "gate_label_inconsistent_samples": 424,
+      "global_distance_bins": {
+        "mid": 162,
+        "near": 1100,
+        "takeover": 5218
+      },
+      "global_gate_bucket_counts": {
+        "dribble_armed": 2708,
+        "none_armed": 1674,
+        "shoot_armed": 2098
+      },
+      "global_gate_label_counts": {
+        "dribble_armed": {
+          "dribble": 2708
+        },
+        "none_armed": {
+          "dribble": 424,
+          "walk": 1250
+        },
+        "shoot_armed": {
+          "shoot": 2098
+        }
+      },
+      "global_quality_counts": {
+        "accepted_weighted": 5962,
+        "full_weight": 5647,
+        "gate_label_inconsistent": 424,
+        "low_weight": 315,
+        "rejected": 518
+      },
+      "global_skill_counts": {
+        "dribble": 3132,
+        "shoot": 2098,
+        "walk": 1250
+      },
+      "max_attempt_multiplier": 5,
+      "max_steps_per_episode": 240,
+      "observation_shape": [
+        6480,
+        26
+      ],
+      "output_dir": "/home/luis/GitHub/RL/runs/fine_tuning_production_dataset/dataset_20260527_220501",
+      "positive_weight_gate_label_consistent": true,
+      "positive_weight_gate_label_inconsistent_samples": 0,
+      "production_band_mm": [
+        2500.0,
+        3000.0
+      ],
+      "scenario_filter": [],
+      "scenario_names": [
+        "finish_near_arm_clean_topup",
+        "finish_bridge_clean_topup",
+        "finish_bridge_static_topup",
+        "blocked_corridor_finish_topup",
+        "dynamic_finish_pressure_topup"
+      ],
+      "scenario_set": "topup",
+      "scenarios": [
+        {
+          "attempted_episodes": 9,
+          "band_steps": 478,
+          "band_steps_attempted": 716,
+          "distance_bins": {
+            "mid": 61,
+            "near": 111,
+            "takeover": 1268
+          },
+          "drop_reasons": {
+            "no_shoot": 3
+          },
+          "dropped_episodes": 3,
+          "elapsed_s": 82.1591084440006,
+          "gate_bucket_counts": {
+            "dribble_armed": 623,
+            "none_armed": 290,
+            "shoot_armed": 527
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 623
+            },
+            "none_armed": {
+              "dribble": 17,
+              "walk": 273
+            },
+            "shoot_armed": {
+              "shoot": 527
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 6,
+          "obstacles": "none",
+          "quality_counts": {
+            "accepted_weighted": 1370,
+            "full_weight": 1347,
+            "gate_label_inconsistent": 17,
+            "low_weight": 23,
+            "rejected": 70
+          },
+          "requested_episodes": 6,
+          "samples": 1440,
+          "scenario": "finish_near_arm_clean_topup",
+          "skill_counts": {
+            "dribble": 640,
+            "shoot": 527,
+            "walk": 273
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 18,
+          "band_steps": 724,
+          "band_steps_attempted": 2196,
+          "distance_bins": {
+            "near": 306,
+            "takeover": 1614
+          },
+          "drop_reasons": {
+            "no_shoot": 9,
+            "pure_walk_stall": 1
+          },
+          "dropped_episodes": 10,
+          "elapsed_s": 114.98410138600048,
+          "gate_bucket_counts": {
+            "dribble_armed": 733,
+            "none_armed": 577,
+            "shoot_armed": 610
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 733
+            },
+            "none_armed": {
+              "dribble": 247,
+              "walk": 330
+            },
+            "shoot_armed": {
+              "shoot": 610
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 8,
+          "obstacles": "none",
+          "quality_counts": {
+            "accepted_weighted": 1673,
+            "full_weight": 1618,
+            "gate_label_inconsistent": 247,
+            "low_weight": 55,
+            "rejected": 247
+          },
+          "requested_episodes": 8,
+          "samples": 1920,
+          "scenario": "finish_bridge_clean_topup",
+          "skill_counts": {
+            "dribble": 980,
+            "shoot": 610,
+            "walk": 330
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 30,
+          "band_steps": 274,
+          "band_steps_attempted": 3997,
+          "distance_bins": {
+            "mid": 101,
+            "near": 206,
+            "takeover": 413
+          },
+          "drop_reasons": {
+            "no_shoot": 25,
+            "pure_walk_stall": 2
+          },
+          "dropped_episodes": 27,
+          "elapsed_s": 189.6597621609999,
+          "gate_bucket_counts": {
+            "dribble_armed": 281,
+            "none_armed": 323,
+            "shoot_armed": 116
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 281
+            },
+            "none_armed": {
+              "dribble": 37,
+              "walk": 286
+            },
+            "shoot_armed": {
+              "shoot": 116
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 3,
+          "obstacles": "static",
+          "quality_counts": {
+            "accepted_weighted": 650,
+            "full_weight": 584,
+            "gate_label_inconsistent": 37,
+            "low_weight": 66,
+            "rejected": 70
+          },
+          "requested_episodes": 6,
+          "samples": 720,
+          "scenario": "finish_bridge_static_topup",
+          "skill_counts": {
+            "dribble": 318,
+            "shoot": 116,
+            "walk": 286
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 30,
+          "band_steps": 142,
+          "band_steps_attempted": 4067,
+          "distance_bins": {
+            "near": 208,
+            "takeover": 272
+          },
+          "drop_reasons": {
+            "no_shoot": 23,
+            "pure_walk_stall": 5
+          },
+          "dropped_episodes": 28,
+          "elapsed_s": 190.86436195399983,
+          "gate_bucket_counts": {
+            "dribble_armed": 148,
+            "none_armed": 196,
+            "shoot_armed": 136
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 148
+            },
+            "none_armed": {
+              "dribble": 62,
+              "walk": 134
+            },
+            "shoot_armed": {
+              "shoot": 136
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 2,
+          "obstacles": "blocking",
+          "quality_counts": {
+            "accepted_weighted": 418,
+            "full_weight": 418,
+            "gate_label_inconsistent": 62,
+            "low_weight": 0,
+            "rejected": 62
+          },
+          "requested_episodes": 6,
+          "samples": 480,
+          "scenario": "blocked_corridor_finish_topup",
+          "skill_counts": {
+            "dribble": 210,
+            "shoot": 136,
+            "walk": 134
+          },
+          "stage_id": 4
+        },
+        {
+          "attempted_episodes": 34,
+          "band_steps": 591,
+          "band_steps_attempted": 4413,
+          "distance_bins": {
+            "near": 269,
+            "takeover": 1651
+          },
+          "drop_reasons": {
+            "no_shoot": 22,
+            "pure_walk_stall": 4
+          },
+          "dropped_episodes": 26,
+          "elapsed_s": 234.9497090119985,
+          "gate_bucket_counts": {
+            "dribble_armed": 923,
+            "none_armed": 288,
+            "shoot_armed": 709
+          },
+          "gate_label_counts": {
+            "dribble_armed": {
+              "dribble": 923
+            },
+            "none_armed": {
+              "dribble": 61,
+              "walk": 227
+            },
+            "shoot_armed": {
+              "shoot": 709
+            }
+          },
+          "is_contrast": false,
+          "kept_episodes": 8,
+          "obstacles": "dynamic",
+          "quality_counts": {
+            "accepted_weighted": 1851,
+            "full_weight": 1680,
+            "gate_label_inconsistent": 61,
+            "low_weight": 171,
+            "rejected": 69
+          },
+          "requested_episodes": 8,
+          "samples": 1920,
+          "scenario": "dynamic_finish_pressure_topup",
+          "skill_counts": {
+            "dribble": 984,
+            "shoot": 709,
+            "walk": 227
+          },
+          "stage_id": 4
+        }
+      ],
+      "seed_base": 883000,
+      "simrobot_launch": true,
+      "simrobot_profile": "3d_visible",
+      "success_filter_enabled": true,
+      "success_filter_metric": "clean_finish",
+      "total_samples": 6480
+    }
+  ],
+  "total_samples": 17815
+}
