@@ -7,7 +7,7 @@ bad-angle shots, and keeping corridor/collision sanity under dynamic obstacle pr
 Both `behavioral_evaluator.py` (which grades a checkpoint) and `teacher_production_dataset.py`
 (which collects gate-driven teacher demos) consume the SAME world builders defined here, so the
 BC dataset covers exactly the states the policy is graded on. The 2.5-3.0 m band is a hard field
-constraint and matches the gate's shoot_goal_enter/exit window (2500/2900 mm in gate.py): the
+constraint and matches the gate's shoot_goal_enter window (3000 mm in gate.py): the
 agent starts in the band, drives the ball to ~2.5 m, then shoots.
 """
 
@@ -28,7 +28,7 @@ from curriculum import (
 from pybh_backend import WorldPlayerSpec, WorldSpec, build_world_spec
 
 # Hard field constraint: the scoring band the shoot skill must convert from. Matches the
-# gate's shoot_goal_enter_mm/exit (2500/2900) so "ball in band" and "shoot may arm" line up.
+# gate's shoot_goal_enter_mm (3000) so "ball in band" and "shoot may arm" line up.
 PRODUCTION_BAND_MM: tuple[float, float] = (2500.0, 3000.0)
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -19,10 +20,10 @@ from pybh_backend import WorldSpec
 from train import _aggregate_eval_metrics, build_env, build_mappo, make_env_config
 
 
-DEFAULT_CHECKPOINT = Path(
-    "/home/luis/GitHub/RL/runs/stage4_candidate/checkpoints/stage4_candidate_checkpoint_stage3_step55000.pt"
-)
-DEFAULT_OUTPUT_ROOT = Path("/home/luis/GitHub/RL/runs/behavioral_evaluator")
+ROOT = Path(__file__).resolve().parent
+#DEFAULT_CHECKPOINT = ROOT / "runs/stage4_candidate/checkpoints/stage4_candidate_checkpoint_stage3_step55000.pt"
+DEFAULT_CHECKPOINT = ROOT / "runs/production_readiness_v2/checkpoint_stage4_step30000.pt"
+DEFAULT_OUTPUT_ROOT = ROOT / "runs/behavioral_evaluator"
 
 
 @dataclass(frozen=True)
@@ -225,15 +226,37 @@ def _load_agent(checkpoint_path: Path, device: str, eval_stage_id: int, max_epis
 
 
 def run(args: argparse.Namespace) -> int:
-    checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+    checkpoint_path = Path(args.checkpoint).expanduser()
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = ROOT / checkpoint_path
+    checkpoint_path = checkpoint_path.resolve()
     if not checkpoint_path.exists():
         raise FileNotFoundError(checkpoint_path)
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    session_dir = Path(args.output_dir).expanduser().resolve() / datetime.now().strftime("behavior_%Y%m%d_%H%M%S")
+    output_root = Path(args.output_dir).expanduser()
+    if not output_root.is_absolute():
+        output_root = ROOT / output_root
+    session_dir = output_root.resolve() / datetime.now().strftime("behavior_%Y%m%d_%H%M%S")
     session_dir.mkdir(parents=True, exist_ok=True)
     summary_csv = session_dir / "summary.csv"
     episodes_csv = session_dir / "episodes.csv"
     steps_csv = session_dir / "steps.csv"
+    (session_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": str(checkpoint_path),
+                "output_dir": str(session_dir),
+                "episodes": int(args.episodes),
+                "seed": int(args.seed),
+                "device": device,
+                "max_episode_steps": int(args.max_episode_steps),
+                "capture_steps": bool(args.capture_steps),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
     checkpoint, env, eval_env, agent, original_train, original_env = _load_agent(
         checkpoint_path,
@@ -325,7 +348,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=4)
     parser.add_argument("--seed", type=int, default=4200)
     parser.add_argument("--device", default="")
-    parser.add_argument("--max-episode-steps", type=int, default=420)
+    parser.add_argument("--max-episode-steps", type=int, default=1000)
     parser.add_argument("--capture-steps", action="store_true")
     return parser.parse_args()
 

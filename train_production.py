@@ -27,16 +27,20 @@ DEFAULT_SCENARIO_WEIGHTS = (
     # at v1-step-35000 and the full-field reset is the most expensive episode in the
     # set. The near-finish dynamic variant (dynamic_finish_pressure_topup) keeps the
     # obstacle-avoidance pressure without the dilution.
-    "finish_band_2p5_3m_clean:4,"
-    "finish_band_2p5_3m_static_lane:3,"
-    "preshoot_bad_angle_boundary:2,"
+    # Re-focus after evaluator mismatch: topups looked clean in-loop, but the
+    # canonical behavioral gate still failed on clean/static/blocked seeds because
+    # the policy over-walked in stable takeover. Weight the canonical scenarios
+    # higher and keep topups as support instead of the dominant distribution.
+    "finish_band_2p5_3m_clean:8,"
+    "finish_band_2p5_3m_static_lane:6,"
+    "preshoot_bad_angle_boundary:3,"
     "dynamic_full_field_pressure:0,"
-    "blocked_corridor_repair:2,"
-    "finish_near_arm_clean_topup:5,"
-    "finish_bridge_clean_topup:6,"
-    "finish_bridge_static_topup:4,"
-    "blocked_corridor_finish_topup:2,"
-    "dynamic_finish_pressure_topup:4"
+    "blocked_corridor_repair:5,"
+    "finish_near_arm_clean_topup:2,"
+    "finish_bridge_clean_topup:3,"
+    "finish_bridge_static_topup:3,"
+    "blocked_corridor_finish_topup:3,"
+    "dynamic_finish_pressure_topup:2"
 )
 
 
@@ -164,8 +168,9 @@ def _build_run_cfg(args: argparse.Namespace, replay_dataset: Path) -> train.Scri
         stage_id=4,
         max_stage_id=4,
         train_steps=_env_int("RL_PROD_TRAIN_STEPS", 80_000),
-        # Band scenarios converge in <400 steps; 600 just hands timeouts to the agent.
-        max_episode_steps=_env_int("RL_PROD_MAX_EPISODE_STEPS", 400),
+        # Production finish chains can spend >500 steps before a valid shoot; 400
+        # caused eval episodes to time out before goals even after clean_finish.
+        max_episode_steps=_env_int("RL_PROD_MAX_EPISODE_STEPS", 1000),
         rollout_steps=_env_int("RL_PROD_ROLLOUT_STEPS", 256),
         learning_epochs=_env_int("RL_PROD_LEARNING_EPOCHS", 4),
         mini_batches=_env_int("RL_PROD_MINI_BATCHES", 4),

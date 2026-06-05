@@ -59,11 +59,11 @@ class GateConfig:
     shoot_enter_angle_rad: float = math.radians(25.0)
     shoot_exit_angle_rad: float = math.radians(35.0)
     # --- shoot: ball-to-goal range that permits a kick (mid-distance shots) ---
-    # Conservative for NAO v6 kick lethality vs. weak RoboCup keepers: arm only
-    # within 2.5 m, disarm past 2.9 m (hysteresis so a ball drifting near the edge
-    # does not flip the kick on/off).
-    shoot_goal_enter_mm: float = 2500.0
-    shoot_goal_exit_mm: float = 2900.0
+    # Production target: allow the finish skill to shoot from the full 2.5-3.0 m
+    # band. Exit is looser than enter so a ball drifting near the edge does not
+    # flip the kick on/off once the shot is armed.
+    shoot_goal_enter_mm: float = 3000.0
+    shoot_goal_exit_mm: float = 3200.0
     # --- shoot: clear lane proxy (shot_opening_with_obstacles); score_now overrides ---
     shoot_open_enter: float = 0.6
     shoot_open_exit: float = 0.45

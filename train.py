@@ -45,18 +45,24 @@ _GATE_OBS_REQUIRED = int(ObsIndex.dribble_armed) + 1
 def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
     """Per-step forbid-invalid mask over SKILL_ORDER, read from the baked obs columns.
 
-    Multiplicative (1=allowed, 0=forbidden): shoot/dribble follow their armed flag;
-    every other skill stays 1 so the stage mask alone governs it and walk/stand are
-    never removed. Because it is a pure function of the stored observation, MAPPO's
-    update-time recompute reproduces it exactly. Legacy (pre-gate) observations that
-    lack the armed columns fall back to all-allowed.
+    Multiplicative (1=allowed, 0=forbidden): shoot/dribble follow their armed flag.
+    Once a finish skill is armed, stand/walk are masked out too; otherwise a policy
+    can park on the ball and fail the clean-takeover contract while the env still
+    reports a valid dribble/shoot opportunity. Because it is a pure function of the
+    stored observation, MAPPO's update-time recompute reproduces it exactly. Legacy
+    (pre-gate) observations that lack the armed columns fall back to all-allowed.
     """
     batch = observations.shape[0]
     mask = torch.ones((batch, len(SKILL_ORDER)), dtype=observations.dtype, device=observations.device)
     if observations.shape[-1] < _GATE_OBS_REQUIRED:
         return mask
-    mask[:, _SHOOT_SKILL_IDX] = (observations[:, int(ObsIndex.shoot_armed)] >= 0.5).to(mask.dtype)
-    mask[:, _DRIBBLE_SKILL_IDX] = (observations[:, int(ObsIndex.dribble_armed)] >= 0.5).to(mask.dtype)
+    shoot_armed = observations[:, int(ObsIndex.shoot_armed)] >= 0.5
+    dribble_armed = observations[:, int(ObsIndex.dribble_armed)] >= 0.5
+    finish_armed = shoot_armed | dribble_armed
+    mask[:, _SHOOT_SKILL_IDX] = shoot_armed.to(mask.dtype)
+    mask[:, _DRIBBLE_SKILL_IDX] = dribble_armed.to(mask.dtype)
+    mask[:, SKILL_ORDER.index("stand")] = (~finish_armed).to(mask.dtype)
+    mask[:, SKILL_ORDER.index("walk")] = (~finish_armed).to(mask.dtype)
     return mask
 
 
@@ -347,8 +353,8 @@ class PolicyNetwork(Model):
     def _masked_skill_logits(self, skill_logits: torch.Tensor, observations: torch.Tensor) -> torch.Tensor:
         stage = self.active_skill_mask.to(device=skill_logits.device, dtype=skill_logits.dtype).unsqueeze(0)
         gate = gate_skill_mask_from_obs(observations).to(device=skill_logits.device, dtype=skill_logits.dtype)
-        # walk/stand are never removed by the gate and are in every active stage, so
-        # the combined mask always leaves at least one skill enabled.
+        # The gate only removes walk/stand when dribble or shoot is armed, so the
+        # combined mask always leaves at least one active finish skill enabled.
         combined = stage * gate
         return skill_logits.masked_fill(combined <= 0.0, -1.0e9)
 

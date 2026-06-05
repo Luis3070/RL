@@ -1,0 +1,9 @@
+{
+  "capture_steps": false,
+  "checkpoint": "/home/SRAUS/Desktop/Semillero/RL/runs/production_readiness_v2/checkpoint_stage4_step10000.pt",
+  "device": "cpu",
+  "episodes": 4,
+  "max_episode_steps": 1000,
+  "output_dir": "/home/SRAUS/Desktop/Semillero/RL/runs/behavioral_evaluator/behavior_20260605_022521",
+  "seed": 4200
+}

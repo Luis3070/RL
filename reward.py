@@ -710,7 +710,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
     missed_dribble_handoff = (
         1.0
         if (
-            step_ctx.stage in {0, 1}
+            step_ctx.stage >= 1
             and stable_trusted_takeover
             # Any non-finish skill in a stable takeover is a missed handoff: standing
             # on the ball must be penalized like walking, otherwise "stand" is a
@@ -730,7 +730,7 @@ def evaluate_step(step_ctx: StepContext, weights: RewardWeights) -> StepEvaluati
             0.0,
             1.0,
         ) * fine_scale
-        if step_ctx.stage in {0, 1} and stable_trusted_takeover
+        if step_ctx.stage >= 1 and stable_trusted_takeover
         else 0.0
     )
     shoot_skill_intent = (

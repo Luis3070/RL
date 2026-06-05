@@ -22,12 +22,12 @@ GOAL_X = 4500.0
 GOAL_Y_HALF = 750.0
 MM_PER_M = 1000.0
 DT = 0.033
-# 800 (was 400): the natural walk->dribble->drive->shoot chain needs time to complete
+# 1000 (was 800): the natural walk->dribble->drive->shoot chain needs time to complete
 # from a moderate ball-to-goal distance. The teacher drives the ball ~10-30mm/dribble-step,
 # so reaching goal from ~1-1.8m plus the approach leg needs more than 400 steps. The
 # finishing window (post_takeover_progress_window_steps) re-arms on each stable takeover,
 # so it stays valid inside the longer episode; timeout still fires only at the budget.
-MAX_EPISODE_STEPS = 800
+MAX_EPISODE_STEPS = 1000
 
 
 @dataclass(frozen=True)
