@@ -33,6 +33,21 @@ class ObsIndex(IntEnum):
     shoot_armed = 23
     dribble_armed = 24
     shoot_arm_progress = 25
+    nearest_teammate_x_rel = 26
+    nearest_teammate_y_rel = 27
+    second_teammate_x_rel = 28
+    second_teammate_y_rel = 29
+    third_teammate_x_rel = 30
+    third_teammate_y_rel = 31
+    global_team_ball_x_rel = 32
+    global_team_ball_y_rel = 33
+    time_since_team_ball_update = 34
+    nearest_teammate_engaging_ball = 35
+    second_teammate_engaging_ball = 36
+    third_teammate_engaging_ball = 37
+    team_ball_agrees_with_mine = 38
+    opponent_goal_x_rel = 39
+    opponent_goal_y_rel = 40
 
 
 OBS_FEATURE_NAMES = tuple(index.name for index in ObsIndex)

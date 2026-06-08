@@ -333,6 +333,17 @@ class BackendObservation:
     synthetic_ball_observation: bool = False
     synthetic_pose_reason: str = ""
     synthetic_ball_reason: str = ""
+    teammate_poses: tuple[tuple[float, float, float], ...] = ()
+    teammate_ages_ms: tuple[float, ...] = ()
+    teammate_activities: tuple[int, ...] = ()
+
+    global_team_ball_x_mm: float = 0.0
+    global_team_ball_y_mm: float = 0.0
+    global_team_ball_age_ms: float = 0.0
+    global_team_ball_valid: bool = False
+
+    goal_opponent_x_mm: float = 0.0
+    goal_opponent_y_mm: float = 0.0
 
     @classmethod
     def from_payload(cls, payload: dict) -> "BackendObservation":
@@ -415,6 +426,15 @@ class BackendObservation:
             motion_speed_x=float(payload.get("motion_speed_x", 0.0)),
             motion_speed_y=float(payload.get("motion_speed_y", 0.0)),
             motion_speed_rot=float(payload.get("motion_speed_rot", 0.0)),
+            teammate_poses=tuple(zip(payload.get("teammate_x_mm", []), payload.get("teammate_y_mm", []), payload.get("teammate_theta", []),)),
+            teammate_ages_ms=tuple(payload.get("teammate_age_ms", [])),
+            teammate_activities=tuple(payload.get("teammate_activity", [])),
+            global_team_ball_x_mm=float(payload.get("global_team_ball_x_mm", 0.0)),
+            global_team_ball_y_mm=float(payload.get("global_team_ball_y_mm", 0.0)),
+            global_team_ball_age_ms=float(payload.get("global_team_ball_age_ms", 0.0)),
+            global_team_ball_valid=bool(payload.get("global_team_ball_valid", False)),
+            goal_opponent_x_mm=float( payload.get("goal_opponent_x_mm", 0.0)),
+            goal_opponent_y_mm=float(payload.get("goal_opponent_y_mm", 0.0)),
         )
 
 

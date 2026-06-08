@@ -49,6 +49,9 @@ from reward import (
 BALL_VEL_NORM = 3000.0
 TIME_NORM_MS = 5000.0
 PASS_COUNT_NORM = 5.0
+TEAMMATE_STALE_THRESHOLD_MS = 1000.0
+TEAM_BALL_CONSENSUS_MM = 800.0
+ENGAGING_DISTANCE_MM = 700.0
 UPRIGHT_MAX_FALL_STATE = 2
 BALL_VISIBLE_SEEN_PCT_MIN = 5.0
 BALL_VISIBLE_MAX_AGE_MS = 1200.0
@@ -701,34 +704,126 @@ class RealSimRobotEnv(ParallelEnv):
         def norm_dist(value: float) -> float:
             return float(np.clip(value / ACTION.x_range, 0.0, 1.0))
 
-        gate_feats = self._gate_decision.obs_features() if self._gate_decision is not None else [0.0, 0.0, 0.0]
+        def transform_to_robot_frame(field_x: float, field_y: float):
+            dx = field_x - obs.robot_x
+            dy = field_y - obs.robot_y
+
+            c = math.cos(-obs.robot_theta)
+            s = math.sin(-obs.robot_theta)
+
+            rel_x = dx * c - dy * s
+            rel_y = dx * s + dy * c
+
+            return rel_x, rel_y
+
+        gate_feats = (
+            self._gate_decision.obs_features()
+            if self._gate_decision is not None
+            else [0.0, 0.0, 0.0]
+        )
+
+        base_features = [
+            obs.robot_x / ACTION.x_range,
+            obs.robot_y / ACTION.y_range,
+            obs.robot_theta / math.pi,
+            obs.ball_rel_x / ACTION.x_range,
+            obs.ball_rel_y / ACTION.y_range,
+            obs.ball_end_rel_x / ACTION.x_range,
+            obs.ball_end_rel_y / ACTION.y_range,
+            obs.ball_vel_x / BALL_VEL_NORM,
+            obs.ball_vel_y / BALL_VEL_NORM,
+            norm_time(obs.time_since_ball_seen),
+            norm_time(obs.time_since_ball_disappeared),
+            float(np.clip(obs.ball_seen_percentage / 100.0, 0.0, 1.0)),
+            1.0 if obs.ball_consistent_with_game_state else 0.0,
+            1.0 if obs.can_score_now else 0.0,
+            float(np.clip(obs.shot_quality_no_obstacles, 0.0, 1.0)),
+            float(np.clip(obs.shot_opening_with_obstacles, 0.0, 1.0)),
+            float(np.clip(obs.pass_options_count / PASS_COUNT_NORM, 0.0, 1.0)),
+            norm_dist(obs.nearest_teammate_dist),
+            norm_dist(obs.nearest_opponent_dist),
+            norm_dist(obs.nearest_uncertain_obstacle_dist),
+            norm_dist(obs.nearest_teammate_front_dist),
+            norm_dist(obs.nearest_opponent_front_dist),
+            norm_dist(obs.nearest_uncertain_front_dist),
+            *gate_feats,
+        ]
+
+        fresh_teammates = []
+
+        for pose, age in zip(obs.teammate_poses, obs.teammate_ages_ms):
+            if age <= TEAMMATE_STALE_THRESHOLD_MS:
+                fresh_teammates.append(pose)
+
+        fresh_teammates.sort(
+            key=lambda p: (p[0] - obs.robot_x) ** 2
+                        + (p[1] - obs.robot_y) ** 2
+        )
+
+        teammate_features = []
+
+        for slot in range(3):
+
+            if slot >= len(fresh_teammates):
+                teammate_features.extend([0.0, 0.0])
+                continue
+
+            px, py, _ = fresh_teammates[slot]
+
+            rx, ry = transform_to_robot_frame(px, py)
+
+            teammate_features.extend([
+                float(np.clip(rx / ACTION.x_range, -1.0, 1.0)),
+                float(np.clip(ry / ACTION.y_range, -1.0, 1.0)),
+            ])
+        
+        tbx, tby = transform_to_robot_frame(
+            obs.global_team_ball_x_mm,
+            obs.global_team_ball_y_mm,
+        )
+
+        team_ball_features = [
+            float(np.clip(tbx / ACTION.x_range, -1.0, 1.0)),
+            float(np.clip(tby / ACTION.y_range, -1.0, 1.0)),
+            norm_time(obs.global_team_ball_age_ms),
+        ]
+
+        engagement_features = [0.0, 0.0, 0.0]
+
+        own_ball_field_x = obs.robot_x + obs.ball_rel_x
+        own_ball_field_y = obs.robot_y + obs.ball_rel_y
+
+        distance_to_team_ball = math.hypot(
+            own_ball_field_x - obs.global_team_ball_x_mm,
+            own_ball_field_y - obs.global_team_ball_y_mm,
+        )
+
+        consensus = (
+            1.0
+            if (
+                obs.global_team_ball_valid
+                and distance_to_team_ball < TEAM_BALL_CONSENSUS_MM
+            )
+            else 0.0
+        )
+
+        gx, gy = transform_to_robot_frame(
+            obs.goal_opponent_x_mm,
+            obs.goal_opponent_y_mm,
+        )
+
+        goal_features = [
+            float(np.clip(gx / ACTION.x_range, -1.0, 1.0)),
+            float(np.clip(gy / ACTION.y_range, -1.0, 1.0)),
+        ]
+
         return np.asarray(
-            [
-                obs.robot_x / ACTION.x_range,
-                obs.robot_y / ACTION.y_range,
-                obs.robot_theta / math.pi,
-                obs.ball_rel_x / ACTION.x_range,
-                obs.ball_rel_y / ACTION.y_range,
-                obs.ball_end_rel_x / ACTION.x_range,
-                obs.ball_end_rel_y / ACTION.y_range,
-                obs.ball_vel_x / BALL_VEL_NORM,
-                obs.ball_vel_y / BALL_VEL_NORM,
-                norm_time(obs.time_since_ball_seen),
-                norm_time(obs.time_since_ball_disappeared),
-                float(np.clip(obs.ball_seen_percentage / 100.0, 0.0, 1.0)),
-                1.0 if obs.ball_consistent_with_game_state else 0.0,
-                1.0 if obs.can_score_now else 0.0,
-                float(np.clip(obs.shot_quality_no_obstacles, 0.0, 1.0)),
-                float(np.clip(obs.shot_opening_with_obstacles, 0.0, 1.0)),
-                float(np.clip(obs.pass_options_count / PASS_COUNT_NORM, 0.0, 1.0)),
-                norm_dist(obs.nearest_teammate_dist),
-                norm_dist(obs.nearest_opponent_dist),
-                norm_dist(obs.nearest_uncertain_obstacle_dist),
-                norm_dist(obs.nearest_teammate_front_dist),
-                norm_dist(obs.nearest_opponent_front_dist),
-                norm_dist(obs.nearest_uncertain_front_dist),
-                *gate_feats,
-            ],
+            base_features
+            + teammate_features
+            + team_ball_features
+            + engagement_features
+            + [consensus]
+            + goal_features,
             dtype=np.float32,
         )
 

@@ -1344,6 +1344,14 @@ class BCReplayRegularizer:
         resolved_path = resolved_path.resolve()
         data = np.load(resolved_path, allow_pickle=True)
         observations = data["observations"].astype(np.float32)
+        from observation import OBS_SIZE
+        if observations.shape[1] < OBS_SIZE:
+            padded = np.zeros(
+                (observations.shape[0], OBS_SIZE),
+                dtype=np.float32,
+            )
+            padded[:, :observations.shape[1]] = observations
+            observations = padded
         actions = data["actions"].astype(np.float32)
         stages = data["stages"].astype(np.int64)
         weights = data["weights"].astype(np.float32)
