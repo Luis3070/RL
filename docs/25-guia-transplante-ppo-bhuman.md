@@ -1,10 +1,12 @@
 # Guía de Transplante RL → BHuman
 ## Heurísticas, Enmascarado y Gate — Referencia Completa para Integración en Robot Físico
 
-> **Propósito de este documento:** Permitir que cualquier persona del equipo replique en el código BHuman (C++) **exactamente** el mismo comportamiento de inferencia que produce los resultados del `behavioral_evaluator`. Si alguna de estas piezas se omite o se implementa incorrectamente, el agente puede dejar de cumplir los criterios de producción (4/5 actualmente).
+> **Propósito de este documento:** Permitir que cualquier persona del equipo replique en el código BHuman (C++) **exactamente** el mismo comportamiento de inferencia que produce los resultados vigentes del `behavioral_evaluator`. Si alguna de estas piezas se omite o se implementa incorrectamente, el agente puede dejar de cumplir los criterios de producción hoy revalidados.
 >
-> **Checkpoint de referencia:** `runs/production_readiness_v2/checkpoint_stage4_step10000.pt`  
-> **Evaluación de referencia:** `runs/behavioral_evaluator/behavior_20260605_022521/summary.csv`
+> **Checkpoint de referencia vigente:** `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt`  
+> **Evaluación canónica vigente:** `runs/behavioral_evaluator/behavior_20260608_181747/summary.csv`  
+> **Estado canónico vigente:** `3/5` escenarios aprobados (`finish_band_2p5_3m_clean`, `finish_band_2p5_3m_static_lane`, `dynamic_full_field_pressure`)  
+> **Nota histórica:** `runs/production_readiness_v2/checkpoint_stage4_step10000.pt` y `behavior_20260605_022521` siguen siendo una referencia histórica útil, pero ya no deben tratarse como baseline vigente de transplante.
 
 ---
 
@@ -568,4 +570,4 @@ Lo que sí va al robot es únicamente:
 
 ---
 
-*Documento generado a partir del código fuente del commit `behavior_20260605_022521` (4/5 criterios de producción). Actualizar si se modifica `gate.py`, `train.py` (función `gate_skill_mask_from_obs`), `observation.py`, o `action.py`.*
+*Documento actualizado tras la reparación de estabilidad de 2026-06-08. Baseline vigente: `production_stability_repair_v1/checkpoint_stage4_step5000.pt`. Actualizar si se modifica `gate.py`, `train.py` (función `gate_skill_mask_from_obs`), `observation.py`, `action.py`, `pybh_backend.py` o el checkpoint candidato oficial de transplante.*

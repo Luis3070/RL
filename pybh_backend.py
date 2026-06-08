@@ -83,6 +83,9 @@ BALL_SETTLE_STILL_FRAMES = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_STI
 BALL_SETTLE_MAX_REPLACES = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_MAX_REPLACES", "10")))
 BALL_SETTLE_TIMEOUT_MS = max(1, int(os.environ.get("RL_VISIBLE_BALL_SETTLE_TIMEOUT_MS", "10000")))
 VISIBLE_RESET_MAX_ATTEMPTS = max(1, int(os.environ.get("RL_VISIBLE_RESET_MAX_ATTEMPTS", "8")))
+VISIBLE_RESET_POSE_TOL_MM = float(os.environ.get("RL_VISIBLE_RESET_POSE_TOL_MM", "150.0"))
+VISIBLE_RESET_MAX_FALL_STATE = int(os.environ.get("RL_VISIBLE_RESET_MAX_FALL_STATE", "1"))
+VISIBLE_RESET_UPRIGHT_STREAK = max(1, int(os.environ.get("RL_VISIBLE_RESET_UPRIGHT_STREAK", "3")))
 VISIBLE_BALL_SETTLE_FALLBACK = os.environ.get("RL_VISIBLE_BALL_SETTLE_FALLBACK", "1").strip().lower() in {
     "1",
     "true",
@@ -928,6 +931,11 @@ class PyBHBackend:
                     # rolls into the goal before the robot can act. Settle it (re-place
                     # + wait for rest at spec) so the episode starts in a known state.
                     obs = self._settle_visible_ball(world_spec)
+                    # A visible reset that only converges on pose can still leave the
+                    # robot in a fallen/getting-up state for the first episode steps.
+                    # Do not start the episode until pose AND upright state are stable.
+                    self._set_action(StructuredSkillAction(skill_type=SkillType.stand))
+                    obs = self._wait_for_visible_reset_obs(robot_target)
                     self._last_obs = obs
                     return obs
                 except RuntimeError as exc:
@@ -1308,6 +1316,7 @@ class PyBHBackend:
         expected_x = float(robot_pos[0])
         expected_y = float(robot_pos[1])
         per_try_timeout_ms = max(1, min(100, effective_timeout_ms // 20))
+        upright_streak = 0
         started_at = time.monotonic()
         next_log_at = started_at + min(DEFAULT_VISIBLE_LOG_INTERVAL_S, self.visible_status_log_interval_s or 1e9)
         while time.monotonic() < deadline:
@@ -1320,14 +1329,21 @@ class PyBHBackend:
                     f"+{now - started_at:.1f}s frame={obs.frame} "
                     f"obs_ready={int(obs.obs_ready)} "
                     f"robot_est=({obs.robot_x:.1f},{obs.robot_y:.1f},{obs.robot_theta:.2f}) "
-                    f"robot_sim=({obs.simrobot_robot_x:.1f},{obs.simrobot_robot_y:.1f},{obs.simrobot_robot_theta:.2f})"
+                    f"robot_sim=({obs.simrobot_robot_x:.1f},{obs.simrobot_robot_y:.1f},{obs.simrobot_robot_theta:.2f}) "
+                    f"fall_state={obs.motion_engine_fall_state} upright_streak={upright_streak}"
                 ),
                 next_log_at=next_log_at,
                 now=now,
             )
             if not obs.obs_ready:
                 continue
-            if math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y) <= 150.0:
+            simrobot_pose_error = math.hypot(obs.simrobot_robot_x - expected_x, obs.simrobot_robot_y - expected_y)
+            upright = int(obs.motion_engine_fall_state) <= VISIBLE_RESET_MAX_FALL_STATE
+            if simrobot_pose_error <= VISIBLE_RESET_POSE_TOL_MM and upright:
+                upright_streak += 1
+            else:
+                upright_streak = 0
+            if upright_streak >= VISIBLE_RESET_UPRIGHT_STREAK:
                 return obs
         if last_obs is not None and last_obs.obs_ready:
             distance_mm = math.hypot(last_obs.simrobot_robot_x - expected_x, last_obs.simrobot_robot_y - expected_y)
@@ -1336,7 +1352,8 @@ class PyBHBackend:
                 f"expected=({expected_x:.1f},{expected_y:.1f}) "
                 f"got_sim=({last_obs.simrobot_robot_x:.1f},{last_obs.simrobot_robot_y:.1f},{last_obs.simrobot_robot_theta:.2f}) "
                 f"got_est=({last_obs.robot_x:.1f},{last_obs.robot_y:.1f},{last_obs.robot_theta:.2f}) "
-                f"distance_mm={distance_mm:.1f} timeout_ms={effective_timeout_ms}"
+                f"distance_mm={distance_mm:.1f} fall_state={last_obs.motion_engine_fall_state} "
+                f"upright_streak={upright_streak}/{VISIBLE_RESET_UPRIGHT_STREAK} timeout_ms={effective_timeout_ms}"
             )
         raise RuntimeError("pybh.rl_get_obs timed out while waiting for visible SimRobot reset")
 

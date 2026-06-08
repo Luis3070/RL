@@ -1,5 +1,10 @@
 # Cambios para lograr 4/5 criterios de evaluación — PPO Producción RoboCup HSL
 
+> Documento histórico. El baseline vigente de transplante ya no es este.
+> Referencia actual: `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt`
+> con validación canónica parcial en
+> `runs/behavioral_evaluator/behavior_20260608_181747/summary.csv`.
+
 **Checkpoint base:** `runs/production_readiness_v2/checkpoint_stage4_step10000.pt`  
 **Resultado:** 4/5 escenarios aprobados en `behavioral_evaluator`  
 **Evaluación:** `runs/behavioral_evaluator/behavior_20260605_022521/summary.csv`
