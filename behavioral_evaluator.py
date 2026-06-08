@@ -192,6 +192,39 @@ def _collect_episode_with_world(
         "step_records": step_records,
     }
 
+def _load_state_dict_obs_padded(
+    model: torch.nn.Module, saved: Mapping[str, torch.Tensor], *, label: str
+) -> None:
+    """Load a checkpoint whose first Linear layer may have fewer input features than
+    the current model (the observation grew). Old input columns are copied verbatim;
+    new columns are zeroed so day-0 behaviour matches the warm-start exactly and PPO
+    later wires the new obs features in organically. Shape-matched params load as usual.
+    """
+    model_sd = model.state_dict()
+    adapted: Dict[str, torch.Tensor] = {}
+    padded: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+    for key, tensor in saved.items():
+        if key not in model_sd:
+            continue
+        target = model_sd[key]
+        if tuple(tensor.shape) == tuple(target.shape):
+            adapted[key] = tensor
+        elif (
+            tensor.dim() == 2
+            and target.dim() == 2
+            and tensor.shape[0] == target.shape[0]
+            and tensor.shape[1] < target.shape[1]
+        ):
+            grown = torch.zeros_like(target)
+            grown[:, : tensor.shape[1]] = tensor.to(device=target.device, dtype=target.dtype)
+            adapted[key] = grown
+            padded.append((key, tuple(tensor.shape), tuple(target.shape)))
+        # else: shape we cannot adapt -> keep fresh init (surfaced as missing below)
+    result = model.load_state_dict(adapted, strict=False)
+    if padded:
+        print(f"[warm-start] {label}: zero-padded grown obs columns -> {padded}")
+    if result.missing_keys:
+        print(f"[warm-start] {label}: kept fresh init for {list(result.missing_keys)}")
 
 def _load_agent(checkpoint_path: Path, device: str, eval_stage_id: int, max_episode_steps: int):
     checkpoint = _load_checkpoint_metadata(checkpoint_path, device)
@@ -219,9 +252,9 @@ def _load_agent(checkpoint_path: Path, device: str, eval_stage_id: int, max_epis
     env_cfg = replace(env_cfg, max_episode_steps=max_episode_steps, parallel_player_numbers=(1,))
     env, wrapped_env, eval_env = build_env(env_cfg)
     agent, models = build_mappo(wrapped_env, device, effective_train, env_cfg.active_skill_names)
-    models["policy"].load_state_dict(checkpoint["policy_state_dict"])
+    _load_state_dict_obs_padded(models["policy"], checkpoint["policy_state_dict"], label="policy")
     if "value_state_dict" in checkpoint:
-        models["value"].load_state_dict(checkpoint["value_state_dict"])
+        _load_state_dict_obs_padded(models["value"], checkpoint["value_state_dict"], label="value")
     return checkpoint, env, eval_env, agent, original_train, original_env
 
 
