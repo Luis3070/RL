@@ -1,5 +1,16 @@
 # Graph Coordination — 1-Week Post-Production Sprint
 
+> ### 2026-06-08 STATUS UPDATE — read §14 first
+>
+> This doc was written when (a) the obs was still 26-dim, (b) the stabilization repair had not landed, (c) the project still implicitly accepted BHuman tactical logic as a production fallback. **All three premises are now false.**
+>
+> - **Substrate shipped (Laura + Rafael, 2026-06-05 → 06-08):** 41-dim obs, MAPPO wire + tests, behavior-preservation contract, fallen-stuck termination, upright-streak reset, 4/5-stabilized checkpoint, ONNX export. Phase 1 of §11 (obs growth + warm-start) is done at 41 dims rather than 31.
+> - **Goal locked (2026-06-08):** RL-dominant production. The deployed brain on each NAO is the RL ONNX. BHuman C++ tactical logic (`StrategyStatus.role`, `Tactic`, pass, support positioning) is a *teacher / heuristic predecessor* for our pipeline, NOT a production runtime. Wrappers are training-time scaffolding only — they ship nothing.
+> - **Version B is dead for this sprint.** Wrapper-only coordination violates the locked goal. Version A design specs in §11.A and §11.B remain canonical; we execute a compressed subset of them as a 6-day sprint.
+> - **Real-NAO demo: 2026-06-15 (next Monday).** Six calendar days. See §14 for the integrated build plan, BHuman salvage map, and per-day owner table.
+>
+> §0–§13 below are kept for historical reference and for the design specs in §11.A / §11.B which remain accurate. **For the current plan, jump to §14.**
+
 **Status:** plan for the 1 week we have after the production single-agent checkpoint ships.
 **Hard constraint:** 7 calendar days. Not 2 weeks, not 4 weeks. One week.
 **What we ship:** an inference-only, hard-mask version of the graph idea. NOT a retrained, learned-coordination version.
@@ -1126,3 +1137,1331 @@ The week we have is enough to ship coordination behavior that is **observably be
 The graph as a *learned* feature is the right destination. Version B is the responsible thing to ship in 7 days while we get there. Hard mask + telemetry; no retrain; no silent failure modes; no risk to the production single-agent checkpoint.
 
 If you take one lesson from this document: **the 1-week budget rules out Version A.** Read §3 if you doubt this. The pipeline is structurally hostile to the graph signal in ways that are invisible until the rubric runs, and you cannot build a trustworthy rubric in 7 days while also building the dataset, the teacher, and the fine-tune. Ship Version B, document it honestly, and put Version A in the backlog with §11 as the starting plan.
+
+---
+
+## 14. 2026-06-08 UPDATE — Substrate shipped, RL-dominant goal locked, integrated 6-day multi-agent sprint
+
+This section **supersedes §6 (Version B day-by-day) for the current sprint** and **operationalizes a compressed subset of §11 (Version A)** against the substrate Laura and Rafael shipped between original drafting and 2026-06-08. The structural analysis in §3 and the design specs in §11.A and §11.B remain canonical — read them. This section says which subset of those specs we execute in 6 calendar days and who owns each piece.
+
+### 14.1 Substrate state — what shipped between original doc and now
+
+Eight commits materially changed the picture; the §11 Phase 1 work is partly done.
+
+- `22a4631` (Laura) — Obs space extended 26 → 41 dims. Block B teammate slot positions (26-31), Block C team-ball x/y/age (32-34), Block D engagement bits (35-37, hardcoded to zero at this commit), Block E consensus bit (38), Block F opponent goal x/y (39-40). Backend wire and `_encode_obs` updated. Zero-pad warm-start preserved.
+- `a4424fe` (Laura) — Behavioral evaluator adapted to 41-dim shape.
+- `91f3885` (Rafael) — PPO stability repair: fallen-stuck early termination (stage ≥ 3, 24 consecutive frames in `_update_fallen_stuck_counter`) + 3-frame upright reset streak in pybh_backend. New `behavioral_stability_probe.py` with named seed set `11,23,37,51,67,83`. Docs 26 (transplant implementation, 890 lines) + 27 (stability evaluator rationale).
+- `9a97634` (Rafael) — Four production-stabilized checkpoints in `runs/production_stability_repair_v1/`. The 5000-step one is the operative baseline.
+- `a733c39` (Rafael) — MAPPO observation wire probes + tests. `live_multiagent_obs_probe.py` (470 LOC), `test_mappo_observation_space.py` (175 LOC), `test_obs_migration_contract.py` (zero-pad bit-identity for policy + value). Engagement-bit logic implemented: D = kicking ∨ dribbling ∨ (goingToBall ∧ within 700mm of team ball). Doc 25 (MAPPO wire findings — read it for Block C age-proxy and Block E noise modes).
+- `b2f62ae` (Laura) — ONNX exported from `checkpoint_stage4_step5000.pt`. `tools/export_ppo_policy.py` infrastructure.
+- BHuman side (`SkillBehaviorControl.cpp:61-85`) — adds `encodeTeammateActivity()` proxy and `RLTeammateActivity` enum (idle=0 / goingToBall=1 / dribbling=2 / kicking=3). This is the derived proxy doc 25 § 1 explains BHuman has no native `BehaviorStatus.activity` for.
+
+Mapping to §11 phases:
+- **Phase 1 (obs growth, zero-pad warm-start, mask test) — DONE at 41 dims** (originally specified at 31). Extending to 47 dims for the role one-hot reuses the same machinery.
+- **Phase 2 (multi-agent evaluator) — partial.** `behavioral_evaluator.py` accepts the 41-dim obs; team metrics in `episode_metrics` are not yet added.
+- **Phases 3, 4, 5, 6, 7 — not started.**
+
+### 14.2 Goal locked — RL-dominant production
+
+Two clarifications from the 2026-06-08 conversation:
+
+1. **The deployed brain on each NAO is the RL ONNX policy.** BHuman C++ tactical/strategic logic (`StrategyStatus.role`, `Tactic`, pass, support positioning) is a **teacher / heuristic predecessor** for our pipeline, NOT the production decision-maker. Multi-agent coordination is emergent from same ONNX on every NAO + the 41-dim obs blocks B-F.
+2. **Wrappers (`MultiAgentCoordinator`) are training-time scaffolding only.** They ship nothing. Production is `pure ONNX + BHuman observation wire`.
+
+Consequence: **Version B (wrapper-only inference layer) is dead for this sprint.** Coordination must live in the policy. The current sprint executes a compressed subset of Version A.
+
+**One exception:** GK stays BHuman C++ for this sprint (time/resource constraint, not philosophy). All other roles emerge from the policy.
+
+### 14.3 BHuman salvage map — what to port for the teacher / gate / dataset / mask
+
+Audit of BHuman tactical logic against the actual C++ surface, with destination in our pipeline.
+
+| BHuman component | What it does (BHuman semantics) | Where it lands in our pipeline |
+|---|---|---|
+| `PlayBall::smashOrPass()` (`ActiveRoles/PlayBall.cpp:33-118`) | Shoot-vs-pass decision with `decisionPenalty` hysteresis (lines 38-39, 53-55, 94-98) | `teacher_striker` shoot/pass branch — extends §11.B.2.1. The `decisionPenalty` pattern unifies R2+R4+R6 of the lower-scope teacher discussion. |
+| `Forward::rating(pos)` (`PositionRoles/Forward.cpp:24-38`) | Receive-position rating `passEval × goal × base_gauss` | `teacher_open_support` open-lane target — extends §11.B.2.2 |
+| `Midfielder::rating` separation Gaussian (`PositionRoles/Midfielder.cpp:60-72`) | `1 - exp(-dist²/σ²)` keep-distance from teammates | `teacher_off_ball_support` triangulation + spacing reward — extends §11.B.2.3 |
+| `Defender::position(side, ...)` (`PositionRoles/Defender.cpp:25-49`) | Between own goal and ball, side-aware, GK-aware | Defender role for 4v4 (DEFERRED to Stage 7+ — out of sprint scope) |
+| `Tactic` enum + position templates (`Tools/.../Tactic.h:17-133`) | Named formation templates (`t13_3v3_scaled`, `t22_3v3_scaled`, `t121_4v4_scaled`) with `Pose2f` poses and `stabilityOffset` | Support slot templates (Python-hardcoded, not read at runtime) + role-position hysteresis pattern |
+| `ActiveRole::Type` enum (`Tools/.../ActiveRole.h:17-23`) | playBall / freeKickWall / closestToTeammatesBall / startSetPlay | Role taxonomy reference; we use the 3-role taxonomy from §11.A.3 |
+| `BallSearch::decidePositionForSearch` (`BallSearch.cpp`) | Voronoi-tiled search per agent when team ball is lost | `observe_armed` gate bit (DEFERRED to Stage 8+ — out of sprint scope) |
+| `StrategyStatus` (`Representations/.../StrategyStatus.h`) | Per-robot broadcast: proposed/accepted tactic, set play, position, role | Reference for what BHuman publishes; we **do NOT add to obs wire** — policy infers role from blocks B/C/D/E |
+| `encodeTeammateActivity()` (`SkillBehaviorControl.cpp:61-85`) | Activity proxy (idle/goingToBall/dribbling/kicking) | Already in Block D via `teammate_activity` — see doc 25 § 1 |
+| `TeammatesBallModelProvider` thresholds (`inactivityInvalidationTimeSpan=1000`, `minSendInterval=1000`) | Validity gating for team ball | Already informs `TEAMMATE_STALE_THRESHOLD_MS = 1000.0` in `environment.py` |
+
+**Cheap proxies for BHuman's learned estimators.** We do NOT port `PassEvaluation` or `ExpectedGoals`; we use proxies built from the 41-dim obs.
+
+| BHuman learned component | Cheap proxy | Source in 41-dim obs |
+|---|---|---|
+| `expectedGoals.getRating(ballPos)` | `shot_opening_with_obstacles + 0.3 * can_score_now` | dims 15, 13 |
+| `expectedGoals.getRating(teammatePos)` | `linear_goal_proximity = clip(teammate_x_rel / goal_x_rel, 0, 1)` | dims 26/28/30 + 39 |
+| `passEvaluation.getRating(line)` | binary `passDist ∈ [400, 4000] AND nearest_opponent_front_dist > 800` | dims 21 + Block B |
+| `Tactic::Position::stabilityOffset` | `last_pass_target` lifetime decay (1.5 s) + 5-frame role hysteresis (§11.B.3.1) | new GateState fields |
+
+### 14.4 Encarrilamiento subset we ship — Step 1 of §11.A.6 only
+
+From the staged addition order in §11.A.6:
+
+- **STEP 1 (THIS SPRINT): role one-hot, 3 bits.** Indices 44/45/46 (extending the shipped 41-dim obs, not 26→31 as the doc originally specified). `is_striker`, `is_open_support`, `is_off_ball_support`. Plus the extended mask per §11.A.4: open_support forbids shoot+dribble; off_ball_support forbids shoot.
+- **STEP 2 (DEFER post-Monday): `open_lane_progress`** at index 47.
+- **STEP 3 (DEFER post-Monday): `support_spacing_progress`** at index 48.
+
+§11.A.6's own final paragraph says: *"If Step 1 doesn't measurably accelerate convergence on the team rubric, Steps 2-3 are not worth adding."* That gate cannot be evaluated in 6 days. Therefore Steps 2-3 are deferred and we do not pay their dataset-rebuild cost.
+
+The 3-5× convergence speedup §11.A.5 attributes to the role one-hot is the load-bearing element for our 1-2 day fine-tune budget.
+
+We also extend the gate with **3 skill-arm bits** (parallel to existing `shoot_armed`/`dribble_armed`/`shoot_arm_progress` at indices 23/24/25):
+- `pass_armed` (smashOrPass picked "pass" AND decisionPenalty-stable)
+- `observe_armed` (ball lost beyond threshold AND a teammate has team-ball belief)
+- `pass_arm_progress` (debounce fill toward arming)
+
+These three sit at indices 41/42/43. Role one-hot at 44/45/46. **Final obs growth this sprint: 41 → 47.**
+
+The behavior-preservation contract in `test_obs_migration_contract.py` extends with a 26→47 zero-pad bit-identity assertion. Single-agent floor cannot regress structurally.
+
+### 14.5 Operative §11.B retunings for this sprint
+
+Copying from §11.B.5 and §11.B.6.3, the values that apply unchanged:
+
+- `bc_beta_max = 0.08` (softer than production's 0.15)
+- `bc_beta_min = 0.02`
+- `bc_competence_half_life_evals = 25` (longer than production's 10)
+- `bc_replay_weight = 0.10`
+- `bc_replay_updates = 2`
+- `bc_skill_loss_scale = 0.40`
+- `bc_param_loss_scale = 0.50`
+- `parallel_player_numbers = (1, 2, 3)` for stage 6 (2v0 + BH GK = 3 total), `(1, 2, 3, 4)` for stage 7 (3v0 + BH GK = 4 total)
+- `stage4_finish_interleave_probability = 0.2`
+- `eval_episodes = 8`
+- `max_episode_steps = 400`
+- BC competence gate takes **min** across (striker, open_support, off_ball_support) per §11.B.5.2
+- KL anchor = `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt` loaded via `_load_state_dict_obs_padded`, per §11.B.5.3 (this is the production checkpoint §11.B.5.3 referenced as a placeholder)
+- Per-eval auto-rollback per §11.B.6.4 (any single-agent regression → reload last passing checkpoint)
+- Dual rubric evaluation per §11.B.6.3 (single-agent + team)
+
+### 14.6 6-day sprint plan with owners
+
+Today is **Monday 2026-06-08 near midnight**. Real-NAO demo is **Monday 2026-06-15**. Tue–Sun = 6 working days.
+
+Owners: **Luis** = multi-agent pipeline (teacher, gate, env, mask, dataset, BC, PPO). **Rafael** = stability + transplant + real-NAO validation. **Laura** = dataset/eval support + ONNX (already shipped baseline).
+
+| Day | Owner | Build | Validation gate | Reference |
+|---|---|---|---|---|
+| **Tue 06-09** | Luis | `multiagent_teacher.py` with three role branches (BHuman salvage per §14.3 + §11.B.2). Extend `gate.py`: `pass_armed`, `observe_armed`, `pass_arm_progress`, `is_striker`, `is_open_support`, `is_off_ball_support`. Extend obs to 47 dims. Extend `gate_skill_mask_from_obs` per §11.A.4. | `test_obs_migration_contract` passes at 47 dims (26→47 bit-identity). Teacher labels for a hand-constructed 3-agent obs match expectations. Single-agent behavioral_evaluator unchanged (regression check). | §11.A.3, §11.A.4, §11.B.2, §14.3, §14.4 |
+| **Tue 06-09** | Rafael | Verify the existing ONNX runs cleanly inside BHuman on a real NAO: model loads, inference < 30 ms, no crash, walk/dribble/shoot skills callable. | Latency < 50 ms ceiling. No crash over 10-minute run. | doc 23, doc 26 |
+| **Wed 06-10** | Luis | Env-side role assignment with 5-frame hysteresis + EMA-smoothed coordination targets (α=0.3 open-lane, α=0.2 triangle) per §11.B.3. Add stages 6 (2v0 + BH GK) and 7 (3v0 + BH GK) to curriculum. Multi-agent dataset gen with per-row `role_id` for BC stratification per §11.A.5. Sanitizer filters extended (per-role hold-steps; role-thrash drop; teammate-teammate-collision drop). | Dataset audit `positive_weight_gate_label_consistent: true` AND new `positive_weight_role_mask_consistent: true`. ≥ 100 episodes per stage. | §11.B.3, §11.B.4 |
+| **Wed 06-10** | Rafael | Single real NAO with RL striker drives the ball in 1v0 (hardware reproduction of single-agent behavior). | Striker completes ≥ 3 of 5 single-agent behavioral_evaluator scenarios on hardware. | doc 27 |
+| **Thu 06-11** | Luis | BC train from new dataset, warm-start from `checkpoint_stage4_step5000.pt` via zero-pad (26→47). Role-stratified BC sampling per §11.A.5. Reward terms extended (conservative) per §11.B.6.1: `support_open_hold_bonus = 0.5`, `support_triangle_hold_bonus = 0.2`, `team_goal_bonus = 5.0`, `pass_attempt_credit = 1.0`. KL anchor wired per §11.B.5.3. | Single-agent behavioral_evaluator floor ≥ 3/5 on new BC checkpoint. BC loss decreases monotonically across all three roles. | §11.B.5, §11.B.6.1 |
+| **Thu 06-11** | Laura | Multi-agent evaluator scaffolding: add `team_goal_rate`, `role_thrash_rate`, `support_open_hold_steps_mean`, `support_triangle_hold_steps_mean` to `environment.py episode_metrics`. Pass functions: `_pass_team_coordination`, `_pass_support_positioning`, `_pass_team_no_regression` per §11.A.5 + §11 Phase 2. Register team scenarios in `_PASS_FNS`. | Single-agent rubric still passes against `checkpoint_stage4_step5000.pt`. Team rubric baseline fails in measurable way (no NaN, sensible ranges). | §11.A.5, §11 Phase 2 |
+| **Fri 06-12** | Luis | PPO fine-tune stage 6 with §14.5 retunings + per-eval auto-rollback per §11.B.6.4. If stage 6 promotes, run stage 7. | Stage 6 promotion gate (clean_finish ≥ 0.6 AND policy_shoot_rate ≥ 0.02 AND team_goal_rate > 0) OR explicit decision to stay on 6. Single-agent never regresses. | §11.B.6.2, §11.B.6.4 |
+| **Sat 06-13** | Luis | Multi-agent stability probe (Rafael seed set, team metrics). ONNX export from best checkpoint. SimRobot 3D demos at 2v0 and 3v0. | Stability: ≥ 3/5 single-agent, ≥ 1 team goal in 4-episode 2v0 probe, no teammate-teammate collisions. ONNX runs in BHuman. | doc 27 |
+| **Sat 06-13** | Laura | Behavioral stability probe extension for multi-agent (sibling `behavioral_stability_multiagent_probe.py`, same seed contract). | Per-seed multi-agent rubric reports pass_rate without NaN. | doc 27 |
+| **Sun 06-14** | All | Buffer. Dry-run real-NAO demo end-to-end with Rafael's deployment. Address whatever surfaces. | Demo works on hardware. | — |
+| **Mon 06-15** | All | Real-NAO demo. | — | — |
+
+### 14.7 Anti-patterns updated for this sprint
+
+In addition to §9 (still applies — read it):
+
+- **Do not add `open_lane_progress` or `support_spacing_progress` this sprint.** §11.A.6 requires Step-1 verification first; we cannot verify in 6 days. Defer.
+- **Do not extend obs beyond 47 dims this sprint.** Any feature beyond role one-hot adds dataset-shape pressure we cannot validate.
+- **Do not skip the per-eval auto-rollback** (§11.B.6.4). Multi-agent fine-tunes regress quietly; the rollback is the only defense.
+- **Do not write Python wrapper coordination logic.** Violates the RL-dominant goal locked in §14.2. Coordination lives in the policy via role one-hot + obs blocks B-F.
+- **Do not unmask `mark` or `block`.** Both require opponent positions in obs (intentionally excluded per spec § 5 of doc 24).
+- **Do not change the GK to RL** this sprint. Confirmed scope.
+- **Do not modify `checkpoint_stage4_step5000.pt`.** It is the KL anchor + fallback. Treat as immutable.
+- **Do not skip role-assignment hysteresis (5 frames)**, even "temporarily for debugging." Single-frame role flips poison the dataset. §11.B.3.1.
+- **Do not smooth coordination target inside the teacher.** Smooth in the env. Stateless teacher. §11.B.9.
+
+### 14.8 What this sprint does NOT accomplish
+
+Honest scoping, extending §10:
+
+- Does not learn `mark`/`block`/defensive recovery. Opponents not in obs.
+- Does not learn complex set plays. Game state PLAYING only.
+- Does not include Steps 2-3 of §11.A.6 (progress floats). Deferred.
+- Does not finish §11 as scoped (Phase 5 dataset re-collection at OBS_SIZE=31, Phase 7 full 80k fine-tune). We do a compressed 10-20k-step fine-tune at OBS_SIZE=47 from a stabilized checkpoint.
+- Does not replace BHuman GK.
+- Does not deliver pass-receive learning beyond the smashOrPass teacher label distribution. The receiver behavior is "be in the open-lane slot when team ball is mine" via the open-support mask.
+
+Post-Monday natural follow-ups: §11.A.6 Steps 2-3, full §11 Phase 7 fine-tune at the proper step budget, §11.A.2 policy expansion (defensive recovery, pass-lane anticipation), RL GK as separate policy.
+
+### 14.9 Related artifacts (canonical files to read before starting)
+
+- `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt` — KL anchor for stage-5+ fine-tunes. The 4/5 stabilized single-agent baseline. Immutable this sprint.
+- `ppo_striker_hsl2026.onnx` + `.onnx.data` — ONNX export of the above. Real-NAO deployment artifact.
+- `tools/export_ppo_policy.py` — ONNX export infrastructure (re-export after sprint).
+- `test_obs_migration_contract.py` — extend with 26→47 assertion. Behavior-preservation contract.
+- `test_mappo_observation_space.py` — extend with role-mask assertions and 47-dim shape.
+- `behavioral_stability_probe.py` — sibling `behavioral_stability_multiagent_probe.py` for team metrics.
+- `docs/24-multiagent-obs-extension-26-to-41-spec.md` — Block A-F spec, canonical for the 41-dim obs.
+- `docs/25-mappo-wire-findings.md` — MAPPO wire reliability notes (Block D activity proxy, Block C age proxy, Block E noise modes).
+- `docs/26-implementacion-ppo-a-transplantar.md` — Rafael's 890-line transplant implementation guide.
+- `docs/27-estabilidad-behavioral-evaluator.md` — stability evaluator rationale and seed contract.
+- `SabanaHerons2026/Src/Modules/BehaviorControl/StrategyBehaviorControl/ActiveRoles/PlayBall.cpp` — smashOrPass reference for the striker teacher branch.
+- `SabanaHerons2026/Src/Modules/BehaviorControl/StrategyBehaviorControl/PositionRoles/{Forward,Midfielder,Defender}.cpp` — rating-function references.
+- `SabanaHerons2026/Src/Tools/BehaviorControl/Strategy/Tactic.h` — formation templates (`t13_3v3_scaled`, `t22_3v3_scaled`).
+- `SabanaHerons2026/Src/Modules/BehaviorControl/SkillBehaviorControl/SkillBehaviorControl.cpp:61-85` — the activity proxy already in our wire.
+
+### 14.10 Memory pointer
+
+The Claude memory at `~/.claude/projects/-home-luis-GitHub-RL/memory/multiagent-rl-dominant-production-goal.md` captures the RL-dominant goal locked in §14.2 as durable cross-session memory. The memory at `graph-coordination-pipeline-hostility.md` predates the substrate work and is **stale on timeline** (it estimated 3-4 weeks for the graph approach; with the substrate shipped, the encarrilamiento Step-1 subset fits 6 days). The memory's structural analysis remains accurate — only the budget changed.
+
+### 14.11 First commit of the sprint
+
+The Tuesday morning starting point is one file: `multiagent_teacher.py`. Its imports include `stage_aware_teacher_action` from the existing `teacher_policy.py` (for the striker branch, bit-identical per §11.B.2.1), the new role enums, and a port of the `smashOrPass` decisionPenalty pattern from `PlayBall.cpp`. The gate extension lands in the same commit so the obs encoding stays consistent. The behavior-preservation test extension lands in the same commit so single-agent floor is guaranteed before any multi-agent code paths execute.
+
+---
+
+### 14.12 The five R-rules — fully specified
+
+The heuristic teacher is built from five rules. R1-R3 are positive ("what to do"); R4 is hysteresis (applied inside R1, R2, R3); R6 is pass quality scoring (embedded inside R2 — there is no separate R6 module, it's the scoring function R2 calls). **R5 from the earlier discussion was dropped — teammate-as-obstacle is already handled by Block A `nearest_teammate_front_dist` + BHuman's walk/dribble trajectory planner; it does not need a teacher rule.**
+
+All five rules together fit in ~400 lines of Python in `multiagent_teacher.py` + ~80 lines of env-side state in `environment.py`. Constants below are first-pass; calibrate after Day 5.
+
+#### 14.12.1 Constants (single source of truth)
+
+```python
+# multiagent_teacher.py — top-of-module constants. Tune on Day 5.
+
+# R1 (Role assignment)
+ROLE_HYSTERESIS_FRAMES = 5             # §11.B.3.1 — 5 consecutive frames before swap
+ROLE_MIN_DISTANCE_GAP_MM = 200.0       # candidate must be ≥ 200mm closer to ball
+TEAMMATE_FRESH_MAX_AGE_MS = 1000.0     # same as TEAMMATE_STALE_THRESHOLD_MS in env
+
+# R2 (smashOrPass, port of PlayBall.cpp:33-118)
+SHOOT_THRESHOLD = 0.55                 # own_value above this → shoot
+MIN_PASS_DISTANCE_MM = 400.0           # PlayBall.cpp:p.minPassDistance
+MAX_PASS_DISTANCE_MM = 4000.0          # PlayBall.cpp:p.maxPassDistance
+DECISION_PENALTY_MIN = 0.05            # mapToRange floor
+DECISION_PENALTY_MAX = 0.20            # mapToRange ceiling
+BALL_DIST_MIN_PENALTY_MM = 500.0       # tighter ball → larger penalty
+BALL_DIST_MAX_PENALTY_MM = 2500.0
+LAST_PASS_TARGET_LIFETIME_MS = 1500.0  # R4 decay window
+
+# R3 (Support positioning)
+SIGMA_TEAM_MM = 800.0                  # Midfielder separation Gaussian σ
+STAB_OFFSET_MM = 800.0                 # Tactic.Position.stabilityOffset analogue
+HOLD_TOLERANCE_OPEN_MM = 250.0         # §11.B.2.2 OPEN_LANE_HOLD_TOLERANCE_MM
+HOLD_TOLERANCE_OFF_BALL_MM = 350.0     # §11.B.2.3 TRIANGLE_HOLD_TOLERANCE_MM
+SUPPORT_SLOT_CANDIDATE_GRID = (        # field-frame xy candidates per side, mirrored by ball_y_sign
+    (+800.0, +1200.0),
+    (+1200.0, +800.0),
+    (+400.0, +1400.0),
+    (-400.0, +1200.0),                 # fall-back-deep slot
+)
+
+# R6 (Pass quality — proxies for BHuman's learned estimators)
+SHOOT_OPEN_THRESHOLD_FOR_LANE = 0.5    # for own ball shoot rating
+CAN_SCORE_BOOST = 0.3                  # own ball: + 0.3 × can_score_now
+OPPONENT_LANE_CLEARANCE_MM = 800.0     # pass lane: nearest_opponent_front_dist > 800mm
+
+# Env-side, but listed here for context
+EMA_ALPHA_OPEN_LANE = 0.3              # 3-frame EMA on open-lane target
+EMA_ALPHA_TRIANGLE = 0.2               # 5-frame EMA on triangle target
+GK_EXCLUDE_X_MM = -2000.0              # teammate with x_field < this is treated as GK
+```
+
+#### 14.12.2 R1 — Role assignment with 5-frame hysteresis
+
+```python
+@dataclass
+class TeamRoleHistory:
+    """Lives on the env, one per episode. Carries the hysteresis state."""
+    current_roles: dict[int, str]               # {agent_id: "striker"|"open_support"|"off_ball_support"}
+    candidate_streak: dict[int, int]            # {candidate_id: consecutive frames as proposed striker}
+
+def assign_roles(
+    agent_obs: dict[int, BackendObservation],   # only RL agents (GK excluded by caller)
+    team_ball: tuple[float, float, bool],       # (x_mm, y_mm, valid)
+    history: TeamRoleHistory,
+) -> dict[int, str]:
+    """
+    Returns {agent_id: role}. Deterministic. Side-effects history in-place.
+
+    Rules:
+      1. Distance to ball = sqrt((robot_x - ball_x)^2 + (robot_y - ball_y)^2).
+         Ball coords: prefer obs.global_team_ball if team_ball[2] else (robot_x + ball_rel_x, robot_y + ball_rel_y) of the closest-claiming agent.
+      2. Filter agents with valid pose (broadcast age <= TEAMMATE_FRESH_MAX_AGE_MS — for the self agent always true).
+      3. Lowest distance = striker_candidate; tie-break by lowest agent_id (deterministic).
+      4. Hysteresis: if history.current_roles[agent].striker == prev_striker AND candidate != prev_striker:
+           if (prev.distance - candidate.distance) < ROLE_MIN_DISTANCE_GAP_MM: keep prev as striker.
+           else increment candidate_streak[candidate]; if < ROLE_HYSTERESIS_FRAMES: keep prev.
+           else: commit swap, zero all streaks.
+      5. open_support = the_other_RL with highest forward_rating(pos, ball) — see R3.
+         For 2 RL (after striker chosen, exactly one remains) it is that one.
+      6. off_ball_support = the remaining RL (in 3v0 only).
+      7. Update history.current_roles, return mapping.
+    """
+```
+
+**Edge cases:**
+- 2-RL (stage 6): exactly one striker + one open_support. No off_ball.
+- 3-RL (stage 7): one striker + one open_support + one off_ball.
+- All RL agents in "ball lost" state (team_ball invalid AND each agent's own ball is stale): the agent with the freshest natural ball belief is striker; others off_ball_support.
+
+#### 14.12.3 R2 — smashOrPass (port of PlayBall.cpp:33-118)
+
+```python
+def smash_or_pass(
+    striker_obs: BackendObservation,
+    teammate_slots: list[TeammateSlot],          # sorted by Block B order: [(slot_idx, agent_id, x_field, y_field, is_gk)]
+    last_pass_target: int | None,                # None or slot_idx of last frame's pass
+    last_pass_target_age_ms: float,              # 0 if no last pass; decays naturally
+) -> tuple[str, int]:
+    """
+    Returns (skill_name, pass_target_slot). pass_target_slot = -1 if skill != "pass".
+
+    Port of PlayBall::smashOrPass(). Direct line-by-line correspondence:
+      PlayBall.cpp:39  → decision_penalty
+      PlayBall.cpp:44  → own_value
+      PlayBall.cpp:54-55 → own_value -= decision_penalty when last_pass_target was active
+      PlayBall.cpp:56-60 → if own_value > shoot_threshold: return ("shoot", -1)
+      PlayBall.cpp:64-104 → loop over teammates, compute agent_value, pick best
+      PlayBall.cpp:105-108 → if best: return ("pass", best.slot)
+      PlayBall.cpp:116-117 → fallback: return ("shoot", -1)
+    """
+    # 1. Decision penalty ramps with ball distance — close ball, big penalty (don't thrash).
+    d_ball = math.hypot(striker_obs.ball_rel_x, striker_obs.ball_rel_y)
+    decision_penalty = map_to_range(
+        d_ball, BALL_DIST_MAX_PENALTY_MM, BALL_DIST_MIN_PENALTY_MM,
+        DECISION_PENALTY_MAX, DECISION_PENALTY_MIN,
+    )
+
+    # 2. Own shoot rating from obs proxies (R6).
+    own_value = float(striker_obs.shot_opening_with_obstacles) + CAN_SCORE_BOOST * float(striker_obs.can_score_now)
+    if last_pass_target is not None and last_pass_target_age_ms < LAST_PASS_TARGET_LIFETIME_MS:
+        own_value -= decision_penalty
+
+    # 3. Direct shoot if own rating high enough — PlayBall.cpp:56-60.
+    if own_value > SHOOT_THRESHOLD:
+        return ("shoot", -1)
+
+    # 4. Score each teammate as pass candidate — PlayBall.cpp:64-104.
+    best_slot = -1
+    best_value = own_value
+    for slot in teammate_slots:
+        if slot.is_gk:                                   # PlayBall.cpp:66-67 (skip GK)
+            continue
+        pass_dist = math.hypot(
+            slot.x_field - striker_obs.robot_x,
+            slot.y_field - striker_obs.robot_y,
+        )
+        if pass_dist < MIN_PASS_DISTANCE_MM or pass_dist > MAX_PASS_DISTANCE_MM:
+            continue                                     # PlayBall.cpp:70-72
+
+        # R6 pass quality (proxies replace BHuman's learned PassEvaluation/ExpectedGoals).
+        pass_reachable = pass_reachable_proxy(striker_obs, slot)
+        goal_proximity = goal_proximity_proxy(slot)
+        if pass_reachable == 0.0 or goal_proximity == 0.0:
+            continue
+
+        agent_value = pass_reachable * goal_proximity
+        if last_pass_target is not None and last_pass_target != slot.slot_idx \
+                and last_pass_target_age_ms < LAST_PASS_TARGET_LIFETIME_MS:
+            agent_value -= decision_penalty              # PlayBall.cpp:94-98
+
+        if agent_value > best_value:
+            best_value = agent_value
+            best_slot = slot.slot_idx
+
+    # 5. Commit decision — PlayBall.cpp:105-117.
+    if best_slot >= 0:
+        return ("pass", best_slot)
+    return ("shoot", -1)
+
+
+def pass_reachable_proxy(striker_obs: BackendObservation, target_slot: TeammateSlot) -> float:
+    """R6 proxy for PassEvaluation.getRating(line). Binary 0/1."""
+    pass_dist = math.hypot(
+        target_slot.x_field - striker_obs.robot_x,
+        target_slot.y_field - striker_obs.robot_y,
+    )
+    if pass_dist < MIN_PASS_DISTANCE_MM or pass_dist > MAX_PASS_DISTANCE_MM:
+        return 0.0
+    # Opponent-on-lane proxy: nearest opponent front distance from striker.
+    # We lack per-line opponent geometry, so we use the front-cone proxy.
+    if float(striker_obs.nearest_opponent_front_dist) <= OPPONENT_LANE_CLEARANCE_MM:
+        return 0.0
+    return 1.0
+
+
+def goal_proximity_proxy(target_slot: TeammateSlot) -> float:
+    """R6 proxy for ExpectedGoals.getRating(teammatePos). Linear in x toward opponent goal."""
+    # Goal at +FIELD_X (e.g. +4500mm). Teammate closer to goal → higher rating.
+    return float(np.clip(target_slot.x_field / GOAL_X, 0.0, 1.0))
+```
+
+#### 14.12.4 R3 — Support positioning (Tactic templates + Midfielder separation)
+
+```python
+def support_target(
+    support_obs: BackendObservation,
+    ball_field_xy: tuple[float, float],
+    striker_field_xy: tuple[float, float],
+    other_support_field_xy: tuple[float, float] | None,
+    current_slot: tuple[float, float] | None,       # last frame's committed slot, for stabilityOffset
+) -> tuple[tuple[float, float], str]:
+    """
+    Returns (target_xy_field, skill_name) where skill_name ∈ {"walk", "stand"}.
+
+    Rule:
+      1. Build candidate slot positions from SUPPORT_SLOT_CANDIDATE_GRID, mirroring y by ball y sign.
+      2. Score each candidate: forward_rating(slot, ball) × separation_penalty(slot, teammates).
+      3. Apply stabilityOffset: if current_slot has score within STAB_OFFSET_MM of best, keep current.
+      4. Dist to chosen slot:
+           < HOLD_TOLERANCE → ("stand")
+           else → ("walk")
+    """
+    # Mirror grid by ball y sign so supports are on the same side as ball.
+    ball_y_sign = 1.0 if ball_field_xy[1] >= 0.0 else -1.0
+    candidates = [(x, y * ball_y_sign) for (x, y) in SUPPORT_SLOT_CANDIDATE_GRID]
+
+    scored = []
+    for cand in candidates:
+        fwd = forward_rating(cand, ball_field_xy)
+        teammates_for_sep = [striker_field_xy]
+        if other_support_field_xy is not None:
+            teammates_for_sep.append(other_support_field_xy)
+        sep = separation_penalty(cand, teammates_for_sep)
+        score = fwd * sep
+        scored.append((score, cand))
+
+    scored.sort(reverse=True)
+    best_score, best_cand = scored[0]
+
+    # stabilityOffset analogue: prefer the current slot if it's within STAB_OFFSET of best.
+    if current_slot is not None:
+        cur_score = next((s for (s, c) in scored if c == current_slot), 0.0)
+        if best_score - cur_score < (STAB_OFFSET_MM / 1000.0):   # score units, scale matches
+            best_cand = current_slot
+
+    # Tolerance: stand if close enough; else walk.
+    self_x = float(support_obs.robot_x)
+    self_y = float(support_obs.robot_y)
+    dist = math.hypot(best_cand[0] - self_x, best_cand[1] - self_y)
+    skill = "stand" if dist < HOLD_TOLERANCE_OPEN_MM else "walk"
+    return (best_cand, skill)
+
+
+def forward_rating(pos: tuple[float, float], ball: tuple[float, float]) -> float:
+    """
+    Port of Forward::rating(pos) (PositionRoles/Forward.cpp:24-38).
+
+    Original:
+        passRating * goalRating * baseRating
+    Our proxy:
+        pass_reachable_from_ball × goal_proximity × base_gauss(pos − ideal_receive_pose)
+
+    For sprint simplicity, baseRating is computed from a fixed "ideal_receive_pose" for the
+    slot, OR replaced by 1.0 if the candidate grid is already at the right poses. Use:
+    """
+    # Pass-reachable from the ball position.
+    pass_dist = math.hypot(pos[0] - ball[0], pos[1] - ball[1])
+    if pass_dist < MIN_PASS_DISTANCE_MM or pass_dist > MAX_PASS_DISTANCE_MM:
+        return 0.0
+    # Goal proximity: closer to opponent goal is better.
+    goal = float(np.clip(pos[0] / GOAL_X, 0.0, 1.0))
+    # Base: candidate grid is already shaped; constant 1.0 is acceptable.
+    return goal
+
+
+def separation_penalty(pos: tuple[float, float], teammates: list[tuple[float, float]]) -> float:
+    """
+    Port of Midfielder::rating separation Gaussian (PositionRoles/Midfielder.cpp:60-72).
+
+    rating = 1 - exp(-0.5 * minTeammateDistSq / σ²)
+
+    Pos with no nearby teammates ≈ 1.0 (clean). Pos stacked on a teammate ≈ 0.0.
+    """
+    if not teammates:
+        return 1.0
+    min_dsq = min((pos[0] - t[0]) ** 2 + (pos[1] - t[1]) ** 2 for t in teammates)
+    return 1.0 - math.exp(-0.5 * min_dsq / (SIGMA_TEAM_MM ** 2))
+```
+
+#### 14.12.5 R4 — Hysteresis (not a separate rule, but enumerated explicitly)
+
+R4 is **three places** where temporal commit is enforced:
+
+| Location | Mechanism | Constant | Purpose |
+|---|---|---|---|
+| R1 role assignment | `candidate_streak < ROLE_HYSTERESIS_FRAMES` keeps previous striker | `ROLE_HYSTERESIS_FRAMES = 5` | Eliminates role thrash (§11.B.3.1) |
+| R2 smashOrPass | `decision_penalty` subtracted from rival options when switching last_pass_target | `DECISION_PENALTY_MIN/MAX` | Eliminates shoot↔pass thrash (PlayBall.cpp:38-39) |
+| R3 support positioning | `STAB_OFFSET_MM` keeps current slot if alternative scores within margin | `STAB_OFFSET_MM = 800` | Eliminates support-slot oscillation (Tactic.stabilityOffset) |
+
+No new code module — R4 lives inside R1/R2/R3 implementations above. **Do not separate it out into its own function**; the BHuman pattern works because the hysteresis is local to each decision, not a global meta-rule.
+
+#### 14.12.6 R6 — Pass quality scoring (embedded in R2)
+
+R6 is the **two proxy functions** `pass_reachable_proxy` and `goal_proximity_proxy` defined above in §14.12.3. They replace BHuman's `PassEvaluation` and `ExpectedGoals` learned estimators. The math (`pass_reachable × goal_proximity`) lives inside the smashOrPass loop at the `agent_value = ...` line. There is **no separate R6 module**.
+
+### 14.13 `multiagent_teacher.py` module skeleton
+
+```python
+"""Multi-agent heuristic teacher.
+
+Per-role labels for stage 6+. Each agent's call is independent and stateless;
+all team-aware state (role assignment, EMA coordination targets, last pass target
+decay) lives in the env and arrives via the info packet (§11.B.3.3).
+
+R1-R4-R6 are implemented inline per §14.12. R5 is intentionally absent (teammate-
+as-obstacle is solved by Block A `nearest_teammate_front_dist` + the BHuman walk
+planner, not the teacher).
+
+DO NOT add state to this module. DO NOT compute role here. DO NOT smooth targets here.
+"""
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from action import SkillType, StructuredSkillAction
+from config import ACTION, GOAL_X
+from gate import GateDecision
+from pybh_backend import BackendObservation
+from teacher_policy import stage_aware_teacher_action  # striker branch reuse
+
+# Constants per §14.12.1 go here. Keep them at module top — single source of truth.
+# ... (omitted for brevity in this skeleton)
+
+
+@dataclass(frozen=True)
+class TeammateSlot:
+    slot_idx: int        # Block B sort order (0=nearest, 1=second, 2=third)
+    agent_id: int        # player number
+    x_field: float
+    y_field: float
+    is_gk: bool
+
+
+def teacher_striker(obs, stage_id, prev_skill_name, gate_decision,
+                    teammate_slots, last_pass_target, last_pass_target_age_ms):
+    """§11.B.2.1 + R2 smashOrPass. Calls existing single-agent teacher for walk/dribble
+    decisions; overrides shoot vs pass via smash_or_pass when both arms are armed.
+    """
+    decision = stage_aware_teacher_action(
+        obs, stage_id, prev_skill_name, gate_decision=gate_decision,
+    )
+    # If single-agent teacher chose shoot or dribble, we may want pass instead.
+    if decision.skill_name == "shoot" and gate_decision.shoot_armed:
+        skill, slot = smash_or_pass(obs, teammate_slots, last_pass_target, last_pass_target_age_ms)
+        if skill == "pass":
+            return StructuredSkillAction(
+                skill_type=SkillType.pass_,
+                target_x=0.0, target_y=0.0, target_theta=0.0,
+                pass_target=slot,
+            )
+    return decision
+
+
+def teacher_open_support(obs, stage_id, prev_skill_name, gate_decision,
+                         coordination_target):
+    """§11.B.2.2 — walk-or-stand-with-tolerance toward smoothed open-lane target."""
+    tx, ty = coordination_target
+    dx = tx - float(obs.robot_x)
+    dy = ty - float(obs.robot_y)
+    dist = math.hypot(dx, dy)
+    if dist < HOLD_TOLERANCE_OPEN_MM:
+        return StructuredSkillAction(skill_type=SkillType.stand)
+    target_theta = math.atan2(dy, dx)
+    return _open_lane_anchor_action(obs, (tx, ty), target_theta, stage_id=stage_id)
+
+
+def teacher_off_ball_support(obs, stage_id, prev_skill_name, gate_decision,
+                             coordination_target):
+    """§11.B.2.3 — triangulation + unexpected-possession escape hatch."""
+    if gate_decision.dribble_armed:
+        # Escape hatch: ball is on me; act as striker for this one frame.
+        return stage_aware_teacher_action(
+            obs, stage_id, prev_skill_name, gate_decision=gate_decision,
+        )
+    tx, ty = coordination_target
+    dx = tx - float(obs.robot_x)
+    dy = ty - float(obs.robot_y)
+    dist = math.hypot(dx, dy)
+    if dist < HOLD_TOLERANCE_OFF_BALL_MM:
+        return StructuredSkillAction(skill_type=SkillType.stand)
+    target_theta = math.atan2(dy, dx)
+    return _triangle_anchor_action(obs, (tx, ty), target_theta, stage_id=stage_id)
+
+
+def stage_aware_team_teacher_action(
+    obs: BackendObservation,
+    stage_id: int,
+    prev_skill_name: str | None,
+    *,
+    gate_decision: GateDecision,
+    role: str,                                    # "striker" | "open_support" | "off_ball_support"
+    coordination_target: tuple[float, float],     # field-frame xy
+    teammate_slots: list[TeammateSlot],
+    last_pass_target: int | None,
+    last_pass_target_age_ms: float,
+) -> StructuredSkillAction:
+    """§11.B.2.4 dispatcher. Stateless. Pure function of inputs."""
+    if role == "striker":
+        return teacher_striker(obs, stage_id, prev_skill_name, gate_decision,
+                               teammate_slots, last_pass_target, last_pass_target_age_ms)
+    if role == "open_support":
+        return teacher_open_support(obs, stage_id, prev_skill_name, gate_decision,
+                                    coordination_target)
+    if role == "off_ball_support":
+        return teacher_off_ball_support(obs, stage_id, prev_skill_name, gate_decision,
+                                        coordination_target)
+    raise ValueError(f"Unknown role: {role!r}")
+
+
+# --- helpers ---
+
+def map_to_range(value, in_max, in_min, out_max, out_min):
+    """BHuman mapToRange(value, ballDistMaxPenalty, ballDistMinPenalty, maxPenalty, minPenalty).
+    Linear interp clamped to [out_min, out_max]."""
+    if in_max == in_min:
+        return out_min
+    t = (value - in_min) / (in_max - in_min)
+    t = max(0.0, min(1.0, t))
+    return out_min + t * (out_max - out_min)
+
+
+def smash_or_pass(...): ...                       # §14.12.3 body
+
+def pass_reachable_proxy(...): ...                # §14.12.3 body
+
+def goal_proximity_proxy(...): ...                # §14.12.3 body
+
+def support_target(...): ...                       # §14.12.4 body
+
+def forward_rating(...): ...                       # §14.12.4 body
+
+def separation_penalty(...): ...                   # §14.12.4 body
+
+def _open_lane_anchor_action(obs, target_xy, target_theta, *, stage_id):
+    """Analogous to _action_from_anchor in teacher_policy.py but anchored on
+    target_xy (open-lane center) instead of the ball. Returns walk skill with
+    residuals computed against the open-lane anchor."""
+
+def _triangle_anchor_action(obs, target_xy, target_theta, *, stage_id):
+    """Same idea for the triangle target."""
+```
+
+### 14.14 Gate extension (`gate.py`)
+
+Add three skill-arm bits + three role one-hot bits to `GateDecision`. Bake into obs per Design A.
+
+```python
+# gate.py additions (preserve all existing fields).
+
+_GATED_SKILLS = ("shoot", "dribble", "pass", "observe")   # add pass, observe
+
+@dataclass(frozen=True)
+class GateConfig:
+    # ... all existing fields unchanged ...
+
+    # --- pass gate ---
+    pass_enter_open_threshold: float = 0.5       # smashOrPass picked pass AND open
+    pass_exit_open_threshold: float = 0.35
+    pass_arm_frames: int = 2
+
+    # --- observe gate (Stage 8+, present from sprint for future use) ---
+    observe_enter_ball_lost_age_ms: float = 1500.0
+    observe_exit_ball_lost_age_ms: float = 1000.0
+    observe_arm_frames: int = 3
+
+
+@dataclass
+class GateState:
+    shoot_armed: bool = False
+    dribble_armed: bool = False
+    pass_armed: bool = False                 # NEW
+    observe_armed: bool = False              # NEW
+    shoot_streak: int = 0
+    dribble_streak: int = 0
+    pass_streak: int = 0                     # NEW
+    observe_streak: int = 0                  # NEW
+
+
+@dataclass(frozen=True)
+class GateDecision:
+    shoot_armed: bool
+    dribble_armed: bool
+    shoot_arm_progress: float
+    pass_armed: bool                         # NEW
+    observe_armed: bool                      # NEW
+    pass_arm_progress: float                 # NEW
+    is_striker: bool                         # NEW (set by env, NOT computed here)
+    is_open_support: bool                    # NEW (set by env)
+    is_off_ball_support: bool                # NEW (set by env)
+    allowed_skills: tuple[str, ...]
+
+    def obs_features(self) -> list[float]:
+        """Ordered to match ObsIndex 23..46. CRITICAL: order is the contract."""
+        return [
+            1.0 if self.shoot_armed else 0.0,           # 23
+            1.0 if self.dribble_armed else 0.0,         # 24
+            float(self.shoot_arm_progress),             # 25
+            # NEW gate bits — indices 41-43.
+            1.0 if self.pass_armed else 0.0,            # 41
+            1.0 if self.observe_armed else 0.0,         # 42
+            float(self.pass_arm_progress),              # 43
+            # NEW role one-hot — indices 44-46.
+            1.0 if self.is_striker else 0.0,            # 44
+            1.0 if self.is_open_support else 0.0,       # 45
+            1.0 if self.is_off_ball_support else 0.0,   # 46
+        ]
+```
+
+**Important:** The gate **does not compute** `is_striker` / `is_open_support` / `is_off_ball_support`. The env computes them via `assign_roles` (§14.12.2) and writes them into the GateDecision before `obs_features()` is called. The gate computes only the skill-arm bits.
+
+`SkillGate.step()` extends with:
+```python
+# After existing shoot + dribble logic, add:
+pass_ready = (
+    self._pass_signal_from_smash_or_pass(obs)        # set by env-side hook
+    >= cfg.pass_enter_open_threshold
+)
+# arming follows same enter/exit/debounce pattern as shoot
+# ... (mirror existing shoot_armed block)
+```
+
+The actual `pass_armed` decision is informed by the smashOrPass call from the env (the env runs `smash_or_pass` once per striker per step and writes the result into a shared field the gate reads). Pattern matches how `gate_decision` is shared today.
+
+### 14.15 Observation extension (`observation.py`)
+
+```python
+class ObsIndex(IntEnum):
+    # ... existing 0-40 unchanged ...
+    # NEW gate bits (Block A extension):
+    pass_armed = 41
+    observe_armed = 42
+    pass_arm_progress = 43
+    # NEW role one-hot (Block G):
+    is_striker = 44
+    is_open_support = 45
+    is_off_ball_support = 46
+
+
+OBS_FEATURE_NAMES = tuple(index.name for index in ObsIndex)
+OBS_SIZE = len(OBS_FEATURE_NAMES)        # = 47
+```
+
+`environment.py:_encode_obs` appends six floats from `gate_feats` (already returns the right ordered list after §14.14).
+
+### 14.16 Mask extension (`train.py:gate_skill_mask_from_obs`)
+
+```python
+_PASS_SKILL_IDX = SKILL_ORDER.index("pass")
+_OBSERVE_SKILL_IDX = SKILL_ORDER.index("observe")
+
+def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
+    """Forbid-invalid skill mask. Pure function of obs columns.
+    Reads only: 23 (shoot_armed), 24 (dribble_armed), 41 (pass_armed),
+                42 (observe_armed), 44 (is_striker), 45 (is_open_support),
+                46 (is_off_ball_support).
+    """
+    bsz = observations.shape[0]
+    mask = torch.zeros(
+        (bsz, len(SKILL_ORDER)), dtype=observations.dtype, device=observations.device
+    )
+
+    # walk and stand never forbidden — fallback always available.
+    mask[:, SKILL_ORDER.index("stand")] = 1.0
+    mask[:, SKILL_ORDER.index("walk")] = 1.0
+
+    shoot_armed = observations[:, 23] > 0.5
+    dribble_armed = observations[:, 24] > 0.5
+    pass_armed = observations[:, 41] > 0.5
+    observe_armed = observations[:, 42] > 0.5
+
+    is_striker = observations[:, 44] > 0.5
+    is_open = observations[:, 45] > 0.5
+    is_off_ball = observations[:, 46] > 0.5
+
+    # Striker: full skill-arm gating, plus pass.
+    mask[:, _SHOOT_SKILL_IDX] = (shoot_armed & is_striker).to(mask.dtype)
+    mask[:, _PASS_SKILL_IDX] = (pass_armed & is_striker).to(mask.dtype)
+    mask[:, _DRIBBLE_SKILL_IDX] = (dribble_armed & is_striker).to(mask.dtype)
+
+    # Open-support: forbid shoot+dribble+pass entirely (per §11.A.4).
+    # off-ball-support: dribble allowed for unexpected-possession escape hatch.
+    mask[:, _DRIBBLE_SKILL_IDX] = (
+        mask[:, _DRIBBLE_SKILL_IDX].bool() | (dribble_armed & is_off_ball)
+    ).to(mask.dtype)
+
+    # Observe is allowed for any non-striker when observe_armed (Stage 8+ scenarios).
+    mask[:, _OBSERVE_SKILL_IDX] = (observe_armed & ~is_striker).to(mask.dtype)
+
+    return mask
+```
+
+**Behavior-preservation contract extension** (`test_obs_migration_contract.py`):
+```python
+def test_obs_padding_preserves_policy_value_outputs_26_to_47():
+    # Same shape as the existing 26→41 test, but at 47 dims.
+    # When obs[:, 26:] = 0 the policy must output identical skill_logits, param_mean,
+    # log_std, and values as the 26-dim baseline.
+    ...
+
+def test_gate_skill_mask_depends_only_on_specified_columns():
+    # mask depends only on cols 23, 24, 41, 42, 44, 45, 46. Perturb every other
+    # column and assert the mask is unchanged.
+    ...
+```
+
+### 14.17 Environment extension (`environment.py`)
+
+#### 14.17.1 Per-env team state
+
+```python
+class RealSimRobotEnv(ParallelEnv):
+    def __init__(self, ...):
+        # ... existing ...
+        self._team_role_history = TeamRoleHistory(current_roles={}, candidate_streak={})
+        self._open_lane_ema: tuple[float, float] | None = None
+        self._triangle_ema: tuple[float, float] | None = None
+        self._last_pass_target: int | None = None
+        self._last_pass_target_age_ms: float = 0.0
+        self._support_committed_slot: dict[int, tuple[float, float]] = {}
+        # Per-agent fallen-stuck counters (extends Rafael's single-agent counter)
+        self._fallen_consecutive_steps_per_agent: dict[int, int] = {}
+```
+
+Reset zeros all of these.
+
+#### 14.17.2 Per-step orchestration
+
+```python
+def step(self, actions):
+    # 1. Run physics → get per-agent BackendObservation.
+    # 2. Compute team-aware state:
+    #    a. Identify GK by exclusion (teammate with x_field < GK_EXCLUDE_X_MM).
+    #    b. Assemble agent_obs dict for RL agents only.
+    #    c. roles = assign_roles(agent_obs, team_ball, self._team_role_history)
+    #    d. open_lane_target_raw = compute_open_lane_target(open_support_pose, ball_pose, ...)
+    #    e. self._open_lane_ema = ema(self._open_lane_ema, open_lane_target_raw, EMA_ALPHA_OPEN_LANE)
+    #    f. same for triangle target.
+    # 3. Per agent: compute its GateDecision with role flags set.
+    # 4. Per agent: build info packet (see 14.17.3).
+    # 5. Update last_pass_target_age_ms += dt; reset on new pass.
+    # 6. Bake gate.obs_features() into the encoded obs (existing flow).
+    # 7. Apply per-agent fallen-stuck termination (Rafael pattern, scoped to ANY agent).
+    # 8. Standard reward + done propagation.
+```
+
+#### 14.17.3 Info packet per §11.B.3.3
+
+```python
+info[agent_id] = {
+    # ... existing fields ...
+    "raw_obs": backend_obs_dict,
+    "gate_decision": gate_decision,
+    "role": role_str,                                     # str: "striker" | "open_support" | "off_ball_support"
+    "role_id": role_id_int,                               # int: 0 / 1 / 2 — for dataset storage
+    "coordination_target": (x_mm, y_mm),                  # EMA-smoothed by env
+    "teammate_slots": [TeammateSlot(...), ...],           # for striker's smashOrPass call
+    "last_pass_target": self._last_pass_target,
+    "last_pass_target_age_ms": self._last_pass_target_age_ms,
+    "team_state": {
+        "striker_id": ...,
+        "open_support_id": ...,
+        "off_ball_support_id": ...,
+        "ball_holder_id": ... | None,
+    },
+}
+```
+
+#### 14.17.4 EMA helper
+
+```python
+def _ema(prev: tuple[float, float] | None, new: tuple[float, float], alpha: float) -> tuple[float, float]:
+    if prev is None:
+        return new
+    return (alpha * new[0] + (1 - alpha) * prev[0],
+            alpha * new[1] + (1 - alpha) * prev[1])
+```
+
+#### 14.17.5 Per-agent fallen-stuck (Rafael pattern, scope = team)
+
+```python
+# Extend existing _update_fallen_stuck_counter:
+def _update_fallen_stuck_counter_team(self, agent_obs_dict) -> bool:
+    """Any agent stuck for FALLEN_STUCK_TERMINATE_STEPS terminates the team episode."""
+    any_stuck = False
+    for agent_id, obs in agent_obs_dict.items():
+        if int(obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE:
+            self._fallen_consecutive_steps_per_agent[agent_id] = \
+                self._fallen_consecutive_steps_per_agent.get(agent_id, 0) + 1
+        else:
+            self._fallen_consecutive_steps_per_agent[agent_id] = 0
+        if (self._episode_stage_id >= FALLEN_STUCK_MIN_STAGE
+            and FALLEN_STUCK_TERMINATE_STEPS > 0
+            and self._fallen_consecutive_steps_per_agent[agent_id] >= FALLEN_STUCK_TERMINATE_STEPS):
+            any_stuck = True
+    return any_stuck
+```
+
+### 14.18 Dataset generation extensions (`teacher_production_dataset.py`)
+
+Use the v2 contracts from §11.B.4. Specifically:
+
+- Replace `_episode_kept` with `_episode_kept_v2` per §11.B.4.1. Per-role hold-steps requirements.
+- Replace `_sample_quality_weight` with `_sample_quality_weight_v2` per §11.B.4.2. Down-weight "going wrong direction."
+- Replace `_gate_label_consistent` with `_gate_label_consistent_v2` per §11.B.4.3. Both gate-bucket AND role-mask consistent. Add `positive_weight_role_mask_consistent` to `summary.json`.
+- Add to `samples.npz`:
+  - `role_ids[N]` (int8) — 0=striker / 1=open_support / 2=off_ball_support
+  - `coordination_target_xy[N, 2]` (float32) — telemetry only
+- Additional filter (sprint-specific):
+  - Drop episodes with **any** teammate-teammate collision.
+  - Drop episodes with role-thrash > 5 swaps over 400 steps (the same `role_thrash_rate` metric the evaluator computes).
+  - Drop episodes where `pass` was emitted and the ball was intercepted (`ball_holder_id` becomes None or opponent within 1.5 s of pass).
+
+The dataset's recorded per-step gate flags (cols 23/24/25 today; add 41/42/43/44/45/46) come from the gate's `obs_features()` at the time the teacher labeled the row — Design A automatic.
+
+### 14.19 BC + PPO retunings (`train_team_production.py`)
+
+New file, sibling of `train_production.py`. Differs only in:
+
+```python
+ScriptRunConfig(
+    stage_id=6,                                # start at stage 6 (2v0 + GK)
+    max_stage_id=7,                            # allow promotion to 7
+    train_steps=20_000,                        # sprint budget; full §11.B.6.3 was 80k
+    bc_warm_start=True,
+    bc_checkpoint_path="runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt",
+    bc_replay=True,
+    bc_replay_dataset_path=TEAM_DATASET_PATH,
+    bc_beta_max=0.08,
+    bc_beta_min=0.02,
+    bc_competence_half_life_evals=25,
+    bc_replay_weight=0.10,
+    bc_replay_updates=2,
+    bc_skill_loss_scale=0.40,
+    bc_param_loss_scale=0.50,
+    parallel_player_numbers=(1, 2, 3),         # stage 6; (1, 2, 3, 4) for stage 7
+    stage4_finish_interleave_probability=0.2,
+    eval_episodes=8,
+    max_episode_steps=400,
+    eval_rubrics=("single_agent", "team_coordination", "support_positioning"),
+    per_eval_auto_rollback=True,               # §11.B.6.4
+)
+```
+
+`BCReplayRegularizer` extends per §11.B.5.1: indices keyed by `(stage, role, skill)`. `BCCompetenceGate` extends per §11.B.5.2: `competence = min(striker_competence, open_competence, off_ball_competence)`.
+
+### 14.20 Reward terms (`reward.py`)
+
+```python
+# Conservative starting weights — tune Day 5. Each rides on top of existing weights.
+@dataclass
+class RewardWeightsTeam(RewardWeights):
+    # ... inherit all existing fields ...
+    support_open_hold_bonus: float = 0.5      # per step when open_lane_progress equivalent >= 0.7
+    support_triangle_hold_bonus: float = 0.2  # per step when at triangle within tolerance
+    team_goal_bonus: float = 5.0              # distributed across RL agents on team goal
+    pass_attempt_credit: float = 1.0          # on detected pass attempt regardless of outcome
+    pass_completed_bonus: float = 3.0         # ball reached intended receiver within 1.5s
+    pass_intercepted_penalty: float = -2.0    # opponent intercepted
+    role_thrash_penalty: float = -1.0         # >5 role swaps in episode (terminal penalty)
+    teammate_separation_penalty: float = -0.2 # per step both supports within 800mm of each other
+```
+
+Detection of pass events (`pass_attempt`, `pass_completed`, `pass_intercepted`):
+- The env tracks `ball_holder_id` per step (the RL agent whose `ball_rel` is within takeover envelope, OR None).
+- A `pass_attempt` is logged when an agent's selected skill in step t was `pass`.
+- A `pass_completed` is logged if within 1.5 s after a `pass_attempt`, `ball_holder_id` becomes the receiver agent_id targeted by `pass_target` slot.
+- A `pass_intercepted` is logged if within 1.5 s, an opponent intercepts (ball moves into a region near a detected opponent; for sprint, proxy = no RL agent claims the ball AND `nearest_opponent_dist < 500mm` for ≥ 5 frames).
+
+### 14.21 Curriculum stage specs (`production_curriculum.py`) — LOCKED for Monday 2026-06-15 live BH demo
+
+**Demo configuration:** 1 BHuman GK + 3 RL field (= 4 NAOs our side) vs full BH (= 4 NAOs their side). **All scenario weights below match this distribution.**
+
+(If demo confirmed to be 2 RL field instead of 3, swap Stage 6 / Stage 7 emphasis per §14.21.4. **Confirm with Rafael before Tue.**)
+
+#### 14.21.1 Skill sets
+
+```python
+ACTIVE_SKILLS_MA = ("stand", "walk", "dribble", "shoot", "pass")
+# Note: mark, block, observe stay masked off this sprint — see §14.7 anti-patterns.
+```
+
+#### 14.21.2 Stage 6 — `multiagent_warmup_2v0` (sanity, NOT the workhorse)
+
+```python
+STAGE_6_SPEC = StageSpec(
+    stage_id=6,
+    name="multiagent_warmup_2v0",
+    description="1 BH GK + 2 RL field. Warmup for the role one-hot + pass head; minimum opponent exposure.",
+    ball_radius_min_mm=2500.0, ball_radius_max_mm=3000.0,
+    full_field=False, obstacle_mode="mixed",
+    active_skill_names=ACTIVE_SKILLS_MA,
+    reward_weights=RewardWeightsTeam(
+        **STAGE_4_REWARD_WEIGHTS_DICT,
+        support_open_hold_bonus=0.5,
+        support_triangle_hold_bonus=0.0,         # no off-ball-support in 2-RL-field
+        team_goal_bonus=5.0,
+        pass_attempt_credit=1.0,
+        pass_completed_bonus=3.0,
+        pass_intercepted_penalty=-1.0,            # mild — only static opponents at this stage
+        role_thrash_penalty=-1.0,
+        teammate_separation_penalty=-0.2,
+    ),
+    max_episode_steps=400,
+)
+```
+
+**Scenarios** (weights total = 4.0):
+
+| Scenario | Weight | Spawn |
+|---|---|---|
+| `team_2v0_clean_band` | 3.0 | 1 BH GK at own goal + 2 RL field, ball at 2.5-3.0m from opponent goal, no opponents on field |
+| `team_2v0_static_blocker` | 1.0 | Same as above + 1 static BH opponent placed in the striker's direct shot lane |
+
+**PPO budget: ≤ 5k stage-6 steps.** This stage's job is to warm role one-hot weights and validate the pass-receive pattern exists. **Hard stop and move to Stage 7** if BC + 5k PPO doesn't promote — do not grind here; Monday's demo is at Stage 7.
+
+#### 14.21.3 Stage 7 — `multiagent_adversarial_3v3` (workhorse, matches demo distribution)
+
+```python
+STAGE_7_SPEC = StageSpec(
+    stage_id=7,
+    name="multiagent_adversarial_3v3",
+    description="1 BH GK + 3 RL field vs full BH. Monday demo configuration. Heavy adversarial weighting.",
+    ball_radius_min_mm=2500.0, ball_radius_max_mm=3500.0,
+    full_field=True, obstacle_mode="mixed",
+    active_skill_names=ACTIVE_SKILLS_MA,
+    reward_weights=RewardWeightsTeam(
+        **STAGE_4_REWARD_WEIGHTS_DICT,
+        support_open_hold_bonus=0.5,
+        support_triangle_hold_bonus=0.2,
+        team_goal_bonus=5.0,
+        pass_attempt_credit=1.0,
+        pass_completed_bonus=3.0,
+        pass_intercepted_penalty=-2.0,            # full penalty under live opponents
+        role_thrash_penalty=-1.0,
+        teammate_separation_penalty=-0.2,
+    ),
+    max_episode_steps=400,
+)
+```
+
+**Scenarios** (weights total = 7.0):
+
+| Scenario | Weight | Spawn | Why this weight |
+|---|---|---|---|
+| `team_3v0_clean` | 0.5 | 1 GK + 3 RL field, no opponents | Single-agent retention reference only — barely-weighted floor signal |
+| `team_3v0_static_pinch` | 1.5 | 1 GK + 3 RL field + 2 static BH opponents pinching the central lane | Opponent-pressure signal at 2-opponent intensity, no dynamic confusion |
+| `team_3v0_dynamic` | 2.0 | 1 GK + 3 RL field + 2-3 dynamic opponents using BH default behavior | Partial demo conditions — opponents move but it's not full BH |
+| **`team_3v3_full_dynamic`** | **3.0** | **1 GK + 3 RL field vs full BH side (1 BH GK + 3 BH field running standard tactic)** | **Monday demo distribution. Non-negotiable weight. The only scenario where the policy sees exact perceptual conditions of the demo.** |
+
+`team_3v3_full_dynamic` is the most informative scenario and also the slowest at ~1/8 wallclock efficiency per `[[production-finetune-v1-drag-and-throughput-fix]]`. Run more slots in parallel (per `parallel_player_numbers=(1,2,3)`) to amortize.
+
+**PPO budget: 10-15k stage-7 steps.** This is the bulk of the sprint's compute.
+
+#### 14.21.4 If demo is 2 RL field instead of 3
+
+Swap weights: drop `team_3v3_full_dynamic` to 0.5, raise a new `team_2v2_full_dynamic` (1 GK + 2 RL field vs 1 BH GK + 2 BH field) to 3.0 in Stage 6, and use Stage 7 as a stretch goal not a deliverable. Confirm demo configuration with Rafael Tuesday morning before generating the dataset.
+
+#### 14.21.5 Promotion gates (RELAXED for adversarial scope vs §11.B.6.2)
+
+```python
+def stage_6_promotion(metrics) -> bool:
+    return (
+        metrics["clean_finish_rate"] >= 0.60    # single-agent retention via interleave
+        and metrics["policy_shoot_rate"] >= 0.02
+        and metrics["team_goal_rate"] >= 0.10   # at least 1 goal per 10 episodes in 2v0 with static
+        and metrics["role_thrash_rate"] <= 0.10
+    )
+
+def stage_7_promotion(metrics) -> bool:
+    return (
+        metrics["clean_finish_rate"] >= 0.45    # RELAXED from 0.60 — adversarial 3v3 is harder
+        and metrics["team_goal_rate"] >= 0.05   # at least 1 goal per ~20 episodes vs full BH
+        and metrics["role_thrash_rate"] <= 0.15 # RELAXED — dynamic opponents jitter ball
+        and metrics["pass_completed_rate"] >= 0.15  # NEW — passes must work under pressure
+    )
+```
+
+The clean_finish_rate floor at stage 7 drops because adversarial 3v3 vs full BH is genuinely harder than the single-agent baseline; demanding 0.60 is unrealistic for a first-pass policy. **0.45 + a positive team_goal_rate** is the right honest bar.
+
+#### 14.21.6 World builders — what each scenario must spawn
+
+For each new scenario, `_team_*_world(rng, ...)` returns a `WorldSpec` (per existing `production_curriculum.py:63` `_drive_finish_world` pattern). The pattern:
+
+```python
+def _team_3v3_full_dynamic_world(rng):
+    # 1. Ball: production band (2.5-3.0 m from opponent goal), with small y jitter.
+    ball_xy = sample_ball_pose_in_band(rng, x_min=2500.0, x_max=3000.0, y_jitter=600.0)
+    # 2. Our team (4 NAOs):
+    #    - GK (player 4, BHuman behavior): own goal area.
+    #    - Striker spawn (player 1, RL): close to ball but not in shooting envelope yet.
+    #    - Open support (player 2, RL): forward, on cleaner lane side.
+    #    - Off-ball support (player 3, RL): triangle vertex, opposite side.
+    # 3. Opponents (4 NAOs, full BH side, dynamic):
+    #    - Their GK: their own goal area.
+    #    - Their striker: mirror x of our striker (chases ball).
+    #    - Their 2 supports: defensive positions.
+    # 4. Call build_world_spec(...) to assemble.
+    # 5. Set obstacle_mode="dynamic" so opponents run BH default tactic, not parked.
+    return build_world_spec(...)
+```
+
+Reuse `_team_3v0_clean_world` and `_team_3v0_dynamic_world` as references — they share most logic; the full-dynamic variant just adds the opponent side as live BH agents instead of static or empty.
+
+#### 14.21.7 Honest Monday demo behavior forecast
+
+Be ready for what the policy WILL and WON'T do:
+
+| Will do | Won't do |
+|---|---|
+| React to opponent proximity via summary scalars (`nearest_opponent_*_dist`) — shoot/pass urgency when pressed | Mark a specific opponent strategically |
+| Hold support position when team-ball valid + nearest_opponent_front_dist large | Position between an opponent and goal (defensive recovery) |
+| Pass through cleanly when lane and receiver score high | Anticipate which opponent will press next |
+| Avoid teammate collision via Block A + BHuman walk planner | Avoid an opponent's predicted intercept (no opponent position in obs) |
+| Walk-to-support when not striker | Switch to defensive mode when team loses possession |
+
+**Demo signature:** organized in possession (passes, support holds, occasional goals), reactive-but-not-strategic out of possession. **Expect 0.05-0.15 team_goal_rate against full BH.** Above 0.20 means the BH side under-performed; below 0.03 means our policy's pressure-handling regressed and we should pull the rollback.
+
+This is the honest first-pass bar. The "beat BH" target is §14.26.
+
+### 14.22 Tests to add or extend
+
+| File | Test | Purpose |
+|---|---|---|
+| `test_obs_migration_contract.py` | `test_obs_padding_preserves_policy_value_outputs_26_to_47` | Zero-pad bit-identity at 47 dims (extends the existing 26→41 test) |
+| `test_obs_migration_contract.py` | `test_gate_skill_mask_depends_only_on_specified_columns` | Mask reads only 23/24/41/42/44/45/46 — perturb every other column, mask must not change |
+| `test_mappo_observation_space.py` | `test_role_one_hot_round_trip` | When env writes role to GateDecision, obs encoding round-trips correctly to indices 44/45/46 |
+| `test_mappo_observation_space.py` | `test_role_assignment_hysteresis_5_frames` | Hand-construct a 5-frame sequence with striker candidate flipping; assert role only changes after streak |
+| `test_mappo_observation_space.py` | `test_ema_open_lane_target` | Per-step `compute_open_lane_target` jitters; assert EMA smooths within stated alpha |
+| `test_multiagent_teacher.py` (NEW) | `test_smash_or_pass_shoots_when_own_value_high` | Hand-construct obs with `shot_opening_with_obstacles=0.8`; assert returns "shoot" |
+| `test_multiagent_teacher.py` (NEW) | `test_smash_or_pass_passes_when_teammate_better` | Striker far from goal, teammate at goal x; assert pass with teammate's slot |
+| `test_multiagent_teacher.py` (NEW) | `test_smash_or_pass_decision_penalty_prevents_thrash` | Last frame chose teammate A by 0.10 margin; this frame teammate B is 0.05 better; assert still A due to penalty |
+| `test_multiagent_teacher.py` (NEW) | `test_smash_or_pass_excludes_gk` | One of teammate slots marked `is_gk=True`; assert never selected |
+| `test_multiagent_teacher.py` (NEW) | `test_support_target_uses_mirrored_grid` | Ball y > 0 → grid uses +y slots; ball y < 0 → grid uses -y slots |
+| `test_multiagent_teacher.py` (NEW) | `test_support_target_separation_avoids_stacking` | Striker at slot A; assert support picks a different slot due to separation penalty |
+| `test_multiagent_teacher.py` (NEW) | `test_stage_aware_team_teacher_action_dispatch` | Three calls with different `role` strings; assert correct branch executes |
+| `test_multiagent_teacher.py` (NEW) | `test_off_ball_escape_hatch` | `gate_decision.dribble_armed=True`, role=off_ball_support; assert striker-style action returned |
+| `test_dataset_filter_v2.py` (NEW) | `test_episode_kept_v2_per_role_thresholds` | Open-support steps 25, hold steps 18 → drop (< 20). Open-support steps 25, hold steps 22 → keep. |
+| `test_dataset_filter_v2.py` (NEW) | `test_quality_weight_v2_directional` | Closing on target → 0.75; drifting away → 0.25 |
+
+### 14.23 Acceptance checklist — when is a step "done"
+
+#### Tue commit acceptance (Luis)
+
+- [ ] `multiagent_teacher.py` exists with all functions in §14.13 skeleton.
+- [ ] `gate.py` extended with new fields per §14.14 (GateConfig, GateState, GateDecision, obs_features ordered correctly).
+- [ ] `observation.py` extended to 47 dims per §14.15.
+- [ ] `train.py:gate_skill_mask_from_obs` extended per §14.16.
+- [ ] `test_obs_migration_contract.py` has `test_obs_padding_preserves_policy_value_outputs_26_to_47` passing.
+- [ ] `test_obs_migration_contract.py` has `test_gate_skill_mask_depends_only_on_specified_columns` passing.
+- [ ] `test_multiagent_teacher.py` has all 7 tests in §14.22 passing.
+- [ ] Single-agent `behavioral_evaluator.py` run on `checkpoint_stage4_step5000.pt` with new 47-dim obs (zero-pad) → at least 3/5 — confirms regression preserved.
+
+#### Wed commit acceptance (Luis)
+
+- [ ] `environment.py` carries the per-env team state from §14.17.1.
+- [ ] Per-step orchestration § 14.17.2 wires roles + EMA + last_pass into info per § 14.17.3.
+- [ ] Per-agent fallen-stuck § 14.17.5 terminates team episode correctly.
+- [ ] `teacher_production_dataset.py` runs the multi-agent dataset gen and produces `samples.npz` with `role_ids` and `coordination_target_xy` arrays.
+- [ ] Audit `summary.json` shows `positive_weight_gate_label_consistent: true` AND `positive_weight_role_mask_consistent: true`.
+- [ ] Stages 6 and 7 added to `production_curriculum.py` per §14.21.
+- [ ] At least 100 episodes per stage in the dataset.
+- [ ] `test_dataset_filter_v2.py` tests passing.
+
+#### Thu commit acceptance (Luis + Laura)
+
+- [ ] BC train on new dataset from `checkpoint_stage4_step5000.pt` with zero-pad warm-start completes.
+- [ ] `behavioral_evaluator.py` on BC checkpoint: single-agent floor ≥ 3/5.
+- [ ] BC loss decreases monotonically over the first 5k steps for each role (per-role loss surfaced in tensorboard / logs).
+- [ ] `behavioral_evaluator.py` has new `_pass_team_coordination`, `_pass_support_positioning`, `_pass_team_no_regression` registered.
+- [ ] Baseline run (BC only, no PPO) reports team rubric metrics without NaN.
+
+#### Fri commit acceptance (Luis)
+
+- [ ] `train_team_production.py` runs without crash for at least 5k PPO steps.
+- [ ] Per-eval auto-rollback fires correctly when single-agent regresses (force a regression in a unit-style test or observe in run logs).
+- [ ] Stage 6 promotion gate: clean_finish ≥ 0.6 AND policy_shoot_rate ≥ 0.02 AND team_goal_rate > 0 AND role_thrash_rate ≤ 0.10.
+
+#### Sat commit acceptance (Luis + Laura)
+
+- [ ] Multi-agent stability probe runs against final checkpoint with seed set `11,23,37,51,67,83`.
+- [ ] Per-seed pass_rate logged for single-agent rubric (≥ 0.6) and team rubric.
+- [ ] ONNX exported from final checkpoint at 47 dims.
+- [ ] BHuman C++ loads new ONNX without error (Rafael verifies).
+
+#### Mon demo acceptance
+
+- [ ] 3 NAOs (2 RL striker+open-support + 1 BHuman GK) run for at least 5 minutes without crash.
+- [ ] At least one observed pass attempt.
+- [ ] At least one observed support-position hold (support stays in slot for ≥ 3 s while striker has ball).
+- [ ] No teammate-teammate collisions over 5-minute run.
+
+### 14.24 Failure modes and what to do
+
+| If you see | Do |
+|---|---|
+| `test_obs_padding_preserves_policy_value_outputs_26_to_47` fails | A new column in obs_features() is not zero by default. Check §14.14 GateDecision defaults. |
+| Single-agent floor drops below 3/5 on Tue (after gate/obs/mask only, no training) | Mask is forbidding a skill it shouldn't. Re-check §14.16 against §11.A.4 contract. |
+| BC loss diverges after 1k steps | KL anchor is wrong checkpoint. Verify `bc_checkpoint_path = "runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt"`. |
+| BC loss decreases for striker but not for supports | `BCCompetenceGate` is taking mean not min. Verify §14.19 / §11.B.5.2. |
+| `role_thrash_rate > 0.20` in dataset audit | `ROLE_HYSTERESIS_FRAMES = 5` is too low for the scenario noise. Raise to 7, regen one scenario, re-check. |
+| Support oscillates between two slots | `STAB_OFFSET_MM = 800` is too low. Raise to 1200, re-test. |
+| `pass_completed_bonus` never fires | Detection logic in §14.20 is too strict. Loosen the 1.5 s receiver-claim window or the pass_target slot match. |
+| Single-agent regresses mid-PPO | `per_eval_auto_rollback` is doing its job — investigate which reward term dominates and lower its weight. |
+| Team-goal-rate stays 0 despite supports holding position | Striker is dribbling past the support without dropping ball. Check `decision_penalty` is being applied; lower `SHOOT_THRESHOLD` to 0.45 to bias toward pass. |
+| ONNX export fails at 47 dims | `tools/export_ppo_policy.py` was hard-coded to 41. Update its obs_size argument. |
+
+### 14.25 Glossary of new symbols introduced by this sprint
+
+| Symbol | Where | Meaning |
+|---|---|---|
+| `R1`-`R6` | §14.12 | The five teacher rules (R5 dropped) |
+| `smashOrPass` | §14.12.3, PlayBall.cpp:33 | BHuman's shoot-vs-pass decision; we port the structure |
+| `decisionPenalty` | §14.12.3, PlayBall.cpp:38-39 | Subtracted from rival options on decision switch — R4 mechanism |
+| `stabilityOffset` | §14.12.4, Tactic.h | Slot-commit hysteresis — R4 mechanism |
+| `Tactic::Position::Type` | BHuman, Tactic.h:42-57 | Named role positions; we use only as template inspiration |
+| `is_striker` / `is_open_support` / `is_off_ball_support` | §14.14, 14.15 | Role one-hot, obs indices 44/45/46 |
+| `pass_armed` / `observe_armed` / `pass_arm_progress` | §14.14 | New skill-arm bits, obs indices 41/42/43 |
+| `TeamRoleHistory` | §14.12.2 | Per-env hysteresis state for role assignment |
+| `TeammateSlot` | §14.13 | Block-B-aligned teammate descriptor passed to smashOrPass |
+| `forward_rating` / `separation_penalty` | §14.12.4 | Proxies for BHuman's Forward and Midfielder rating functions |
+| `pass_reachable_proxy` / `goal_proximity_proxy` | §14.12.3 | Cheap replacements for BHuman's learned PassEvaluation / ExpectedGoals |
+| `EMA_ALPHA_OPEN_LANE` / `EMA_ALPHA_TRIANGLE` | §14.12.1, 14.17.4 | Coordination target smoothing — §11.B.3.2 |
+| `last_pass_target_age_ms` | §14.13, 14.17.1 | Decay counter for R4 decision-penalty in smashOrPass |
+| Per-role role_id (0/1/2) | §14.18 | Dataset stratification key — §11.A.5 |
+
+---
+
+### 14.26 Post-Monday roadmap — toward "a team that can beat BHuman"
+
+**Target deliverable:** an RL team that is structurally capable of competing with BHuman in 4v4 — not just possessing and shooting reactively, but **defending, marking, and intercepting strategically**. This is a separate engineering problem from §14.6's sprint.
+
+**Stakeholder ambition (2026-06-08):** demonstrable progress by Friday after Monday's demo. The realistic, honest version of that ambition is laid out below; **what is achievable in 5 days vs 11 days vs 4 weeks differs sharply.** Read 14.26.5 before committing to a date.
+
+#### 14.26.1 Why the Monday policy cannot beat BH
+
+The Monday policy ships with opponents represented only as summary scalars in Block A (`nearest_opponent_dist`, `nearest_opponent_front_dist`, `nearest_uncertain_*`). Three consequences:
+
+1. **No opponent-aware steering.** Policy can react to "an opponent is close" but cannot choose which opponent to avoid or where to step to break their pressure.
+2. **No defensive role.** `mark` and `block` are still masked out (stage curriculum). Even if unmasked, the policy has no obs signal to choose mark targets or block positions.
+3. **No anticipation.** No opponent velocity or pose history → no learnable "they'll be here in 1s" signal.
+
+These are obs-architecture problems, not training problems. No amount of additional PPO on the Monday curriculum will fix them. The fix is **growing the obs** and rebuilding the dataset / mask / teacher pipeline on the new substrate.
+
+#### 14.26.2 What changes between Monday and beat-BH-ready
+
+| Layer | Monday | Beat-BH |
+|---|---|---|
+| Obs size | 47 dims | **53 dims** (Block H: 3 nearest opponents, x_rel + y_rel = 6 dims) |
+| Skill set | `stand, walk, dribble, shoot, pass` (5 active) | + `mark`, `block`, `observe` (8 active) |
+| Stage mask | role-conditioned + skill-armed | + opponent-presence-conditioned for defensive arming |
+| Teacher branches | `striker, open_support, off_ball_support` (3) | + `defender` (4) — the §11.A.2 Policy 4 from doc original |
+| Stages | 6, 7 | + 8 (3v3 + defensive skill), + 9 (4v4 full match if time) |
+| Reward terms | offensive (pass_completed, support_hold, team_goal) | + defensive (mark_close, block_lane, ball_recovered, opponent_intercept_prevented) |
+| KL anchor | `checkpoint_stage4_step5000.pt` (4/5 striker) | **Monday checkpoint** — the 47-dim multi-agent policy |
+| Dataset | 47-dim role-stratified | re-collected at 53 dims with 4-role stratification |
+
+#### 14.26.3 New obs Block H — opponent positions
+
+Following the same pattern as Block B (teammates), but for opponents and constrained to nearest 3:
+
+| Index | Name | Source in BHuman | Zero-default meaning |
+|---|---|---|---|
+| 47 | `nearest_opponent_x_rel` | nearest tracked opponent from `ObstacleModel.obstacles` where `isOpponent()`, transformed to robot frame | no opponent visible |
+| 48 | `nearest_opponent_y_rel` | same, y component | same |
+| 49 | `second_opponent_x_rel` | second-nearest opponent | only 1 opponent or fewer visible |
+| 50 | `second_opponent_y_rel` | same, y | same |
+| 51 | `third_opponent_x_rel` | third-nearest opponent | ≤ 2 opponents visible |
+| 52 | `third_opponent_y_rel` | same, y | same |
+
+Sort by Euclidean distance to me (same convention as Block B). Stale-or-uncertain opponents (`Obstacle.lastSeen > 1000ms` OR `isUnknown()` with low confidence) excluded — same `TEAMMATE_STALE_THRESHOLD_MS = 1000` analogue.
+
+Wire change: `Module.cpp:630-640` extends with `opponent_x_mm`, `opponent_y_mm`, `opponent_age_ms` lists. Mirror the teammate wire.
+
+**Zero-pad warm-start contract:** 47 → 53 must preserve Monday checkpoint behavior bit-for-bit when opponent dims are zero. Extend `test_obs_migration_contract.py` with `test_obs_padding_preserves_policy_value_outputs_47_to_53`.
+
+#### 14.26.4 New skill mask logic for `mark` and `block`
+
+Both `mark` and `block` need opponent-presence to be useful. New skill-arm bits at indices 53+:
+
+```python
+def gate_skill_mask_from_obs(obs):
+    # ... existing logic preserved ...
+    # NEW: mark_armed when an opponent is within mark-range AND I am not the striker.
+    mark_armed = (obs[:, 47].abs() < MARK_RANGE_REL  # nearest opponent x_rel near
+                  & obs[:, 48].abs() < MARK_RANGE_REL  # and y_rel near
+                  & ~is_striker)
+    mask[:, _MARK_SKILL_IDX] = mark_armed.to(mask.dtype)
+    # block_armed when I am between an opponent and own goal.
+    block_armed = ...    # geometric condition; left as exercise
+    mask[:, _BLOCK_SKILL_IDX] = block_armed.to(mask.dtype)
+    return mask
+```
+
+`MARK_RANGE_REL` ≈ `1200mm / ACTION.x_range`. The geometric condition for block requires comparing self position to (opponent, own_goal) line; ~10 lines of arithmetic.
+
+#### 14.26.5 Three honest timelines depending on stakeholder interpretation of "next Friday"
+
+The user said "next friday is a team which can beat Bhuman." Three interpretations of "next Friday," each with a different realistic outcome:
+
+**Interpretation A — Friday 2026-06-19 (4 days post-Monday).** Not achievable. Even with substrate-machinery momentum (Laura proved 26→41 obs growth + Rafael proved stability), the minimum coherent beat-BH pipeline is:
+- Day 1 (Tue post-demo): obs 47→53 wire + zero-pad warm-start + behavior-preservation test extension.
+- Day 2 (Wed): defensive teacher branch + `mark_armed`/`block_armed` gates.
+- Day 3 (Thu): dataset re-gen at 53 dims.
+- Day 4 (Fri): BC train. **No PPO yet.** Demo is BC-only behavior — no learned defense.
+
+Honest outcome at Friday 06-19: a structurally-defensive policy that hasn't been fine-tuned. Will mark/block but unreliably; may lose more matches than the Monday policy.
+
+**Interpretation B — Friday 2026-06-26 (11 days post-Monday).** Achievable as "competitive," not "wins consistently." Pipeline:
+- Days 1-2 (Tue-Wed): obs 47→53 + defensive teacher + mark/block gates.
+- Days 3-4 (Thu-Fri): dataset re-gen + BC train.
+- Days 5-6 (Sat-Sun): PPO Stage 8 (3v3 with full skill set).
+- Days 7-8 (Mon-Tue): PPO Stage 8 continued, promote if metrics clear.
+- Days 9-10 (Wed-Thu): Stage 9 (4v4) if Stage 8 promoted; otherwise extra Stage 8 time.
+- Day 11 (Fri): stability + ONNX + demo.
+
+Honest outcome at Friday 06-26: a policy that **scores against BH at rates comparable to or better than BH scores against us in selected scenarios**. "Beats BH 50%+ of matches" is a stretch; "competes with BH" is a fair claim.
+
+**Interpretation C — late June / early July (~4 weeks).** Achievable as "wins consistently." Pipeline matches §11 Version A's full Phase 5-7 timing applied to the multi-agent substrate. The 8-10 weeks §11 originally estimated assumed starting from 26 dims with no multi-agent infrastructure; starting from the Monday 47-dim checkpoint cuts ~3-4 weeks of that.
+
+#### 14.26.6 Recommended commitment
+
+**Default plan: Interpretation B + honest scoping.** Tell stakeholders:
+
+> By Friday 2026-06-26, an RL team that competes with BHuman in 4v4 SimRobot 3D demos — measurably better than the Monday demo, attempting defensive behaviors (mark, block), with team-goal-rate against BH in the 0.20-0.35 range. Consistent wins are a 3-week target, not a 2-week target.
+
+If stakeholders demand Interpretation A, push back with §14.26.5 above and counter-offer: "Friday 06-19 we ship the substrate (53-dim obs + mark/block + defensive teacher), demo runs with BC-only behavior so it's qualitatively different from Monday but not measurably better in match performance. The 'beat' claim needs the 06-26 timing."
+
+#### 14.26.7 Post-Monday day-by-day skeleton (Interpretation B)
+
+| Day | Owner | Build | Validation gate |
+|---|---|---|---|
+| Tue 06-16 | Multi-agent owner + transplant owner | Wire opponent positions (Block H) from `ObstacleModel.obstacles` through `pybh_backend.py` to `environment.py`. Extend obs to 53 dims. Behavior-preservation test 47→53. | `test_obs_migration_contract.py:test_obs_padding_preserves_47_to_53` passes. Monday ONNX still loads + scores on baseline. |
+| Wed 06-17 | Multi-agent owner | Defensive teacher branch (`teacher_defender`). Mark/block gates in `gate.py`. Extend `gate_skill_mask_from_obs` per §14.26.4. New role one-hot: 4 bits at 53/54/55/56 (rolling indices: was 44-46, now extend). **Note: this is a second role-mask expansion**, so the obs index plan is `is_striker, is_open_support, is_off_ball_support, is_defender` at 53/54/55/56 if Block H goes 47-52. Or move role bits to end. Implementer chooses; document the choice in test. | Teacher test cases for defender pass; mask test cases for mark/block pass. |
+| Thu 06-18 | Multi-agent owner + Laura | Re-collect multi-agent dataset at 53 dims (or correctly-sized obs after role-bit relocation) with defensive scenarios in Stages 8+. Per-role stratification extended to 4 roles. Extend dataset audit. | Audit shows `positive_weight_role_mask_consistent: true` across 4 roles. |
+| Fri 06-19 | Multi-agent owner | BC train from new dataset, warm-start from Monday checkpoint. (Per §11.B.5.3: KL anchor = MONDAY checkpoint, not original single-agent.) Initial behavioral_evaluator pass. **Demo-eligible BC-only stop point.** | Single-agent floor not regressed. Defensive role compatibility rate > 0 on a defensive scenario. |
+| Sat 06-20 | Multi-agent owner | PPO Stage 8 (3v3 with full skill set including mark/block). | Stage 8 metrics tracked; per-eval auto-rollback on regression. |
+| Sun 06-21 | Multi-agent owner | PPO Stage 8 continued. | Stage 8 promotion gate: team_goal_rate >= 0.15 vs full BH, opponent_intercept_prevented_rate >= 0.10. |
+| Mon 06-22 | Multi-agent owner | PPO Stage 9 (4v4 full match) if Stage 8 promoted. Else extra Stage 8. | — |
+| Tue 06-23 | Multi-agent owner | Continued. | — |
+| Wed 06-24 | Multi-agent owner | Final PPO. | — |
+| Thu 06-25 | Multi-agent owner + transplant owner | Stability probe + ONNX export at 53 dims. SimRobot 3D 4v4 demo dry-run. | ONNX loads on NAO under 50ms inference. |
+| Fri 06-26 | All | "Compete-with-BH" demo. | — |
+
+#### 14.26.8 What this roadmap does NOT solve
+
+- **Score state in obs** (winning vs losing) — game-state-aware strategy (run-out-the-clock vs aggressive chase) requires `score_diff` + `time_remaining` in obs. Not in this roadmap.
+- **Set plays** (free kicks, corner kicks, kick-offs) — game state branches require their own teacher logic. Defer.
+- **Goalie as RL** — GK keeps being BH. Replacing GK is its own 2-3 week sub-project per §11.A.2 + GK-specific kinematics.
+- **Pass-lane anticipation** (Policy 7 from §11.A.2) — requires predictive features in obs. Defer.
+
+These are tracked for late-July / RoboCup-readiness work.
+
+#### 14.26.9 Memory updates triggered by this roadmap
+
+After Monday demo lands:
+- Update memory `[[multiagent-rl-dominant-production-goal]]` with "Monday delivered" + measured team_goal_rate.
+- Promote memory `[[obs-growth-zero-pad-pipeline]]` from 3-6 week estimate to "47→53 fits 2 days with proven substrate" based on Laura's 26→41 work as evidence.
+- Create new memory `multiagent-defensive-obs-extension` capturing Block H spec, mark/block gating, defender role.
+- Update `[[graph-coordination-pipeline-hostility]]` to mark Phase 1+2+3 complete after the 53-dim substrate lands.
+
+This memory hygiene keeps future sessions from re-litigating decisions captured here.
