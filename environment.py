@@ -52,6 +52,10 @@ PASS_COUNT_NORM = 5.0
 TEAMMATE_STALE_THRESHOLD_MS = 1000.0
 TEAM_BALL_CONSENSUS_MM = 800.0
 ENGAGING_DISTANCE_MM = 700.0
+TEAMMATE_ACTIVITY_IDLE = 0
+TEAMMATE_ACTIVITY_GOING_TO_BALL = 1
+TEAMMATE_ACTIVITY_DRIBBLING = 2
+TEAMMATE_ACTIVITY_KICKING = 3
 UPRIGHT_MAX_FALL_STATE = 2
 BALL_VISIBLE_SEEN_PCT_MIN = 5.0
 BALL_VISIBLE_MAX_AGE_MS = 1200.0
@@ -154,6 +158,22 @@ def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
         "ball_confidence_score": float(confidence),
         "ball_regime": regime,
     }
+
+
+def _teammate_activity_is_engaging(
+    activity: int,
+    *,
+    teammate_x: float,
+    teammate_y: float,
+    team_ball_x: float,
+    team_ball_y: float,
+    team_ball_valid: bool,
+) -> bool:
+    if activity in {TEAMMATE_ACTIVITY_DRIBBLING, TEAMMATE_ACTIVITY_KICKING}:
+        return True
+    if activity != TEAMMATE_ACTIVITY_GOING_TO_BALL or not team_ball_valid:
+        return False
+    return math.hypot(teammate_x - team_ball_x, teammate_y - team_ball_y) < ENGAGING_DISTANCE_MM
 
 
 class RealSimRobotEnv(ParallelEnv):
@@ -759,34 +779,48 @@ class RealSimRobotEnv(ParallelEnv):
             *gate_feats,
         ]
 
-        fresh_teammates = []
+        fresh_teammates: list[tuple[float, float, float, int]] = []
 
-        for pose, age in zip(obs.teammate_poses, obs.teammate_ages_ms):
+        for idx, pose in enumerate(obs.teammate_poses):
+            age = float(obs.teammate_ages_ms[idx]) if idx < len(obs.teammate_ages_ms) else float("inf")
+            activity = int(obs.teammate_activities[idx]) if idx < len(obs.teammate_activities) else TEAMMATE_ACTIVITY_IDLE
             if age <= TEAMMATE_STALE_THRESHOLD_MS:
-                fresh_teammates.append(pose)
+                fresh_teammates.append((float(pose[0]), float(pose[1]), float(pose[2]), activity))
 
         fresh_teammates.sort(
             key=lambda p: (p[0] - obs.robot_x) ** 2
-                        + (p[1] - obs.robot_y) ** 2
+            + (p[1] - obs.robot_y) ** 2
         )
 
+        slotted_teammates = fresh_teammates[:3]
         teammate_features = []
+        engagement_features = []
 
         for slot in range(3):
-
-            if slot >= len(fresh_teammates):
+            if slot >= len(slotted_teammates):
                 teammate_features.extend([0.0, 0.0])
+                engagement_features.append(0.0)
                 continue
 
-            px, py, _ = fresh_teammates[slot]
-
+            px, py, _theta, activity = slotted_teammates[slot]
             rx, ry = transform_to_robot_frame(px, py)
-
             teammate_features.extend([
                 float(np.clip(rx / ACTION.x_range, -1.0, 1.0)),
                 float(np.clip(ry / ACTION.y_range, -1.0, 1.0)),
             ])
-        
+            engagement_features.append(
+                1.0
+                if _teammate_activity_is_engaging(
+                    activity,
+                    teammate_x=px,
+                    teammate_y=py,
+                    team_ball_x=obs.global_team_ball_x_mm,
+                    team_ball_y=obs.global_team_ball_y_mm,
+                    team_ball_valid=obs.global_team_ball_valid,
+                )
+                else 0.0
+            )
+
         tbx, tby = transform_to_robot_frame(
             obs.global_team_ball_x_mm,
             obs.global_team_ball_y_mm,
@@ -797,8 +831,6 @@ class RealSimRobotEnv(ParallelEnv):
             float(np.clip(tby / ACTION.y_range, -1.0, 1.0)),
             norm_time(obs.global_team_ball_age_ms),
         ]
-
-        engagement_features = [0.0, 0.0, 0.0]
 
         own_ball_field_x = obs.robot_x + obs.ball_rel_x
         own_ball_field_y = obs.robot_y + obs.ball_rel_y

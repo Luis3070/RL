@@ -241,12 +241,12 @@ def _validate_world_players(
             raise ValueError(f"{label} player {player.number} requested upright=False in an unsupported backend")
 
 
-def validate_world_spec(world_spec: WorldSpec, *, mode: str) -> None:
+def validate_world_spec(world_spec: WorldSpec, *, mode: str, controlled_player_number: int = PLAYER_NUMBER) -> None:
     if mode not in {"simrobot", "simrobot_visible"}:
         raise ValueError(f"Unsupported backend mode {mode!r}. Expected one of: simrobot, simrobot_visible")
-    if any(player.number == PLAYER_NUMBER for player in world_spec.teammates):
+    if any(player.number == controlled_player_number for player in world_spec.teammates):
         raise ValueError(
-            f"teammates must not include the controlled robot number {PLAYER_NUMBER}; use robot_pose for the RL robot"
+            f"teammates must not include the controlled robot number {controlled_player_number}; use robot_pose for the RL robot"
         )
     _validate_world_players(world_spec.teammates, label="teammates", allow_non_upright=False)
     _validate_world_players(world_spec.opponents, label="opponents", allow_non_upright=False)
@@ -899,7 +899,7 @@ class PyBHBackend:
             filtered_teammates = tuple(player for player in world_spec.teammates if int(player.number) != self.player_number)
             if len(filtered_teammates) != len(world_spec.teammates):
                 world_spec = replace(world_spec, teammates=filtered_teammates)
-        validate_world_spec(world_spec, mode=self.mode)
+        validate_world_spec(world_spec, mode=self.mode, controlled_player_number=self.player_number)
         self._world_spec = world_spec
 
         self._steps_since_reset = 0

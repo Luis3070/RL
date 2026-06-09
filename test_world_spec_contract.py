@@ -42,6 +42,22 @@ def test_world_spec_rejects_controlled_robot_in_teammates():
         validate_world_spec(world, mode="simrobot")
 
 
+def test_world_spec_honors_custom_controlled_player_number():
+    world = WorldSpec(
+        ball_x=0.0,
+        ball_y=0.0,
+        robot_x=0.0,
+        robot_y=0.0,
+        robot_theta=0.0,
+        teammates=(WorldPlayerSpec(number=1, x=100.0, y=0.0),),
+    )
+
+    validate_world_spec(world, mode="simrobot_visible", controlled_player_number=2)
+
+    with pytest.raises(ValueError, match="controlled robot"):
+        validate_world_spec(world, mode="simrobot_visible", controlled_player_number=1)
+
+
 def test_world_spec_rejects_non_upright_in_visible_backends():
     world = WorldSpec(
         ball_x=0.0,

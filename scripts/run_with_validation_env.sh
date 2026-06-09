@@ -33,16 +33,4 @@ fi
 mkdir -p "${LOCAL_CACHE_DIR}/matplotlib"
 export MPLCONFIGDIR="${LOCAL_CACHE_DIR}/matplotlib"
 
-if command -v Xvfb >/dev/null 2>&1; then
-  :
-else
-  cat >&2 <<'EOF'
-Xvfb not found.
-
-Install it with:
-  sudo apt install xvfb
-EOF
-  exit 1
-fi
-
 exec "$@"
