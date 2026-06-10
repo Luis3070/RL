@@ -1,7 +1,7 @@
 # Plan De Transplante PPO A NAO v6 Para RoboCup HSL 2026
 
-Fecha de corte: 2026-06-04  
-Repositorio RL: `rl-simrobot3d` en commit `91508cf`  
+Fecha de corte: 2026-06-08  
+Repositorio RL: `rl-simrobot3d` en commit `ed8ffdc`  
 Repositorio base B-Human/Sabana esperado: `../SabanaHerons2026`
 
 ## 1. Alcance exacto
@@ -68,7 +68,7 @@ La regla base del proyecto sigue vigente: RL decide la intencion de alto nivel; 
 
 ### 3.1 Proyecto RL
 
-El repo RL ya esta actualizado a `91508cf`.
+El repo RL ya esta actualizado a `ed8ffdc`.
 
 El contrato actual del PPO esta en:
 
@@ -78,9 +78,20 @@ El contrato actual del PPO esta en:
 - `train.py`: arquitectura del actor PPO, mascara de skills y carga de checkpoints.
 - `environment.py`: decode de accion, repair de target y stepping contra B-Human/SimRobot.
 - `reward.py`: anchors de walk/dribble/shoot y condiciones de shoot-zone.
-- `FOR_TRAIN_PRODUCTION.md`: estado productivo, checkpoint, dataset y gates.
+- `FOR_TRAIN_PRODUCTION.md`: contexto historico del primer intento productivo.
+- `cambios_para_produccion.md`: resumen historico del salto original a 4/5; ya no debe leerse como baseline vigente.
+- `docs/25-guia-transplante-ppo-bhuman.md`: referencia exacta del pipeline de inferencia que se debe replicar en robot.
 
-Punto critico: el checkpoint documentado `runs/production_finetune_v1/checkpoint_stage4_step35000.pt` camina y dribblea, pero no dispara de forma confiable. No debe salir a robot real si no pasa las gates productivas.
+Punto critico actualizado:
+
+- El checkpoint historico `runs/production_finetune_v1/checkpoint_stage4_step35000.pt` ya no es la referencia correcta para transplante.
+- La referencia vigente del transplante es ahora:
+  - checkpoint candidato: `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt`
+  - evaluacion canonica actual: `runs/behavioral_evaluator/behavior_20260608_181747/summary.csv`
+  - estado canonico validado: **3/5** escenarios aprobados antes de cortar la corrida (`finish_band_2p5_3m_clean`, `finish_band_2p5_3m_static_lane`, `dynamic_full_field_pressure`)
+  - evidencia extra de estabilidad parcial: `runs/behavioral_stability/stability_20260608_175828/per_rep_summary.csv`
+- El `step10000` de `production_readiness_v2` queda como referencia historica importante, pero no como baseline vigente para transplante.
+- El objetivo del transplante no es “mejorar el PPO” en esta fase, sino **replicar exactamente** en B-Human el comportamiento de inferencia del mejor checkpoint hoy revalidado. Cualquier optimizacion posterior debe partir de una paridad funcional ya validada.
 
 ### 3.2 SabanaHerons2026
 
@@ -259,7 +270,8 @@ Condiciones base:
 
 - `shoot` solo se permite si `shoot_armed`.
 - `dribble` solo se permite si `dribble_armed`.
-- `walk` y `stand` permanecen como fallback.
+- cuando `finish_armed = shoot_armed or dribble_armed`, la politica **no** puede seguir usando `walk` ni `stand`;
+- el gate y la mascara sobre logits trabajan juntos: el gate arma/desarma, y la mascara fuerza el compromiso con la skill correcta cuando existe oportunidad de finish;
 - `shoot` requiere pelota natural fresca.
 - `dribble` permite una gracia temporal mayor para evitar deadlock de mirar/acercarse.
 
@@ -267,9 +279,14 @@ Valores relevantes actuales:
 
 - Shoot enter ball distance: 380 mm.
 - Shoot enter ball angle: 25 grados.
-- Shoot enter goal distance: banda productiva 2500-3000 mm, con gates documentadas alrededor de 2500-2900 mm.
+- Shoot enter goal distance: 3000 mm.
+- Shoot hold goal distance: 3200 mm.
+- Shoot arm debounce: 3 frames consecutivos.
 - Dribble enter ball distance: 450 mm.
 - Dribble enter ball angle: 35 grados.
+- Dribble hold distance: 600 mm.
+- Dribble enter freshness grace: 1500 ms.
+- Dribble hold freshness grace: 2500 ms.
 
 La implementacion C++ debe reproducir:
 
@@ -278,6 +295,30 @@ La implementacion C++ debe reproducir:
 - progreso de armado `shoot_arm_progress`;
 - `allowed_skills`;
 - reinicio de estado al cambio de episodio, penalizacion o reset operacional.
+
+### 4.6 Mascara de logits en inferencia
+
+`docs/25-guia-transplante-ppo-bhuman.md` convierte esta pieza en requisito de transplante, no en detalle opcional.
+
+La red no decide skills directamente desde los logits crudos. El contrato correcto es:
+
+1. construir `obs[23]`, `obs[24]`, `obs[25]` desde `SkillGate`;
+2. correr el actor;
+3. aplicar `gate_skill_mask_from_obs(obs)` sobre los logits;
+4. ejecutar `argmax` sobre los logits ya enmascarados.
+
+Reglas exactas del mask:
+
+- `shoot` se lleva a `-inf` si `shoot_armed` es falso;
+- `dribble` se lleva a `-inf` si `dribble_armed` es falso;
+- `stand` y `walk` se llevan a `-inf` cuando `finish_armed` es verdadero;
+- el stage mask de produccion sigue dejando activas solo las skills de Stage 4.
+
+Consecuencia de diseño:
+
+- fuera de oportunidad de finish, `walk` y `stand` son fallback;
+- dentro de oportunidad de finish, el robot debe comprometerse con `shoot` o `dribble`;
+- si esta mascara no se replica, el transplante no va a reproducir el `clean_takeover_rate` del baseline candidato vigente.
 
 ## 5. Arquitectura final en robot
 
@@ -308,10 +349,26 @@ El nombre exacto puede cambiar para ajustarse al estilo B-Human, pero la separac
 
 - encoder de observacion;
 - inferencia del actor;
-- mascara/gate;
+- `SkillGate` stateful;
+- mascara de logits pre-`argmax`;
 - decoder de accion;
 - fail-safe;
 - provider B-Human.
+
+Adicionalmente, el provider final debe respetar el mismo orden operacional del repo RL actual:
+
+```text
+percepcion B-Human
+  -> SkillGate.step(raw_obs)
+  -> obs[23:25] baked
+  -> actor PPO
+  -> gate_skill_mask_from_obs(obs)
+  -> argmax(masked_logits)
+  -> parameter masking
+  -> anchor + residual decode
+  -> target repair / projection
+  -> SkillRequest
+```
 
 ### 5.2 Representaciones requeridas
 
@@ -505,13 +562,19 @@ El primer despliegue recomendado es solo un field player PPO, no goalkeeper.
 
 No usar un checkpoint solo porque carga. Debe cumplir:
 
-- `wire_audit_status` PASS en simulacion.
-- `behavioral_evaluator >= 3/5`.
-- `policy_shoot_rate >= 0.05`.
+- paridad con el baseline documentado en `docs/25-guia-transplante-ppo-bhuman.md`;
+- `wire_audit_status` PASS en simulacion;
+- baseline candidato actual: `behavioral_evaluator >= 3/5` sobre `behavior_20260608_181747`;
+- `policy_shoot_rate` consistente con el summary de referencia;
 - tasa de shoot dentro de shoot-zone no cero.
 - sin colisiones excesivas.
 - sin target repair excesivo.
 - sin dependencia de obs corregidas/sinteticas.
+
+La prioridad del transplante es esta:
+
+1. primero igualar en robot/sim el checkpoint candidato `production_stability_repair_v1/checkpoint_stage4_step5000.pt`;
+2. luego, si hace falta, promover a un checkpoint mejor solo despues de revalidar toda la rubrica canonica y multi-seed.
 
 ### 7.2 Script de exportacion
 
@@ -543,7 +606,7 @@ Ejemplo de manifiesto:
   "active_skills": ["stand", "walk", "dribble", "shoot"],
   "checkpoint": "runs/.../checkpoint.pt",
   "checkpoint_sha256": "...",
-  "export_commit": "91508cf",
+  "export_commit": "ed8ffdc",
   "normalization_contract": "ppo_obs_v26_hsl2026",
   "deterministic": true
 }
@@ -585,6 +648,8 @@ Contenido requerido:
 - valor fallback;
 - condicion de stale;
 - test unitario asociado.
+
+La referencia escrita principal para transplante es `docs/25-guia-transplante-ppo-bhuman.md`. Si ese documento y el plan difieren, para la ruta de inferencia manda el `25`.
 
 ### 8.2 Mapeo de features
 
@@ -649,6 +714,13 @@ Se debe portar la logica equivalente a:
 - clamp a campo legal;
 - avoidance de penalty areas y set play zones cuando aplica;
 - fallback a `walk` o `stand` si el skill es invalido.
+
+El decoder final tambien debe conservar el comportamiento actual del repo:
+
+- projection de skills fuera de `active_skill_names` a `walk`;
+- `target_repair` para `walk` y `dribble` cuando el residual cae fuera del radio permitido;
+- `target_x` pinned por `residual_x_range = 0.0`;
+- `target_y` y `target_theta` como residuales sobre anchors heuristicas.
 
 ### 9.3 Determinismo
 
@@ -758,6 +830,8 @@ Gates:
 - obs_ready estable;
 - synthetic pose 0 en modo natural;
 - ball stale dentro de limites;
+- `obs[23]`, `obs[24]`, `obs[25]` no son ceros fijos;
+- `gate_skill_mask_from_obs` bloquea `walk`/`stand` cuando `finish_armed=True`;
 - shoot ocurre en shoot-zone;
 - no shoot spam fuera de shoot-zone;
 - target repair bajo;
@@ -773,6 +847,8 @@ Pruebas:
 - comparacion PyTorch vs ONNX;
 - comparacion de logits;
 - comparacion de accion final post-gate;
+- comparacion de `masked_logits`, no solo de logits crudos;
+- comparacion del `argmax` final despues del mask;
 - benchmark CPU equivalente al NAO si es posible;
 - test de carga de manifiesto.
 
@@ -924,6 +1000,7 @@ Durante competencia:
 - Encoder de 26 features.
 - Normalizacion.
 - Gate shoot/dribble.
+- Mascara de logits `finish_armed`.
 - Skill mask.
 - Action decoder.
 - Target repair.
@@ -976,7 +1053,8 @@ El PPO puede ir a campo de competencia solo si se cumplen todos:
 - `SKILL_ORDER` confirmado.
 - PyTorch vs ONNX pasa.
 - Encoder C++ vs Python pasa.
-- `behavioral_evaluator >= 3/5`.
+- primero iguala el baseline candidato `3/5` ya revalidado del `behavioral_evaluator`;
+- cualquier checkpoint nuevo debe igualar o superar ese baseline bajo la misma rubrica y, de preferencia, mejorar `blocked_corridor_repair`;
 - `wire_audit_status = PASS`.
 - `policy_shoot_rate >= 0.05`.
 - `shoot` ocurre en shoot-zone.
@@ -1100,6 +1178,7 @@ Modelos:
 Docs:
 
 - contrato `ppo_obs_v26`.
+- contrato `ppo_gate_and_mask_v1`.
 - instrucciones de deploy NAO.
 - matriz de pruebas.
 - reporte de behavioral evaluator.

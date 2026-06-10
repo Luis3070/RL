@@ -62,6 +62,8 @@ BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
 _STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
 _PROFILE_INTERVAL = int(os.getenv("RL_PROFILE_INTERVAL", "256"))
 POSE_JUMP_WARNING_MM = 350.0
+FALLEN_STUCK_MIN_STAGE = int(os.getenv("RL_FALLEN_STUCK_MIN_STAGE", "3"))
+FALLEN_STUCK_TERMINATE_STEPS = max(0, int(os.getenv("RL_FALLEN_STUCK_TERMINATE_STEPS", "24")))
 
 _DEFAULT_PRODUCTION_SCENARIO_WEIGHTS = {
     "finish_band_2p5_3m_clean": 3.0,
@@ -209,6 +211,7 @@ class RealSimRobotEnv(ParallelEnv):
         self._skill_history: list[str] = []
         self._trusted_takeover_grace = 0
         self._post_takeover_finishing_steps = 0
+        self._fallen_consecutive_steps = 0
         self._episode_stage_id = self.stage_spec.stage_id
         self._episode_stage_spec = self.stage_spec
         self._current_world_spec = None
@@ -249,6 +252,7 @@ class RealSimRobotEnv(ParallelEnv):
         self._skill_history = []
         self._trusted_takeover_grace = 0
         self._post_takeover_finishing_steps = 0
+        self._fallen_consecutive_steps = 0
         self._last_evaluation = None
         options = options or {}
         self._pending_production_scenario = None
@@ -444,8 +448,12 @@ class RealSimRobotEnv(ParallelEnv):
             dynamic_update_applied = True
 
         scored = goal_scored(obs.ball_x, obs.ball_y)
-        timeout = (not scored) and self._episode_step >= self.cfg.max_episode_steps
         collision = self._derive_collision(obs)
+        fallen_stuck = self._update_fallen_stuck_counter(obs)
+        timeout = (not scored) and (
+            self._episode_step >= self.cfg.max_episode_steps
+            or fallen_stuck
+        )
         corridor_open = self._derive_corridor_open(obs)
         prev_skill_name = self._skill_history[-1] if self._skill_history else None
         skill_history = tuple((*self._skill_history, executed_action.skill_name))
@@ -549,6 +557,7 @@ class RealSimRobotEnv(ParallelEnv):
             handoff_override_applied=handoff_override_applied,
             target_repair_applied=target_repair_applied,
             target_repair_reason=target_repair_reason,
+            fallen_stuck=fallen_stuck,
             done=done,
         )
 
@@ -580,6 +589,7 @@ class RealSimRobotEnv(ParallelEnv):
         terminations = {"player_1": done}
         truncations = {"player_1": False}
         if done:
+            self._episode_tracker["fallen_stuck_episode"] = bool(fallen_stuck)
             info["episode_metrics"] = self._finalize_episode_metrics()
             self.agents = []
         return {"player_1": encoded}, rewards, terminations, truncations, {"player_1": info}
@@ -781,6 +791,9 @@ class RealSimRobotEnv(ParallelEnv):
             "shoot_finish_steps": 0,
             "goal": False,
             "collision_count": 0,
+            "fall_step_count": 0,
+            "fallen_stuck_episode": False,
+            "fall_consecutive_max": 0,
             "thrash_count": 0,
             "clearance_positive_steps": 0,
             "obstacle_present_steps": 0,
@@ -882,6 +895,9 @@ class RealSimRobotEnv(ParallelEnv):
             tracker["pose_jump_steps"] += int(pose_jump_mm > POSE_JUMP_WARNING_MM)
         tracker["ball_stale_steps"] += int(bool(step_ctx.obs.ball_observation_stale))
         tracker["ball_collapsed_steps"] += int(bool(step_ctx.obs.ball_observation_collapsed))
+        if int(step_ctx.obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE:
+            tracker["fall_step_count"] += 1
+        tracker["fall_consecutive_max"] = max(int(tracker["fall_consecutive_max"]), int(self._fallen_consecutive_steps))
         tracker["corrected_exported_robot_pose_steps"] += int(bool(step_ctx.obs.corrected_exported_robot_pose))
         tracker["corrected_exported_ball_steps"] += int(bool(step_ctx.obs.corrected_exported_ball))
         tracker["ball_export_fresh_steps"] += int(bool(step_ctx.obs.ball_export_fresh))
@@ -1015,6 +1031,17 @@ class RealSimRobotEnv(ParallelEnv):
         contact_event = bool(obs.obstacle_arm_contact or obs.obstacle_foot_contact)
         return bool(fall_event or contact_event)
 
+    def _update_fallen_stuck_counter(self, obs: BackendObservation) -> bool:
+        if int(obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE:
+            self._fallen_consecutive_steps += 1
+        else:
+            self._fallen_consecutive_steps = 0
+        return bool(
+            self._episode_stage_id >= FALLEN_STUCK_MIN_STAGE
+            and FALLEN_STUCK_TERMINATE_STEPS > 0
+            and self._fallen_consecutive_steps >= FALLEN_STUCK_TERMINATE_STEPS
+        )
+
     def _derive_corridor_open(self, obs: BackendObservation) -> bool:
         if int(obs.obstacle_front_count) <= 0:
             return True
@@ -1032,6 +1059,8 @@ class RealSimRobotEnv(ParallelEnv):
             "reward_total": float(tracker["reward_total"]),
             "thrash_rate": float(tracker["thrash_count"] / steps),
             "collision_step_rate": float(tracker["collision_count"] / steps),
+            "fall_step_rate": float(tracker["fall_step_count"] / steps),
+            "fall_consecutive_max": float(tracker["fall_consecutive_max"]),
             "walk_compat_rate": float(tracker["good_walk_steps"] / walk_steps),
             "dribble_compat_rate": float(tracker["good_dribble_steps"] / dribble_steps),
             "shoot_compat_rate": float(tracker["good_shoot_steps"] / shoot_steps),
@@ -1203,6 +1232,9 @@ class RealSimRobotEnv(ParallelEnv):
             "shoot_finish": float(shoot_finish),
             "clean_episode": float(clean_episode),
             "collision_episode": collision_episode,
+            "fall_step_rate": float(tracker["fall_step_count"] / steps),
+            "fallen_stuck_episode": float(bool(tracker["fallen_stuck_episode"])),
+            "fall_consecutive_max": float(tracker["fall_consecutive_max"]),
             "takeover_success": float(takeover_success),
             # Disambiguates policy_incompatible_takeover_rate==0: with the max(1,..)
             # denominator, "no takeover at all" reads identically to "clean takeover".
@@ -1325,6 +1357,7 @@ class RealSimRobotEnv(ParallelEnv):
         handoff_override_applied: bool = False,
         target_repair_applied: bool = False,
         target_repair_reason: str = "",
+        fallen_stuck: bool = False,
         done: bool = False,
     ) -> Dict[str, object]:
         raw_obs = asdict(obs)
@@ -1398,6 +1431,8 @@ class RealSimRobotEnv(ParallelEnv):
             "handoff_override_applied": bool(handoff_override_applied),
             "target_repair_applied": bool(target_repair_applied),
             "target_repair_reason": str(target_repair_reason),
+            "fallen_stuck": bool(fallen_stuck),
+            "fallen_consecutive_steps": int(self._fallen_consecutive_steps),
             "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
             "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
             "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),
