@@ -78,6 +78,13 @@ def _load_source_summary(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _resolve_repo_path(path_like: str | Path) -> Path:
+    path = Path(path_like).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
 def prepare_stage4_replay_dataset(source_dataset: Path, output_dataset: Path) -> Path:
     """Normalize production BC labels to stage 4 so train.py replays all scenarios.
 
@@ -87,8 +94,8 @@ def prepare_stage4_replay_dataset(source_dataset: Path, output_dataset: Path) ->
     bits still own the forbid-invalid mask, so normalizing `stages` to 4 is the right
     production-replay view of this dataset.
     """
-    source_dataset = source_dataset.expanduser().resolve()
-    output_dataset = output_dataset.expanduser().resolve()
+    source_dataset = _resolve_repo_path(source_dataset)
+    output_dataset = _resolve_repo_path(output_dataset)
     if not source_dataset.exists():
         raise FileNotFoundError(source_dataset)
 
@@ -96,8 +103,8 @@ def prepare_stage4_replay_dataset(source_dataset: Path, output_dataset: Path) ->
     observations = data["observations"].astype(np.float32)
     actions = data["actions"].astype(np.float32)
     weights = data["weights"].astype(np.float32)
-    if observations.ndim != 2 or observations.shape[1] != 26:
-        raise ValueError(f"Expected observations [N,26], got {observations.shape}")
+    if observations.ndim != 2 or observations.shape[1] < 26:
+        raise ValueError(f"Expected observations [N,M] with M>=26, got {observations.shape}")
     if actions.ndim != 2 or actions.shape[1] != 5:
         raise ValueError(f"Expected actions [N,5], got {actions.shape}")
     if len(weights) != len(observations):
@@ -154,7 +161,7 @@ def prepare_stage4_replay_dataset(source_dataset: Path, output_dataset: Path) ->
 
 def _build_run_cfg(args: argparse.Namespace, replay_dataset: Path) -> train.ScriptRunConfig:
     experiment_name = os.getenv("RL_PROD_EXPERIMENT_NAME", "production_readiness_v2")
-    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    checkpoint = _resolve_repo_path(args.checkpoint)
     if not checkpoint.exists():
         raise FileNotFoundError(checkpoint)
     return train.ScriptRunConfig(
