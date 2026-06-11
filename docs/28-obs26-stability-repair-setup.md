@@ -158,3 +158,179 @@ PYTHONPATH=/home/rafael/Documentos/Robocup2026/RL/.deps/SabanaHerons2026/Make/Py
 
 Antes de correr entrenamiento largo, compilar el worktree SabanaHerons de
 `00ba473` y validar una corrida corta visible/headless.
+
+## Reparacion offline del stand
+
+Diagnostico del problema observado en GameFast:
+
+- En los logs embebidos, `shoot_armed=0` y `dribble_armed=0`, asi que el gate
+  deja la decision reducida a `stand` vs `walk`.
+- El replay positivo obs26 no etiqueta `stand`: en estados no-finish positivos,
+  los labels son 100% `walk`.
+- El checkpoint `checkpoint_stage4_step5000.pt` aun tenia zonas fuera de la
+  distribucion del dataset donde `stand` y `walk` quedaban casi empatados.
+
+Se agrego `train_stand_repair.py` para hacer una reparacion local de politica,
+sin tocar el obs space y sin cambiar Sabana:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+.venv/bin/python train_stand_repair.py
+PYTHONPATH=/home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base \
+.venv/bin/python tools/export_ppo_policy.py \
+  --checkpoint runs/production_stand_repair_v1/checkpoint_stage4_stand_repair.pt \
+  --output runs/production_stand_repair_v1/ppo_striker_hsl2026_stand_repair.onnx
+```
+
+La reparacion congela trunk/parametros continuos y solo ajusta `skill_head` con:
+
+- CE sobre el replay positivo stage 4.
+- Estados sinteticos obs26 con `shoot_armed=0`, `dribble_armed=0` y target
+  `walk`, parecidos al fallo online.
+- Margen explicito `logit(walk) - logit(stand) >= 1.5`.
+- KL suave contra el checkpoint original para no mover innecesariamente
+  `dribble/shoot`.
+
+Resultado offline del candidato:
+
+```text
+no_finish_positive:
+  stand_rate 0.0053 -> 0.0000
+  p_stand_mean 0.0494 -> 0.0013
+  p_walk_mean  0.9506 -> 0.9987
+
+synthetic_no_finish:
+  stand_rate 0.4561 -> 0.0000
+  p_stand_mean 0.4794 -> 0.0007
+  p_walk_mean  0.5206 -> 0.9993
+```
+
+Artefactos generados:
+
+```text
+runs/production_stand_repair_v1/checkpoint_stage4_stand_repair.pt
+runs/production_stand_repair_v1/ppo_striker_hsl2026_stand_repair.onnx
+runs/production_stand_repair_v1/ppo_striker_hsl2026_stand_repair.onnx.data
+```
+
+Para probar en Sabana, exportar una variante compat con batch estatico/opset 11
+y copiar el `.onnx` y el `.json` al directorio de
+`Config/NeuralNets/RLPolicy/`. El export compat no requiere `.onnx.data`.
+
+## Reparacion offline del param_head
+
+Despues de reparar `stand`, GameFast mostro un segundo fallo: la policy elegia
+`walk`, pero `param_head` emitia casi siempre:
+
+```text
+params[x,y,th,p] ~= -1,-1,1,-1
+```
+
+Eso no siempre es malo. Con la pelota lejos puede generar un `targetRel` grande
+y caminar normalmente. El problema aparece cuando esa misma salida cae dentro
+del umbral muerto de `WalkToPoint`:
+
+```text
+targetRel[x,y,th] ~= 0,0,0
+```
+
+En ese caso SimRobot recibe `walk`, pero la skill considera que ya llego y el
+robot se queda quieto. Esto no debe arreglarse con un guard de C++; debe
+corregirse en la cabeza continua de la policy.
+
+Se agrego `train_param_repair.py` para partir del checkpoint con `stand`
+reparado y ajustar solo `param_head`:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+.venv/bin/python train_param_repair.py --steps 1600 --export-compat
+```
+
+La reparacion usa:
+
+- BC sobre residuales positivos `walk`/`dribble` del replay stage 4.
+- Estados sinteticos obs26 cercanos al caso muerto de `walk`.
+- Labels continuas centradas en el anchor heuristico (`residual_y ~= 0`,
+  `residual_theta ~= 0`) para evitar saturacion.
+- Trunk y `skill_head` congelados, conservando el arreglo de `stand`.
+
+Metricas del candidato:
+
+```text
+stand/no-finish:
+  dataset_no_finish_positive stand_rate = 0.0000, p_walk_mean = 0.9987
+  synthetic_no_finish        stand_rate = 0.0000, p_walk_mean = 0.9993
+
+param/walk:
+  synthetic_near_dead walk_dead_rate 0.0050 -> 0.0000
+  synthetic_no_finish walk_dead_rate 0.0010 -> 0.0000
+  walk_param_y_mean     -1.0000 -> -0.0233
+  walk_param_theta_mean  0.9996 -> -0.0048
+```
+
+Artefactos generados:
+
+```text
+runs/production_param_repair_v1/checkpoint_stage4_param_repair.pt
+runs/production_param_repair_v1/ppo_striker_hsl2026_param_repair_compat.onnx
+runs/production_param_repair_v1/ppo_striker_hsl2026_param_repair_compat.json
+```
+
+Compatibilidad verificada del ONNX transplantado:
+
+```text
+ir_version = 6
+opset ai.onnx = 11
+input obs = [1, 26]
+outputs = skill_logits [1, 8], param_mean [1, 4]
+sha256 = 2870181793a4675a81ca1f3a2cef5dd8632292ebca06163ea0b071939cc76a4c
+```
+
+Nota: durante la prueba en Sabana conviene dejar la instrumentacion de logs
+`params` y `targetRel`, pero sin fallback/guard de decoder, para validar que el
+movimiento viene de la policy corregida.
+
+## Behavioral evaluator del candidato transplantado
+
+El checkpoint evaluado fue:
+
+```text
+runs/production_param_repair_v1/checkpoint_stage4_param_repair.pt
+```
+
+Comando usado:
+
+```bash
+cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+.venv/bin/python behavioral_evaluator.py \
+  --checkpoint runs/production_param_repair_v1/checkpoint_stage4_param_repair.pt \
+  --episodes 4 \
+  --seed 4200 \
+  --max-episode-steps 1000
+```
+
+El resultado global fue `overall_pass=0`, con 4 de 5 situaciones aprobadas. El
+fallo restante no fue el bloqueo en `stand`; fue seguridad de collision en
+`preshoot_bad_angle_boundary`.
+
+```text
+summary = runs/behavioral_evaluator/behavior_20260610_192350/summary.csv
+
+finish_band_2p5_3m_clean        pass=1 goal=0.250 finish=0.750 shoot_finish=0.500 collision=0.000 policy_stand=0.000
+finish_band_2p5_3m_static_lane  pass=1 goal=0.500 finish=0.750 shoot_finish=0.750 collision=0.000 policy_stand=0.001
+preshoot_bad_angle_boundary     pass=0 goal=0.000 finish=0.833 shoot_finish=0.667 collision=0.333 policy_stand=0.004 failures=collision_rate<=0.12
+dynamic_full_field_pressure     pass=1 goal=0.000 finish=0.500 shoot_finish=0.000 collision=0.000 policy_stand=0.000
+blocked_corridor_repair         pass=1 goal=0.167 finish=0.667 shoot_finish=0.333 collision=0.000 policy_stand=0.001
+```
+
+Lectura:
+
+- La reparacion de `stand` funciona para el sintoma original: el
+  `policy_stand_rate` queda practicamente en cero en el evaluator visible.
+- El caso que aun falla es otro eje de comportamiento: mala orientacion cerca de
+  zona de tiro produce colisiones. La siguiente iteracion debe entrenar
+  terminacion/seguridad alrededor de `preshoot_bad_angle_boundary`, no volver a
+  meter un fallback local en Sabana.
+- En escenarios full-field dinamicos todavia hay poco tiro (`policy_shoot=0` en
+  `dynamic_full_field_pressure`), asi que el candidato destraba el movimiento
+  pero no cierra el rendimiento ofensivo.
