@@ -29,9 +29,9 @@
     "is_open_support": 45,
     "is_off_ball_support": 46
   },
-  "checkpoint": "/home/luis/GitHub/RL/runs/multiagent_stage7_v1/checkpoint_stage7_step10000.pt",
-  "checkpoint_sha256": "7e34b8c4c6d1c5fb29c430f60bf4731e3a6abc2e5d2874d9f71b373733b5e6f2",
-  "onnx_sha256": "051c14f110d05173986bca9bda90066c0ccb223518fccbca457c0dc8fab37783",
+  "checkpoint": "/home/luis/GitHub/RL/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt",
+  "checkpoint_sha256": "f84d3b1bb9eee279def9a1eb8b446a6bdc9b631f3eb22618cf25d7bef25a0a13",
+  "onnx_sha256": "7126a01ccda2de17fa63af6d2067d29edd505d9602ca8c50fea83483a75e3320",
   "normalization_contract": "ppo_obs_v47_team_hsl2026",
   "deterministic": true
 }

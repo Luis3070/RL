@@ -54,6 +54,23 @@ TEAM_COMM_INTERVAL_MS = float(os.getenv("RL_MA_TEACHER_TEAM_COMM_INTERVAL_MS", "
 TEAM_BALL_VALID_MAX_MS = float(os.getenv("RL_MA_TEACHER_TEAM_BALL_VALID_MAX_MS", "2000.0"))
 STEP_DT_MS = float(os.getenv("RL_MA_TEACHER_STEP_DT_MS", "33.0"))
 
+# §14.20 team reward terms, applied at the TEAM layer (reward.py stays frozen —
+# single-agent reward shaping is untouched; these are additive bonuses on the
+# slot rewards for stages ≥6 only). Per-step hold bonuses are deliberately
+# conservative vs the §14.20 headline numbers (0.5 per-EVENT there ≈ 0.05
+# per-step here) so they don't dominate the existing per-step reward scale.
+TEAM_GOAL_BONUS = float(os.getenv("RL_MA_TEAM_GOAL_BONUS", "5.0"))
+SUPPORT_OPEN_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_OPEN_HOLD_BONUS", "0.05"))
+SUPPORT_TRIANGLE_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS", "0.02"))
+PASS_ATTEMPT_CREDIT = float(os.getenv("RL_MA_PASS_ATTEMPT_CREDIT", "1.0"))
+HOLD_RADIUS_MM = float(os.getenv("RL_MA_HOLD_RADIUS_MM", "600.0"))
+
+# Side-channel for the BC competence gate: train.py's eval summarizer has a
+# fixed metric list, so the team metrics can't flow through episode_metrics
+# without touching train.py. The team env publishes its latest episode metrics
+# here; MultiAgentBCCompetenceGate reads them when the summary lacks the keys.
+LAST_TEAM_METRICS: dict[str, float] = {}
+
 _ACTIVITY_IDLE = 0
 _ACTIVITY_GOING_TO_BALL = 1
 _ACTIVITY_DRIBBLING = 2
@@ -431,7 +448,68 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
     def step(self, actions):
         self._team_step_idx += 1
         self._refresh_team_state()
-        observations, rewards, terminations, truncations, infos = super().step(actions)
+        try:
+            observations, rewards, terminations, truncations, infos = super().step(actions)
+        except RuntimeError as exc:
+            # Sim stall (pybh.rl_get_obs timeout — both the "stale visible frames"
+            # and the generic "timed out in backend" variants, raised from step or
+            # set_dynamic_world). Truncate the team episode instead of killing the
+            # run — transient stalls recover on the next reset; hard freezes will
+            # fail the reset and surface.
+            msg = str(exc)
+            if "rl_get_obs" not in msg and "stale visible frames" not in msg:
+                raise
+            print(f"[team-env] slot stall — truncating episode: {exc}", flush=True)
+            self.agents = []
+            obs = {
+                agent: (env._last_obs if env._last_obs is not None
+                        else np.zeros(env.observation_spaces["player_1"].shape, dtype=np.float32))
+                for agent, env in self._envs.items()
+            }
+            zero_r = {agent: 0.0 for agent in self._envs}
+            return (
+                obs, zero_r,
+                {agent: False for agent in self._envs},
+                {agent: True for agent in self._envs},
+                {agent: {"team_stall_truncation": True} for agent in self._envs},
+            )
+
+        # ---- §14.20 team reward terms (stages ≥6; additive on slot rewards) ----
+        team_goal = False
+        for agent in self.possible_agents:
+            env = self._envs[agent]
+            if terminations.get(agent) and bool(env._episode_tracker.get("goal", False)):
+                team_goal = True
+                break
+        with self._team_lock:
+            roles_now = dict(self._roles)
+        for agent, player_number in zip(self.possible_agents, self.player_numbers, strict=True):
+            if agent not in rewards:
+                continue
+            bonus = 0.0
+            role = roles_now.get(int(player_number), "")
+            env = self._envs[agent]
+            raw = env._last_backend_obs
+            if raw is not None and role in ("open_support", "off_ball_support"):
+                target = (
+                    self._team_state.open_lane_ema if role == "open_support"
+                    else self._team_state.triangle_ema
+                )
+                if target is not None:
+                    dist = math.hypot(float(raw.robot_x) - target[0], float(raw.robot_y) - target[1])
+                    if dist < HOLD_RADIUS_MM:
+                        bonus += (
+                            SUPPORT_OPEN_HOLD_BONUS if role == "open_support"
+                            else SUPPORT_TRIANGLE_HOLD_BONUS
+                        )
+            info = infos.get(agent, {})
+            if (info.get("executed_skill_name") or "") == "pass":
+                bonus += PASS_ATTEMPT_CREDIT
+            if team_goal:
+                bonus += TEAM_GOAL_BONUS
+            if bonus:
+                rewards[agent] = float(rewards[agent]) + bonus
+                infos.setdefault(agent, {})["team_reward_bonus"] = bonus
 
         # Track executed skills (for the activity encoding) and decay pass-target
         # ages. NOTE: pass-target recording (R4 hysteresis) is skipped at rollout
@@ -453,6 +531,10 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         done_any = any(terminations.values()) or any(truncations.values())
         if done_any:
             metrics = self._team_metrics()
+            metrics["team_goal"] = float(team_goal)
             for agent in infos:
                 infos[agent].update(metrics)
+            # Publish for the BC competence gate (side-channel — see module docstring).
+            LAST_TEAM_METRICS.clear()
+            LAST_TEAM_METRICS.update(metrics)
         return observations, rewards, terminations, truncations, infos

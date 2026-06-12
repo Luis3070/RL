@@ -144,11 +144,16 @@ class MultiAgentBCReplayRegularizer(BCReplayRegularizer):
             return ()
         # Stages 6-7 use the same role/skill mix; small per-stage tweaks possible
         # but unnecessary at the sprint horizon.
+        # Pass bumped 0.04→0.10 (striker walk 0.12→0.06): the 2026-06-12 ablation
+        # showed pass competence is context-correct (P(pass)=0.71 argmax 96.8% on
+        # teacher-pass contexts) but eval rollouts under-visit those contexts —
+        # heavier BC sampling keeps the skill sharp while team rewards create the
+        # contexts.
         return (
             ("striker", "shoot", 0.20),
             ("striker", "dribble", 0.18),
-            ("striker", "walk", 0.12),
-            ("striker", "pass", 0.04),
+            ("striker", "walk", 0.06),
+            ("striker", "pass", 0.10),
             ("open_support", "walk", 0.16),
             ("open_support", "stand", 0.08),
             ("off_ball_support", "walk", 0.14),
@@ -226,12 +231,19 @@ class MultiAgentBCCompetenceGate(BCCompetenceGate):
             striker_competence = float(summary.get("dribble_compat_rate", 0.0))
         striker_competence = float(np.clip(striker_competence, 0.0, 1.0))
 
-        open_competence = float(np.clip(
-            float(summary.get("support_open_hold_rate", 0.0)), 0.0, 1.0,
-        ))
-        off_ball_competence = float(np.clip(
-            float(summary.get("support_triangle_hold_rate", 0.0)), 0.0, 1.0,
-        ))
+        # Support hold rates don't flow through train.py's fixed eval metric list;
+        # the team env publishes them via a side-channel at episode end. Without
+        # this, the min-across-roles is permanently 0 and β never decays (the
+        # 2026-06-11 run trained with β pinned at beta_max the whole way).
+        def _team_metric(key: str) -> float:
+            value = summary.get(key)
+            if value is None:
+                from team_parallel_environment import LAST_TEAM_METRICS
+                value = LAST_TEAM_METRICS.get(key, 0.0)
+            return float(value)
+
+        open_competence = float(np.clip(_team_metric("support_open_hold_rate"), 0.0, 1.0))
+        off_ball_competence = float(np.clip(_team_metric("support_triangle_hold_rate"), 0.0, 1.0))
 
         # Min-across-roles: worst-role drives β decay.
         competence = float(min(striker_competence, open_competence, off_ball_competence))
