@@ -20,6 +20,7 @@ BHuman mapping (Bhuman-deterministic-agent-map.md):
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -28,23 +29,35 @@ from action import SKILL_ORDER, SkillType, StructuredSkillAction
 from config import ACTION, FIELD_X_HALF, FIELD_Y_HALF, GOAL_X
 from gate import GateDecision
 from pybh_backend import BackendObservation
-from teacher_policy import _action_from_anchor, stage_aware_teacher_action
+from teacher_policy import _action_from_anchor, absolute_to_residual_action, stage_aware_teacher_action
 
 # ---------------------------------------------------------------------------
 # §14.12.1 — Constants (single source of truth). Tune on Day 5.
 # ---------------------------------------------------------------------------
 
 # R1 (Role assignment)
-ROLE_HYSTERESIS_FRAMES = 5          # §11.B.3.1 — consecutive frames before swap commits
+ROLE_HYSTERESIS_FRAMES = 7          # §11.B.3.1; raised 5→7 per §14.24 after role_thrash(14-56) drops in 2026-06-10 long-cap probes
 ROLE_MIN_DISTANCE_GAP_MM = 200.0    # candidate must be ≥ 200mm closer than current striker
 TEAMMATE_FRESH_MAX_AGE_MS = 1000.0  # poses older than this are treated as stale
 
 # R2 (smashOrPass — port of PlayBall.cpp:33-118)
-SHOOT_THRESHOLD = 0.55              # own_value above this → shoot directly
+# own_value above this → shoot directly (no pass auction). The 0.55 default was
+# calibrated to the old binary's inflated ExpectedGoals scale; on the rebuilt
+# binary armed windows run 0.30-0.58, so 0.55 made the striker pass away every
+# armed shot (2026-06-10 stage-7 probe: 22/22 armed rows chose pass). Set to the
+# gate's shoot_open_enter (0.30) for a deterministic finisher: armed ⇒ shoot,
+# pass stays a mid-drive tool for shaded lanes. Env-tunable per regen run.
+SHOOT_THRESHOLD = float(os.getenv("RL_MA_SHOOT_THRESHOLD", "0.55"))
 MIN_PASS_DISTANCE_MM = 400.0        # PlayBall.cpp:p.minPassDistance (adapted: tighter)
 MAX_PASS_DISTANCE_MM = 4000.0       # PlayBall.cpp:p.maxPassDistance
 DECISION_PENALTY_MIN = 0.05         # mapToRange floor (close ball → big penalty)
 DECISION_PENALTY_MAX = 0.20         # mapToRange ceiling (far ball → small penalty)
+# Pass must beat the striker's own rating by this margin to commit. BHuman compares
+# ratings directly, but its own-rating (ExpectedGoals) runs hotter mid-field than the
+# rebuilt sim's deflated xG (~0.24-0.37 mid-drive); without a margin the teacher
+# passes the instant a forward support edges ahead and the dribble drive vanishes
+# from the dataset (2026-06-10 probe: dribble_frac 0.8%). Env-tunable for regen.
+PASS_VALUE_MARGIN = float(os.getenv("RL_MA_PASS_VALUE_MARGIN", "0.15"))
 BALL_DIST_MIN_PENALTY_MM = 500.0    # ball at this distance → DECISION_PENALTY_MAX
 BALL_DIST_MAX_PENALTY_MM = 2500.0   # ball at this distance → DECISION_PENALTY_MIN
 LAST_PASS_TARGET_LIFETIME_MS = 1500.0  # window where last_pass_target discounts new choices
@@ -59,6 +72,18 @@ SUPPORT_SLOT_CANDIDATE_GRID = (     # field-frame xy candidates; y mirrored by b
     (+1200.0, +800.0),
     (+400.0, +1400.0),
     (-400.0, +1200.0),              # fall-back-deep slot for crowded forward zones
+    # Forward receive slots (BHuman Tactic t13/t22 place forwards in the opponent
+    # half; capping the grid at x=1200 made the support permanently unpassable —
+    # goal_proximity 0.27 never beat the striker's own shoot rating). forward_rating
+    # zeroes these when the ball is too far (pass_dist > MAX_PASS_DISTANCE_MM), so
+    # they only activate as the ball advances.
+    # y kept ≥1200 and x capped at 2800 so the support's slot stays clear of the
+    # striker's drive corridor AND its finishing area (ball y ∈ ±450 in band
+    # scenarios). 2026-06-10 probes: y=700-1100 lost 3/6 episodes to sustained
+    # teammate-collision; adding a (3400,1000) slot lost 4/6 — the slot scorer
+    # always picks the deepest slot, parking the support where the striker finishes.
+    (+2000.0, +1300.0),
+    (+2800.0, +1200.0),
 )
 
 # R6 (Pass quality proxies for BHuman's learned estimators)
@@ -67,6 +92,11 @@ OPPONENT_LANE_CLEARANCE_MM = 800.0  # nearest_opponent_front_dist must exceed th
 
 # Exclusions
 GK_EXCLUDE_X_MM = -2000.0          # teammate with absolute x < this is treated as GK
+
+# EMA smoothing for coordination targets (§11.B.3.2). Lives on the env (not the teacher);
+# constants exposed here so the orchestrator imports a single source of truth.
+EMA_ALPHA_OPEN_LANE = 0.3          # 3-frame effective smoothing on open-lane center
+EMA_ALPHA_TRIANGLE = 0.2           # 5-frame effective smoothing on triangle vertex
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +123,35 @@ class TeamRoleHistory:
     current_roles: dict[int, str] = field(default_factory=dict)
     # {agent_id: consecutive frames this agent has been proposed-but-not-committed striker}
     candidate_streak: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
+class TeamCoordinationState:
+    """Per-env multi-agent runtime state.
+
+    Owns the EMA-smoothed coordination targets, the per-striker last_pass_target
+    decay, and the role hysteresis history. The teacher reads from this struct;
+    the orchestrator (dataset script or env step loop) advances it each step.
+
+    Reset semantics: instantiate fresh on env.reset() — all fields default-empty.
+    """
+    roles: TeamRoleHistory = field(default_factory=TeamRoleHistory)
+    open_lane_ema: tuple[float, float] | None = None
+    triangle_ema: tuple[float, float] | None = None
+    # last_pass_target is the BHuman agent_id (player number), keyed by striker_id.
+    # Decays in age each step; stale entries are ignored by smash_or_pass.
+    last_pass_target_by_striker: dict[int, int] = field(default_factory=dict)
+    last_pass_target_age_ms_by_striker: dict[int, float] = field(default_factory=dict)
+    # Per-agent committed support slot for stabilityOffset (R3 / R4 hysteresis).
+    support_committed_slot: dict[int, tuple[float, float]] = field(default_factory=dict)
+
+    def reset(self) -> None:
+        self.roles = TeamRoleHistory()
+        self.open_lane_ema = None
+        self.triangle_ema = None
+        self.last_pass_target_by_striker.clear()
+        self.last_pass_target_age_ms_by_striker.clear()
+        self.support_committed_slot.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +193,10 @@ def assign_roles(
     distances = {aid: ball_dist(aid) for aid in agent_ids}
 
     # 2. All-stale fallback: use freshest natural ball belief as striker.
+    # NOTE: obs.time_since_ball_seen is already in milliseconds (matches env's TIME_NORM_MS=5000).
+    # Bug 5 fix: do NOT multiply by 1000 — that would convert ms→µs and fire the fallback every frame.
     all_stale = all(
-        float(agent_obs[aid].time_since_ball_seen) * 1000.0 > TEAMMATE_FRESH_MAX_AGE_MS
+        float(agent_obs[aid].time_since_ball_seen) > TEAMMATE_FRESH_MAX_AGE_MS
         for aid in agent_ids
     )
     if all_stale and not team_ball_valid:
@@ -221,8 +282,14 @@ def smash_or_pass(
 ) -> tuple[str, int]:
     """R2: decide shoot vs pass for the active striker.
 
-    Returns (skill_name, pass_target_slot_idx).
-    pass_target_slot_idx == -1 when skill_name != "pass".
+    Returns (skill_name, pass_target_agent_id).
+    pass_target_agent_id == -1 when skill_name != "pass".
+
+    Bug 1 fix: pass_target is now the BHuman player number (agent_id), matching
+    PlayBall.cpp:108 `SkillRequest::Builder::passTo(passTarget->number)`. The env's
+    `last_pass_target` state MUST be the agent_id (not the Block-B slot_idx). Slots
+    with agent_id < 0 are skipped — the env's mapping is incomplete for that slot
+    and we cannot tell BHuman to pass to an unknown player.
 
     Direct line-by-line correspondence with PlayBall.cpp:
       PlayBall.cpp:39   → decision_penalty (R4 hysteresis on decision)
@@ -234,11 +301,15 @@ def smash_or_pass(
       PlayBall.cpp:116-117 → fallback shoot
     """
     # PlayBall.cpp:39 — decision penalty: larger when ball is close (commitment zone).
+    # Bug 4 fix: np.interp requires monotonically increasing xp. Previous call passed
+    # xp=[2500, 500] which silently clamps to fp[0]=0.05, freezing the penalty at MIN
+    # for every distance. Fixed by passing increasing xp [500, 2500] and decreasing fp
+    # [MAX, MIN] so close ball → DECISION_PENALTY_MAX, far ball → DECISION_PENALTY_MIN.
     d_ball = math.hypot(float(striker_obs.ball_rel_x), float(striker_obs.ball_rel_y))
     decision_penalty = _map_to_range(
         d_ball,
-        in_lo=BALL_DIST_MAX_PENALTY_MM, in_hi=BALL_DIST_MIN_PENALTY_MM,
-        out_lo=DECISION_PENALTY_MIN, out_hi=DECISION_PENALTY_MAX,
+        in_lo=BALL_DIST_MIN_PENALTY_MM, in_hi=BALL_DIST_MAX_PENALTY_MM,   # 500 → 2500
+        out_lo=DECISION_PENALTY_MAX, out_hi=DECISION_PENALTY_MIN,         # 0.20 → 0.05
     )
 
     # PlayBall.cpp:44 — own shoot rating (R6 proxy for ExpectedGoals.getRating(ballPos)).
@@ -260,10 +331,16 @@ def smash_or_pass(
         return ("shoot", -1)
 
     # PlayBall.cpp:64-104 — score each teammate as a pass candidate.
-    best_slot_idx = -1
-    best_value = own_value
+    # PASS_VALUE_MARGIN: candidate must beat own rating by a clear margin (see
+    # constant rationale) so passing complements rather than replaces the drive.
+    best_agent_id = -1
+    best_value = own_value + PASS_VALUE_MARGIN
     for slot in teammate_slots:
         if slot.is_gk:
+            continue
+        # Skip slots where the env did not provide an agent_id (mapping incomplete);
+        # we cannot tell BHuman to pass to an unknown player.
+        if slot.agent_id < 0:
             continue
         pass_dist = math.hypot(
             slot.x_field - float(striker_obs.robot_x),
@@ -279,17 +356,17 @@ def smash_or_pass(
 
         agent_value = pr * gp
 
-        # PlayBall.cpp:94-98 — penalise switching pass target.
-        if target_active and last_pass_target != slot.slot_idx:
+        # PlayBall.cpp:94-98 — penalise switching pass target; keyed on agent_id.
+        if target_active and last_pass_target != slot.agent_id:
             agent_value -= decision_penalty
 
         if agent_value > best_value:
             best_value = agent_value
-            best_slot_idx = slot.slot_idx
+            best_agent_id = slot.agent_id
 
     # PlayBall.cpp:105-117 — commit.
-    if best_slot_idx >= 0:
-        return ("pass", best_slot_idx)
+    if best_agent_id >= 0:
+        return ("pass", best_agent_id)
     return ("shoot", -1)
 
 
@@ -331,6 +408,7 @@ def support_target(
     other_support_field_xy: tuple[float, float] | None,
     current_slot: tuple[float, float] | None,
     hold_tolerance_mm: float = HOLD_TOLERANCE_OPEN_MM,
+    forced_side: float | None = None,
 ) -> tuple[tuple[float, float], str]:
     """R3: choose the best support slot and decide walk-or-stand.
 
@@ -340,9 +418,20 @@ def support_target(
       - forward_rating() ← Forward::rating() pass×goal proximity
       - separation_penalty() ← Midfielder::rating() teamSeparation Gaussian
       - STAB_OFFSET_MM ← Tactic.Position.stabilityOffset
+
+    forced_side: pass ±1.0 to pin the mirror side for the episode. Deriving the
+    side from the ball's CURRENT y flips the candidates every frame when the ball
+    is driven near the centerline (|y| < 450 is the common band-scenario case);
+    the EMA then averages mirrored slots onto y≈0 and walks the support down the
+    striker's corridor — same failure mode as compute_triangle_target's per-step
+    side derivation. BHuman Tactic templates assign formation sides sticky, not
+    per-frame.
     """
     # Mirror grid y by ball side so supports stay on the ball's side of the field.
-    ball_y_sign = 1.0 if ball_field_xy[1] >= 0.0 else -1.0
+    if forced_side is not None:
+        ball_y_sign = 1.0 if forced_side >= 0.0 else -1.0
+    else:
+        ball_y_sign = 1.0 if ball_field_xy[1] >= 0.0 else -1.0
     candidates = [(x, y * ball_y_sign) for (x, y) in SUPPORT_SLOT_CANDIDATE_GRID]
 
     teammates_for_sep = [striker_field_xy]
@@ -416,23 +505,43 @@ def teacher_striker(
     """§11.B.2.1 + R2.
 
     Delegates to the existing single-agent teacher for all walk/dribble decisions.
-    When the single-agent teacher would shoot and shoot_armed, R2 smash_or_pass()
-    may override with a pass action.
+    When the single-agent teacher would shoot AND both shoot_armed and pass_armed
+    are True, R2 smash_or_pass() may override with a pass action.
+
+    Bug 6 fix: hard-gate on pass_armed via getattr with default False. Until gate.py
+    has been extended with the `pass_armed` field, this guard is structurally False
+    and no pass labels are emitted — preserving Design-A consistency before the gate,
+    obs, and mask extensions land. Once gate.py exposes pass_armed, the guard fires.
+
+    last_pass_target is the BHuman agent_id (player number) from the prior frame,
+    or None if no recent pass. The env owns this state.
     """
     decision = stage_aware_teacher_action(
         obs, stage_id, prev_skill_name, gate_decision=gate_decision,
     )
-    if decision.skill_name == "shoot" and gate_decision.shoot_armed:
-        skill, slot_idx = smash_or_pass(
+    # Defensive read — gate may not yet carry pass_armed (extension pending per §14.14).
+    pass_armed = bool(getattr(gate_decision, "pass_armed", False))
+
+    # PlayBall.cpp decides shoot-vs-pass-vs-dribble every frame while playing the
+    # ball. Restricting the pass override to shoot decisions starved pass entirely:
+    # mid-advance (where a forward support beats the striker's own xG) the
+    # single-agent teacher is dribbling, not shooting. Override either decision
+    # when the corresponding arm bit holds and R2 proposes a committed pass.
+    ball_controlled = (
+        (decision.skill_name == "shoot" and gate_decision.shoot_armed)
+        or (decision.skill_name == "dribble" and gate_decision.dribble_armed)
+    )
+    if ball_controlled and pass_armed:
+        skill, agent_id = smash_or_pass(
             obs, teammate_slots, last_pass_target, last_pass_target_age_ms,
         )
-        if skill == "pass" and slot_idx >= 0:
+        if skill == "pass" and agent_id >= 0:
             return StructuredSkillAction(
                 skill_type=SkillType.pass_,
                 target_x=0.0,
                 target_y=0.0,
                 target_theta=0.0,
-                pass_target=slot_idx,
+                pass_target=agent_id,
             )
     return decision
 
@@ -533,6 +642,165 @@ def stage_aware_team_teacher_action(
 
 
 # ---------------------------------------------------------------------------
+# Residual conversion + dataset payload (§11.B.2.1, Bug 7 fix)
+#
+# The single-agent pipeline (teacher_policy.absolute_to_residual_action) anchors
+# walk/dribble residuals on the BALL. For supports, the absolute target is a slot
+# AWAY from the ball, so the ball-anchored residual would encode "(slot - ball)"
+# and the policy could not learn the support trajectory.
+#
+# Approach B (per user decision): mirror the residual conversion locally so
+# `teacher_policy.py` is provably untouched. Striker delegates to the imported
+# absolute_to_residual_action (bit-identical to single-agent). Supports anchor
+# walk residuals on the coordination_target; supports' dribble (escape hatch on
+# off-ball-support) anchors on the ball via the imported single-agent helper.
+# ---------------------------------------------------------------------------
+
+
+def _wrap_angle(angle: float) -> float:
+    """Wrap to (-pi, pi]. Local copy of teacher_policy._wrap_angle to avoid
+    importing a private name and to keep this module self-contained."""
+    return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def build_open_lane_anchor(
+    obs: BackendObservation,
+    coordination_target: tuple[float, float],
+) -> dict[str, float]:
+    """Anchor for open-support residuals: walk toward the smoothed open-lane
+    target, facing it. Parallel to reward.build_fallback_action_targets but
+    anchored on the coordination target instead of the ball."""
+    tx, ty = coordination_target
+    return {
+        "target_x": float(tx),
+        "target_y": float(ty),
+        "target_theta": math.atan2(ty - float(obs.robot_y), tx - float(obs.robot_x)),
+    }
+
+
+def build_triangle_anchor(
+    obs: BackendObservation,
+    coordination_target: tuple[float, float],
+) -> dict[str, float]:
+    """Anchor for off-ball-support residuals. Identical math to the open-lane
+    anchor; the env applies a different EMA α (0.2 vs 0.3) to the coordination
+    target before passing it in, so the smoothing characteristic differs even
+    though the anchor function is the same."""
+    return build_open_lane_anchor(obs, coordination_target)
+
+
+def _to_residual_role(
+    action: StructuredSkillAction,
+    obs: BackendObservation,
+    role: str,
+    coordination_target: tuple[float, float] | None,
+) -> StructuredSkillAction:
+    """Role-aware absolute → residual conversion.
+
+    striker:           delegates to teacher_policy.absolute_to_residual_action.
+                       Single-agent path bit-identical preserved.
+    open_support:      walk residuals anchored on coordination_target.
+    off_ball_support:  walk residuals anchored on coordination_target;
+                       dribble residuals (escape hatch) ball-anchored via
+                       the single-agent helper.
+    non-walk/dribble:  zeros + preserve pass_target.
+    """
+    if role == "striker":
+        return absolute_to_residual_action(action, obs)
+
+    if action.skill_name not in {"walk", "dribble"}:
+        # stand / shoot / pass: zeros, preserve pass_target if any.
+        return StructuredSkillAction(
+            skill_type=action.skill_type,
+            target_x=0.0,
+            target_y=0.0,
+            target_theta=0.0,
+            pass_target=action.pass_target,
+        )
+
+    if action.skill_name == "dribble":
+        # Off-ball-support escape hatch: action targets the ball, so anchor on
+        # the ball via the existing single-agent helper.
+        return absolute_to_residual_action(action, obs)
+
+    # Support walk — anchor on coordination_target.
+    if coordination_target is None:
+        raise ValueError(
+            f"role={role!r} walking requires a coordination_target; got None"
+        )
+    if role == "open_support":
+        anchors = build_open_lane_anchor(obs, coordination_target)
+    elif role == "off_ball_support":
+        anchors = build_triangle_anchor(obs, coordination_target)
+    else:
+        raise ValueError(f"Unknown role for residual conversion: {role!r}")
+
+    residual_x = 0.0
+    if abs(float(ACTION.residual_x_range)) > 1e-6:
+        residual_x = float(np.clip(
+            (float(action.target_x) - anchors["target_x"]) / ACTION.residual_x_range,
+            -1.0, 1.0,
+        ))
+    residual_y = float(np.clip(
+        (float(action.target_y) - anchors["target_y"]) / ACTION.residual_y_range,
+        -1.0, 1.0,
+    ))
+    residual_theta = float(np.clip(
+        _wrap_angle(float(action.target_theta) - anchors["target_theta"])
+        / ACTION.residual_theta_range,
+        -1.0, 1.0,
+    ))
+    return StructuredSkillAction(
+        skill_type=action.skill_type,
+        target_x=residual_x,
+        target_y=residual_y,
+        target_theta=residual_theta,
+        pass_target=action.pass_target,
+    )
+
+
+def team_teacher_payload(
+    obs: BackendObservation,
+    stage_id: int,
+    prev_skill_name: str | None,
+    *,
+    gate_decision: GateDecision,
+    role: str,
+    coordination_target: tuple[float, float],
+    teammate_slots: list[TeammateSlot],
+    last_pass_target: int | None,
+    last_pass_target_age_ms: float,
+) -> tuple[dict[str, float], StructuredSkillAction, StructuredSkillAction]:
+    """Multi-agent analogue of teacher_policy.teacher_policy_payload.
+
+    Returns (payload, absolute_action, residual_action). The dataset generator
+    writes residual_action; payload carries the skill one-hots + role_id for BC.
+
+    Use this from teacher_production_dataset.py instead of teacher_policy_payload
+    for stage 6+ scenarios. Stage <= 5 keeps using teacher_policy_payload for
+    bit-identical single-agent labels.
+    """
+    absolute = stage_aware_team_teacher_action(
+        obs,
+        stage_id,
+        prev_skill_name,
+        gate_decision=gate_decision,
+        role=role,
+        coordination_target=coordination_target,
+        teammate_slots=teammate_slots,
+        last_pass_target=last_pass_target,
+        last_pass_target_age_ms=last_pass_target_age_ms,
+    )
+    residual = _to_residual_role(absolute, obs, role, coordination_target)
+    payload: dict[str, float] = residual.as_dict()
+    payload["policy_skill_raw"] = float(residual.skill_type)
+    for skill_name in SKILL_ORDER:
+        payload[f"policy_skill_prob_{skill_name}"] = 1.0 if skill_name == residual.skill_name else 0.0
+    payload["role_id"] = float({"striker": 0, "open_support": 1, "off_ball_support": 2}[role])
+    return payload, absolute, residual
+
+
+# ---------------------------------------------------------------------------
 # Coordination target computation — called by env each step, result EMA-smoothed there
 # ---------------------------------------------------------------------------
 
@@ -540,20 +808,27 @@ def compute_open_lane_target(
     open_support_obs: BackendObservation,
     ball_field_xy: tuple[float, float],
     striker_field_xy: tuple[float, float],
+    forced_side: float | None = None,
 ) -> tuple[float, float]:
     """Compute the raw (pre-EMA) open-lane receive position for the open_support.
 
     Strategy: pick the highest-scoring slot from SUPPORT_SLOT_CANDIDATE_GRID.
     The EMA smoothing (α=0.3) is applied in the env after this returns.
     Returns absolute field coordinates (mm).
+
+    Bug 2 fix: support_target returns (target_xy, skill_name). The xy tuple is the
+    FIRST element. Previous code used `_, best_cand = support_target(...)` which
+    assigned the skill string to best_cand and silently returned "walk"/"stand"
+    instead of coordinates.
     """
-    _, best_cand = support_target(
+    best_cand, _ = support_target(
         support_obs=open_support_obs,
         ball_field_xy=ball_field_xy,
         striker_field_xy=striker_field_xy,
         other_support_field_xy=None,
         current_slot=None,
         hold_tolerance_mm=HOLD_TOLERANCE_OPEN_MM,
+        forced_side=forced_side,
     )
     return best_cand
 
@@ -563,15 +838,26 @@ def compute_triangle_target(
     ball_field_xy: tuple[float, float],
     striker_field_xy: tuple[float, float],
     open_support_field_xy: tuple[float, float],
+    forced_side: float | None = None,
 ) -> tuple[float, float]:
     """Compute the raw (pre-EMA) triangulation vertex for the off_ball_support.
 
     Mirrors SUPPORT_SLOT_CANDIDATE_GRID y to the *opposite* side from open_support
     so the two supports spread out. The EMA (α=0.2) is applied in the env.
     Returns absolute field coordinates (mm).
+
+    forced_side: pass ±1.0 to pin the mirror side for the whole episode. Deriving
+    the side from open_support's CURRENT y every step makes the candidates flip
+    sign whenever the open support wobbles across the centerline; the EMA then
+    averages the two mirrored targets onto y≈0 and walks the off_ball support
+    straight down the striker's drive corridor (2026-06-10 collision_contexts:
+    7/9 stage-7 collisions were off_ball near y≈0 at x 1600-2100).
     """
     # Flip y: off_ball goes to the side opposite of open_support.
-    ball_y_sign_flipped = -1.0 if open_support_field_xy[1] >= 0.0 else 1.0
+    if forced_side is not None:
+        ball_y_sign_flipped = 1.0 if forced_side >= 0.0 else -1.0
+    else:
+        ball_y_sign_flipped = -1.0 if open_support_field_xy[1] >= 0.0 else 1.0
     candidates = [(x, y * ball_y_sign_flipped) for (x, y) in SUPPORT_SLOT_CANDIDATE_GRID]
 
     teammates_for_sep = [striker_field_xy, open_support_field_xy]
@@ -594,26 +880,40 @@ def teammate_slots_from_obs(
     self_obs: BackendObservation,
     agent_id_map: dict[int, int],
 ) -> list[TeammateSlot]:
-    """Build the TeammateSlot list from Block B obs indices (26:32).
+    """Build the TeammateSlot list from raw teammate_poses + teammate_ages_ms.
+
+    Bug 3 fix: BackendObservation does NOT carry `nearest_teammate_x_rel` etc. —
+    those are positions in the *encoded* 41-dim obs vector (ObsIndex 26..31), not
+    attributes on the dataclass. The raw dataclass exposes `teammate_poses` (field
+    frame), `teammate_ages_ms`, and `teammate_activities`. This builder replicates
+    the same age-filter + Euclidean-sort that environment.py:_encode_obs applies
+    when populating Block B, so the slot order here is identical to Block B's.
 
     self_obs:     the calling agent's BackendObservation.
-    agent_id_map: {slot_idx: agent_id} — caller maps Block-B slots to known agent IDs.
-                  If an agent_id is not known for a slot, pass -1.
+    agent_id_map: {slot_idx: agent_id} — the env must construct this map with the
+                  SAME filter + sort as below, so map[slot_idx] is the BHuman
+                  player number that ends up at that slot. Pass -1 for slots whose
+                  agent_id is unknown — smash_or_pass skips them.
 
-    Returns list of up to 3 TeammateSlot objects (only populated slots are included).
+    Returns up to 3 TeammateSlot objects in distance-sorted order.
     """
-    slots_data = [
-        (0, float(self_obs.nearest_teammate_x_rel), float(self_obs.nearest_teammate_y_rel)),
-        (1, float(self_obs.second_teammate_x_rel), float(self_obs.second_teammate_y_rel)),
-        (2, float(self_obs.third_teammate_x_rel), float(self_obs.third_teammate_y_rel)),
-    ]
-    slots = []
-    for slot_idx, x_rel, y_rel in slots_data:
-        # Sentinel: slot is zero-filled when no teammate is present.
-        if x_rel == 0.0 and y_rel == 0.0:
-            continue
-        x_field = float(self_obs.robot_x) + x_rel
-        y_field = float(self_obs.robot_y) + y_rel
+    self_x = float(self_obs.robot_x)
+    self_y = float(self_obs.robot_y)
+
+    # Mirror environment.py:_encode_obs fresh-and-sort logic exactly.
+    fresh: list[tuple[float, float]] = []
+    for idx, pose in enumerate(self_obs.teammate_poses):
+        age = (
+            float(self_obs.teammate_ages_ms[idx])
+            if idx < len(self_obs.teammate_ages_ms)
+            else float("inf")
+        )
+        if age <= TEAMMATE_FRESH_MAX_AGE_MS:
+            fresh.append((float(pose[0]), float(pose[1])))
+    fresh.sort(key=lambda p: (p[0] - self_x) ** 2 + (p[1] - self_y) ** 2)
+
+    slots: list[TeammateSlot] = []
+    for slot_idx, (x_field, y_field) in enumerate(fresh[:3]):
         agent_id = agent_id_map.get(slot_idx, -1)
         is_gk = x_field < GK_EXCLUDE_X_MM
         slots.append(TeammateSlot(
@@ -663,3 +963,114 @@ def _map_to_range(
     makes the semantics clear; np.interp handles reversed axes.
     """
     return float(np.interp(value, [in_lo, in_hi], [out_lo, out_hi]))
+
+
+# ---------------------------------------------------------------------------
+# Orchestration helpers (§14.17) — used by the dataset script and the env step loop
+# ---------------------------------------------------------------------------
+
+
+def ema_step(prev: tuple[float, float] | None,
+             new: tuple[float, float],
+             alpha: float) -> tuple[float, float]:
+    """One-step EMA on a 2D point. alpha=0.3 for open-lane, 0.2 for triangle (§11.B.3.2)."""
+    if prev is None:
+        return (float(new[0]), float(new[1]))
+    return (
+        alpha * float(new[0]) + (1.0 - alpha) * float(prev[0]),
+        alpha * float(new[1]) + (1.0 - alpha) * float(prev[1]),
+    )
+
+
+def build_agent_id_map(
+    self_agent_id: int,
+    agent_positions: dict[int, tuple[float, float]],
+    agent_pose_ages_ms: dict[int, float],
+) -> dict[int, int]:
+    """Build {slot_idx: agent_id} for one agent's view of its teammates.
+
+    Mirrors environment.py:_encode_obs Block-B sort/filter so the resulting
+    agent_id_map is consistent with the slot order seen by teammate_slots_from_obs.
+
+    self_agent_id:      the calling agent's player number (excluded from teammates)
+    agent_positions:    {agent_id: (x_field_mm, y_field_mm)} for ALL field agents
+                        including the caller (will be filtered out)
+    agent_pose_ages_ms: {agent_id: broadcast age ms}; stale entries filtered out
+
+    Returns up to 3 mappings, sorted-by-distance from the caller.
+    """
+    self_pos = agent_positions.get(self_agent_id)
+    if self_pos is None:
+        return {}
+    candidates = []
+    for aid, pos in agent_positions.items():
+        if aid == self_agent_id:
+            continue
+        age = float(agent_pose_ages_ms.get(aid, float("inf")))
+        if age > TEAMMATE_FRESH_MAX_AGE_MS:
+            continue
+        candidates.append((aid, pos))
+    candidates.sort(
+        key=lambda kv: (kv[1][0] - self_pos[0]) ** 2 + (kv[1][1] - self_pos[1]) ** 2
+    )
+    return {slot_idx: aid for slot_idx, (aid, _) in enumerate(candidates[:3])}
+
+
+def advance_pass_target_age(state: TeamCoordinationState, dt_ms: float) -> None:
+    """Decay every striker's last_pass_target_age_ms by dt_ms. Stale entries are
+    removed once they exceed LAST_PASS_TARGET_LIFETIME_MS so smash_or_pass treats
+    them as cleared."""
+    expired: list[int] = []
+    for striker_id, age in state.last_pass_target_age_ms_by_striker.items():
+        new_age = age + dt_ms
+        if new_age >= LAST_PASS_TARGET_LIFETIME_MS:
+            expired.append(striker_id)
+        else:
+            state.last_pass_target_age_ms_by_striker[striker_id] = new_age
+    for striker_id in expired:
+        state.last_pass_target_age_ms_by_striker.pop(striker_id, None)
+        state.last_pass_target_by_striker.pop(striker_id, None)
+
+
+def record_pass_target(state: TeamCoordinationState, striker_id: int, target_agent_id: int) -> None:
+    """Called by the orchestrator after the striker commits a pass action.
+    Resets the decay so R4 hysteresis applies during the next ~1.5 s window."""
+    state.last_pass_target_by_striker[striker_id] = int(target_agent_id)
+    state.last_pass_target_age_ms_by_striker[striker_id] = 0.0
+
+
+def build_team_gate_decision(
+    base_decision: GateDecision,
+    *,
+    role: str,
+    pass_armed: bool = False,
+    pass_arm_progress: float = 0.0,
+    observe_armed: bool = False,
+) -> GateDecision:
+    """Augment a single-agent SkillGate.step() result with multi-agent fields.
+
+    The single-agent gate computes shoot_armed/dribble_armed/shoot_arm_progress
+    from the obs alone. The orchestrator runs smash_or_pass to determine
+    pass_armed and writes the role one-hot here. The resulting GateDecision has
+    obs_features_team() populated, which the env's _encode_obs appends at
+    indices 41-46.
+
+    role must be one of "striker", "open_support", "off_ball_support".
+    """
+    import dataclasses
+    role_flags = {
+        "is_striker": role == "striker",
+        "is_open_support": role == "open_support",
+        "is_off_ball_support": role == "off_ball_support",
+    }
+    if not any(role_flags.values()):
+        raise ValueError(
+            f"Unknown role: {role!r} (expected 'striker' | 'open_support' | 'off_ball_support')"
+        )
+    return dataclasses.replace(
+        base_decision,
+        pass_armed=bool(pass_armed),
+        observe_armed=bool(observe_armed),
+        pass_arm_progress=float(pass_arm_progress),
+        **role_flags,
+    )

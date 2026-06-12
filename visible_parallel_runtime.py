@@ -282,7 +282,7 @@ class VisibleParallelRuntime:
             return
 
         bodies: list[str] = []
-        for number, y in ((2, -1.1), (3, -2.6)):
+        for number, y in ((1, 1.1), (2, -1.1), (3, -2.6), (4, 2.6)):
             if int(player_number) == number:
                 continue
             bodies.append(
@@ -302,6 +302,11 @@ class VisibleParallelRuntime:
                 '''      <Body ref="NaoDummy" name="robot22">
         <Set name="NaoColor" value="red"/>
         <Translation x="-1.6" y="2.6" z="320mm"/>
+        <Rotation z="0degree"/>
+      </Body>''',
+                '''      <Body ref="NaoDummy" name="robot23">
+        <Set name="NaoColor" value="red"/>
+        <Translation x="-2.6" y="0.0" z="320mm"/>
         <Rotation z="0degree"/>
       </Body>''',
             ]

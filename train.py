@@ -39,30 +39,89 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 # gate's armed flags (Design A: baked into the observation).
 _SHOOT_SKILL_IDX = SKILL_ORDER.index("shoot")
 _DRIBBLE_SKILL_IDX = SKILL_ORDER.index("dribble")
+_PASS_SKILL_IDX = SKILL_ORDER.index("pass")
+_OBSERVE_SKILL_IDX = SKILL_ORDER.index("observe")
+_STAND_SKILL_IDX = SKILL_ORDER.index("stand")
+_WALK_SKILL_IDX = SKILL_ORDER.index("walk")
 _GATE_OBS_REQUIRED = int(ObsIndex.dribble_armed) + 1
+_TEAM_GATE_OBS_REQUIRED = int(ObsIndex.is_off_ball_support) + 1
 
 
 def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
     """Per-step forbid-invalid mask over SKILL_ORDER, read from the baked obs columns.
 
-    Multiplicative (1=allowed, 0=forbidden): shoot/dribble follow their armed flag.
-    Once a finish skill is armed, stand/walk are masked out too; otherwise a policy
-    can park on the ball and fail the clean-takeover contract while the env still
-    reports a valid dribble/shoot opportunity. Because it is a pure function of the
-    stored observation, MAPPO's update-time recompute reproduces it exactly. Legacy
-    (pre-gate) observations that lack the armed columns fall back to all-allowed.
+    Multiplicative (1=allowed, 0=forbidden). Reads only obs columns:
+      23 (shoot_armed), 24 (dribble_armed),
+      41 (pass_armed), 42 (observe_armed),
+      44 (is_striker), 45 (is_open_support), 46 (is_off_ball_support).
+
+    Behaviour:
+      * Legacy obs (shape < 25) → all-allowed (back-compat smoke tests).
+      * Obs in [25, 47) → single-agent contract preserved bit-identical:
+          shoot/dribble follow their armed flag; once finish-armed, stand/walk are
+          masked too. This matches the validated 4/5 single-agent baseline.
+      * Obs ≥ 47 with role bits set → role-conditioned forbid per §11.A.4:
+          - striker: standard single-agent gate, plus pass when pass_armed.
+          - open_support: only stand+walk (no shoot, no dribble, no pass).
+          - off_ball_support: stand+walk, plus dribble (unexpected-possession
+            escape hatch), no shoot, no pass.
+          - any non-striker may execute observe when observe_armed.
+      * Obs ≥ 47 with no role bits set (e.g. zero-padded single-agent rollout)
+        → falls back to the single-agent contract above.
+
+    Because the mask is a pure function of stored obs columns, MAPPO's update-time
+    recompute reproduces it exactly. Design A holds end-to-end.
     """
     batch = observations.shape[0]
     mask = torch.ones((batch, len(SKILL_ORDER)), dtype=observations.dtype, device=observations.device)
     if observations.shape[-1] < _GATE_OBS_REQUIRED:
         return mask
+
     shoot_armed = observations[:, int(ObsIndex.shoot_armed)] >= 0.5
     dribble_armed = observations[:, int(ObsIndex.dribble_armed)] >= 0.5
     finish_armed = shoot_armed | dribble_armed
-    mask[:, _SHOOT_SKILL_IDX] = shoot_armed.to(mask.dtype)
-    mask[:, _DRIBBLE_SKILL_IDX] = dribble_armed.to(mask.dtype)
-    mask[:, SKILL_ORDER.index("stand")] = (~finish_armed).to(mask.dtype)
-    mask[:, SKILL_ORDER.index("walk")] = (~finish_armed).to(mask.dtype)
+
+    # ---- Single-agent path (preserves the validated 4/5 contract bit-identical) -----
+    if observations.shape[-1] < _TEAM_GATE_OBS_REQUIRED:
+        mask[:, _SHOOT_SKILL_IDX] = shoot_armed.to(mask.dtype)
+        mask[:, _DRIBBLE_SKILL_IDX] = dribble_armed.to(mask.dtype)
+        mask[:, _STAND_SKILL_IDX] = (~finish_armed).to(mask.dtype)
+        mask[:, _WALK_SKILL_IDX] = (~finish_armed).to(mask.dtype)
+        return mask
+
+    # ---- Multi-agent role-conditioned path -----------------------------------------
+    pass_armed = observations[:, int(ObsIndex.pass_armed)] >= 0.5
+    observe_armed = observations[:, int(ObsIndex.observe_armed)] >= 0.5
+    is_striker = observations[:, int(ObsIndex.is_striker)] >= 0.5
+    is_open = observations[:, int(ObsIndex.is_open_support)] >= 0.5
+    is_off_ball = observations[:, int(ObsIndex.is_off_ball_support)] >= 0.5
+    has_role = is_striker | is_open | is_off_ball
+
+    # Default: stand and walk always allowed (never-forbid contract).
+    mask[:, _STAND_SKILL_IDX] = torch.ones_like(mask[:, _STAND_SKILL_IDX])
+    mask[:, _WALK_SKILL_IDX] = torch.ones_like(mask[:, _WALK_SKILL_IDX])
+
+    # No role bits set → fall back to single-agent gate (e.g. zero-padded legacy obs).
+    single_agent = ~has_role
+    sa_mask_shoot = shoot_armed & single_agent
+    sa_mask_dribble = dribble_armed & single_agent
+    sa_finish = finish_armed & single_agent
+    mask[:, _STAND_SKILL_IDX] = torch.where(single_agent, (~sa_finish).to(mask.dtype), mask[:, _STAND_SKILL_IDX])
+    mask[:, _WALK_SKILL_IDX] = torch.where(single_agent, (~sa_finish).to(mask.dtype), mask[:, _WALK_SKILL_IDX])
+
+    # Striker: shoot/dribble follow their armed flag; pass requires pass_armed.
+    mask[:, _SHOOT_SKILL_IDX] = (shoot_armed & (is_striker | single_agent)).to(mask.dtype)
+    mask[:, _PASS_SKILL_IDX] = (pass_armed & is_striker).to(mask.dtype)
+    # Dribble allowed for striker (armed) AND for off-ball-support (armed; escape hatch).
+    mask[:, _DRIBBLE_SKILL_IDX] = (
+        (dribble_armed & is_striker)
+        | (dribble_armed & is_off_ball)
+        | sa_mask_dribble
+    ).to(mask.dtype)
+
+    # Observe allowed for any non-striker when armed.
+    mask[:, _OBSERVE_SKILL_IDX] = (observe_armed & (~is_striker) & has_role).to(mask.dtype)
+
     return mask
 
 

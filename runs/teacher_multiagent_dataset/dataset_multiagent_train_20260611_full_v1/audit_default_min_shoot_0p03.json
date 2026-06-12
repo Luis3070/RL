@@ -1,0 +1,142 @@
+{
+  "checks": {
+    "all_scenarios_kept": true,
+    "computed_role_mask_consistent": true,
+    "coord_diverse": true,
+    "episodes_min": true,
+    "goal_vector_live": true,
+    "has_open_support_rows": true,
+    "has_striker_rows": true,
+    "label_consistent_all": true,
+    "obs_size_47": true,
+    "off_ball_hold_present": true,
+    "open_support_hold_present": true,
+    "rows_min": true,
+    "stage_present": true,
+    "striker_dribble_armed_min": true,
+    "striker_dribble_frac_min": true,
+    "striker_pass_armed_min": true,
+    "striker_shoot_armed_min": true,
+    "striker_shoot_frac_min": false,
+    "summary_gate_consistent": true,
+    "summary_role_mask_consistent": true,
+    "team_ball_distinct_from_goal": true,
+    "teammate_block_live": true
+  },
+  "consistency": {
+    "positive_weight_role_mask_bad_rows": 0,
+    "role_mask_bad_rows": 0
+  },
+  "counts": {
+    "role_counts": {
+      "off_ball_support": 73528,
+      "open_support": 145600,
+      "striker": 136380
+    },
+    "role_skill_counts": {
+      "off_ball_support/dribble": 295,
+      "off_ball_support/stand": 47002,
+      "off_ball_support/walk": 26231,
+      "open_support/stand": 96552,
+      "open_support/walk": 49048,
+      "striker/dribble": 21119,
+      "striker/pass": 11808,
+      "striker/shoot": 3995,
+      "striker/walk": 99458
+    },
+    "skill_counts": {
+      "dribble": 21414,
+      "pass": 11808,
+      "shoot": 3995,
+      "stand": 143554,
+      "walk": 174737
+    },
+    "striker_skill_counts": {
+      "dribble": 21119,
+      "pass": 11808,
+      "shoot": 3995,
+      "walk": 99458
+    },
+    "unique_coord_bins_250mm": 304
+  },
+  "dataset_dir": "runs/teacher_multiagent_dataset/dataset_multiagent_train_20260611_full_v1",
+  "obs_liveness": {
+    "goal_vector_live": true,
+    "team_ball_distinct_from_goal": true,
+    "teammate_block_live": true
+  },
+  "passed": false,
+  "striker_gate_quality": {
+    "dribble_armed_rows": 38406,
+    "dribble_frac": 0.1548540841765655,
+    "min_dribble_armed_rows": 1,
+    "min_dribble_frac": 0.15,
+    "min_pass_armed_rows": 1,
+    "min_shoot_armed_rows": 1,
+    "min_shoot_frac": 0.03,
+    "pass_armed_rows": 12000,
+    "per_stage_striker": {
+      "6": {
+        "dribble_frac": 0.07391253267541928,
+        "pass_armed_rows": 7761,
+        "rows": 68094,
+        "shoot_armed_rows": 2022,
+        "shoot_frac": 0.0227773372103269
+      },
+      "7": {
+        "dribble_frac": 0.23556805201651876,
+        "pass_armed_rows": 4239,
+        "rows": 68286,
+        "shoot_armed_rows": 2848,
+        "shoot_frac": 0.035790645227425824
+      }
+    },
+    "shoot_armed_rows": 4870,
+    "shoot_frac": 0.02929315148848805
+  },
+  "summary": {
+    "drop_reasons": {
+      "agent_out_of_bounds": 73,
+      "open_support_hold_too_short": 1,
+      "reset_ball_drift": 15,
+      "role_thrash(11)": 2,
+      "role_thrash(12)": 2,
+      "role_thrash(13)": 3,
+      "role_thrash(14)": 2,
+      "role_thrash(15)": 4,
+      "role_thrash(16)": 2,
+      "role_thrash(17)": 3,
+      "role_thrash(18)": 3,
+      "role_thrash(19)": 3,
+      "role_thrash(20)": 1,
+      "role_thrash(21)": 3,
+      "role_thrash(24)": 1,
+      "role_thrash(27)": 1,
+      "role_thrash(35)": 1,
+      "role_thrash(36)": 1,
+      "role_thrash(42)": 1,
+      "teammate_collision": 187
+    },
+    "obs_size": 47,
+    "scenario_kept_episodes": {
+      "team_2v0_clean_band": 90,
+      "team_2v0_static_blocker": 30,
+      "team_3v0_clean": 2,
+      "team_3v0_dynamic": 28,
+      "team_3v0_static_pinch": 20,
+      "team_3v3_full_dynamic": 42
+    },
+    "stage_id": -1,
+    "total_episodes": 212,
+    "total_rows": 355508
+  },
+  "support_quality": {
+    "off_ball_hold_radius_mm": 600.0,
+    "off_ball_hold_steps": 54085,
+    "open_dist_mean_mm": 394.40972900390625,
+    "open_dist_min_mm": 16.631650924682617,
+    "open_dist_p10_mm": 151.14596557617188,
+    "open_hold_radius_mm": 600.0,
+    "open_hold_steps": 118003
+  }
+}

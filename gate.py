@@ -140,6 +140,17 @@ class GateDecision:
     dribble_armed: bool
     shoot_arm_progress: float  # [0,1]: 1.0 when armed, else debounce fill toward arming
     allowed_skills: tuple[str, ...]
+    # --- Multi-agent extension (Design A continued) ---------------------------------
+    # All fields default to False/0.0 so the legacy single-agent path keeps producing
+    # identical GateDecision objects via SkillGate.step(); the env constructs the
+    # extended decision via `dataclasses.replace(decision, pass_armed=..., is_striker=..., ...)`
+    # before encoding the 47-dim obs. See gate.GateDecision.obs_features_team().
+    pass_armed: bool = False
+    observe_armed: bool = False
+    pass_arm_progress: float = 0.0       # [0,1]: 1.0 when armed, else debounce fill
+    is_striker: bool = False
+    is_open_support: bool = False
+    is_off_ball_support: bool = False
 
     def obs_features(self) -> list[float]:
         """Ordered to match ObsIndex.{shoot_armed, dribble_armed, shoot_arm_progress}."""
@@ -147,6 +158,21 @@ class GateDecision:
             1.0 if self.shoot_armed else 0.0,
             1.0 if self.dribble_armed else 0.0,
             float(self.shoot_arm_progress),
+        ]
+
+    def obs_features_team(self) -> list[float]:
+        """Six floats for ObsIndex 41-46: pass_armed, observe_armed, pass_arm_progress,
+        is_striker, is_open_support, is_off_ball_support. Order is the obs contract —
+        any change here must update observation.ObsIndex AND
+        train.py:gate_skill_mask_from_obs in lockstep.
+        """
+        return [
+            1.0 if self.pass_armed else 0.0,
+            1.0 if self.observe_armed else 0.0,
+            float(self.pass_arm_progress),
+            1.0 if self.is_striker else 0.0,
+            1.0 if self.is_open_support else 0.0,
+            1.0 if self.is_off_ball_support else 0.0,
         ]
 
 

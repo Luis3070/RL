@@ -61,7 +61,7 @@ def _make_obs(**overrides) -> BackendObservation:
     return BackendObservation(**base)
 
 
-def test_mappo_obs_and_state_spaces_are_41_dimensional():
+def test_mappo_obs_and_state_spaces_are_47_dimensional():
     env = RealSimRobotEnv()
     try:
         assert env.observation_space("player_1").shape == (OBS_SIZE,)

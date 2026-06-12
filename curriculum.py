@@ -17,6 +17,11 @@ WALK_ONLY_SKILLS = ("stand", "walk")
 TAKEOVER_SKILLS = ("stand", "walk", "dribble")
 MASKED_SKILLS = ("pass", "mark", "block", "observe")
 
+# Multi-agent skill set: striker may emit pass when smashOrPass fires AND pass_armed.
+# mark/block/observe stay masked off this sprint (need opponents in obs and a
+# defensive teacher branch). See .docs/10 §14.4 and §14.26 for the deferred work.
+ACTIVE_SKILLS_MA = ("stand", "walk", "dribble", "shoot", "pass")
+
 
 @dataclass(frozen=True)
 class StageSpec:
@@ -43,6 +48,10 @@ class DynamicWorldState:
 
 
 def _scene_path(stage_id: int, simrobot_profile: str) -> Path:
+    if simrobot_profile == "3d_visible" and stage_id == 6:
+        return BHUMAN_DIR / "Config/Scenes/RLMAStage6_3D.ros2"
+    if simrobot_profile == "3d_visible" and stage_id == 7:
+        return BHUMAN_DIR / "Config/Scenes/RLMAStage7_3D.ros2"
     if simrobot_profile == "2d":
         if stage_id >= 2:
             return BHUMAN_DIR / "Config/Scenes/RLFull.ros2d"
@@ -333,6 +342,40 @@ _STAGE_SPECS = {
         dynamic_update_interval_steps=4,
     ),
 }
+
+
+# Multi-agent stages 6 (warmup 2v0) and 7 (adversarial 3v3 vs full BH) — §14.21 LOCKED.
+# Reward weights inherit stage-4's production weights; team-specific terms (pass_attempt,
+# pass_completed, support_open_hold, team_goal_bonus, role_thrash, teammate_separation)
+# are applied via the reward shaper at runtime when role_id is present in the info packet
+# rather than baked into RewardWeights — keeps the dataclass backward-compatible.
+_STAGE_4_REWARDS = _STAGE_SPECS[4].reward_weights
+_STAGE_SPECS[6] = StageSpec(
+    stage_id=6,
+    name="multiagent_warmup_2v0",
+    description="1 BH GK + 2 RL field. Warmup: role one-hot + pass head; minimum opponent exposure.",
+    ball_radius_min_mm=600.0,
+    ball_radius_max_mm=None,
+    full_field=False,
+    obstacle_mode="static",
+    active_skill_names=ACTIVE_SKILLS_MA,
+    reward_weights=_STAGE_4_REWARDS,
+    max_episode_steps=400,
+    dynamic_update_interval_steps=0,
+)
+_STAGE_SPECS[7] = StageSpec(
+    stage_id=7,
+    name="multiagent_adversarial_3v3",
+    description="1 BH GK + 3 RL field vs full BH. Monday demo configuration.",
+    ball_radius_min_mm=600.0,
+    ball_radius_max_mm=None,
+    full_field=True,
+    obstacle_mode="dynamic",
+    active_skill_names=ACTIVE_SKILLS_MA,
+    reward_weights=_STAGE_4_REWARDS,
+    max_episode_steps=400,
+    dynamic_update_interval_steps=4,
+)
 
 
 def get_stage_spec(stage_id: int) -> StageSpec:

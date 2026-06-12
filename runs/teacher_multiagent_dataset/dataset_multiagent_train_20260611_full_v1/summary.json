@@ -1,0 +1,1641 @@
+{
+  "created_at": "2026-06-11T23:15:02",
+  "dataset_dirs": [
+    "/home/luis/GitHub/RL/runs/teacher_multiagent_dataset/dataset_stage6_20260610_232140",
+    "/home/luis/GitHub/RL/runs/teacher_multiagent_dataset/dataset_stage7_20260611_182346",
+    "/home/luis/GitHub/RL/runs/teacher_multiagent_dataset/dataset_stage7_20260611_202636"
+  ],
+  "filters": {
+    "collision_radius_mm": 350.0,
+    "collision_sustain_steps": 16,
+    "max_role_swaps_per_episode": 10,
+    "min_off_ball_hold_steps": 30,
+    "min_open_hold_steps": 20,
+    "off_ball_hold_radius_mm": 600.0,
+    "open_support_hold_radius_mm": 600.0,
+    "pass_intercepted_drop": true,
+    "team_state_injection": true
+  },
+  "full_weight_samples": 355508,
+  "gate_config": {
+    "dribble_arm_frames": 1,
+    "dribble_enter_angle_rad": 0.6108652381980153,
+    "dribble_enter_ball_mm": 450.0,
+    "dribble_exit_angle_rad": 0.9599310885968813,
+    "dribble_exit_ball_mm": 600.0,
+    "dribble_grace_enter_age_ms": 1500.0,
+    "dribble_grace_hold_age_ms": 2500.0,
+    "shoot_align_enter_rad": 0.5235987755982988,
+    "shoot_align_exit_rad": 0.7853981633974483,
+    "shoot_arm_frames": 3,
+    "shoot_enter_angle_rad": 0.4363323129985824,
+    "shoot_enter_ball_mm": 380.0,
+    "shoot_exit_angle_rad": 0.6108652381980153,
+    "shoot_exit_ball_mm": 460.0,
+    "shoot_goal_enter_mm": 3000.0,
+    "shoot_goal_exit_mm": 3200.0,
+    "shoot_open_enter": 0.3,
+    "shoot_open_exit": 0.2,
+    "trusted_max_age_ms": 600.0
+  },
+  "obs_size": 47,
+  "output_dir": "/home/luis/GitHub/RL/runs/teacher_multiagent_dataset/dataset_multiagent_train_20260611_full_v1",
+  "positive_samples": 355508,
+  "positive_skill_counts": {
+    "dribble": 21414,
+    "pass": 11808,
+    "shoot": 3995,
+    "stand": 143554,
+    "walk": 174737
+  },
+  "positive_weight_gate_label_consistent": true,
+  "positive_weight_role_mask_consistent": true,
+  "scenarios": [
+    {
+      "drop_reasons": {
+        "agent_out_of_bounds": 21,
+        "open_support_hold_too_short": 1,
+        "reset_ball_drift": 9,
+        "teammate_collision": 132
+      },
+      "kept_episodes": 90,
+      "name": "team_2v0_clean_band",
+      "rows": 108000,
+      "stage_id": 6
+    },
+    {
+      "drop_reasons": {
+        "teammate_collision": 11
+      },
+      "kept_episodes": 30,
+      "name": "team_2v0_static_blocker",
+      "rows": 36000,
+      "stage_id": 6
+    },
+    {
+      "drop_reasons": {
+        "agent_out_of_bounds": 31,
+        "reset_ball_drift": 2,
+        "role_thrash(11)": 1,
+        "teammate_collision": 6
+      },
+      "kept_episodes": 2,
+      "name": "team_3v0_clean",
+      "rows": 4800,
+      "stage_id": 7
+    },
+    {
+      "drop_reasons": {
+        "agent_out_of_bounds": 6,
+        "role_thrash(12)": 1,
+        "role_thrash(24)": 1,
+        "role_thrash(35)": 1,
+        "teammate_collision": 5
+      },
+      "kept_episodes": 28,
+      "name": "team_3v0_dynamic",
+      "rows": 67200,
+      "stage_id": 7
+    },
+    {
+      "drop_reasons": {
+        "agent_out_of_bounds": 15,
+        "reset_ball_drift": 3,
+        "role_thrash(11)": 1,
+        "role_thrash(13)": 1,
+        "role_thrash(14)": 2,
+        "role_thrash(15)": 2,
+        "role_thrash(16)": 2,
+        "role_thrash(17)": 3,
+        "role_thrash(18)": 3,
+        "role_thrash(19)": 1,
+        "role_thrash(21)": 1,
+        "role_thrash(27)": 1,
+        "role_thrash(36)": 1,
+        "teammate_collision": 24
+      },
+      "kept_episodes": 20,
+      "name": "team_3v0_static_pinch",
+      "rows": 48000,
+      "stage_id": 7
+    },
+    {
+      "drop_reasons": {
+        "reset_ball_drift": 1,
+        "role_thrash(12)": 1,
+        "role_thrash(13)": 2,
+        "role_thrash(15)": 2,
+        "role_thrash(19)": 2,
+        "role_thrash(20)": 1,
+        "role_thrash(21)": 2,
+        "role_thrash(42)": 1,
+        "teammate_collision": 9
+      },
+      "kept_episodes": 42,
+      "name": "team_3v3_full_dynamic",
+      "rows": 100800,
+      "stage_id": 7
+    }
+  ],
+  "source_summaries": [
+    {
+      "active_rl_players": [
+        1,
+        2
+      ],
+      "episodes_per_scenario": 30,
+      "filters": {
+        "collision_radius_mm": 350.0,
+        "collision_sustain_steps": 16,
+        "max_role_swaps_per_episode": 10,
+        "min_off_ball_hold_steps": 30,
+        "min_open_hold_steps": 20,
+        "off_ball_hold_radius_mm": 600.0,
+        "open_support_hold_radius_mm": 600.0,
+        "pass_intercepted_drop": true,
+        "team_state_injection": true
+      },
+      "gate_config": {
+        "dribble_arm_frames": 1,
+        "dribble_enter_angle_rad": 0.6108652381980153,
+        "dribble_enter_ball_mm": 450.0,
+        "dribble_exit_angle_rad": 0.9599310885968813,
+        "dribble_exit_ball_mm": 600.0,
+        "dribble_grace_enter_age_ms": 1500.0,
+        "dribble_grace_hold_age_ms": 2500.0,
+        "shoot_align_enter_rad": 0.5235987755982988,
+        "shoot_align_exit_rad": 0.7853981633974483,
+        "shoot_arm_frames": 3,
+        "shoot_enter_angle_rad": 0.4363323129985824,
+        "shoot_enter_ball_mm": 380.0,
+        "shoot_exit_angle_rad": 0.6108652381980153,
+        "shoot_exit_ball_mm": 460.0,
+        "shoot_goal_enter_mm": 3000.0,
+        "shoot_goal_exit_mm": 3200.0,
+        "shoot_open_enter": 0.3,
+        "shoot_open_exit": 0.2,
+        "trusted_max_age_ms": 600.0
+      },
+      "max_steps_per_episode": 600,
+      "obs_size": 47,
+      "positive_weight_gate_label_consistent": true,
+      "positive_weight_role_mask_consistent": true,
+      "pybh_rl_shm_name": "/pybh_rl_ma_teacher_stage6_297341",
+      "scenarios": [
+        {
+          "attempted_episodes": 253,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1745,
+                  839
+                ],
+                [
+                  1955,
+                  626
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 357
+            },
+            {
+              "attempt": 1,
+              "pair_pos": [
+                [
+                  1902,
+                  700
+                ],
+                [
+                  2088,
+                  665
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 304
+            },
+            {
+              "attempt": 7,
+              "pair_pos": [
+                [
+                  1792,
+                  752
+                ],
+                [
+                  1936,
+                  573
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 329
+            },
+            {
+              "attempt": 10,
+              "pair_pos": [
+                [
+                  1633,
+                  410
+                ],
+                [
+                  1909,
+                  459
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 174
+            },
+            {
+              "attempt": 28,
+              "pair_pos": [
+                [
+                  1753,
+                  -760
+                ],
+                [
+                  1953,
+                  -639
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 323
+            },
+            {
+              "attempt": 29,
+              "pair_pos": [
+                [
+                  1942,
+                  704
+                ],
+                [
+                  2013,
+                  451
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 337
+            },
+            {
+              "attempt": 31,
+              "pair_pos": [
+                [
+                  1660,
+                  -585
+                ],
+                [
+                  1950,
+                  -500
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 315
+            },
+            {
+              "attempt": 32,
+              "pair_pos": [
+                [
+                  1795,
+                  -737
+                ],
+                [
+                  1973,
+                  -760
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 349
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 21,
+            "open_support_hold_too_short": 1,
+            "reset_ball_drift": 9,
+            "teammate_collision": 132
+          },
+          "dropped_episodes": 163,
+          "elapsed_s": 5712.263561184999,
+          "kept_episodes": 90,
+          "name": "team_2v0_clean_band",
+          "role_step_counts": {
+            "open_support": 54000,
+            "striker": 54000
+          },
+          "skipped_masked_label_rows": 7692,
+          "stage_id": 6
+        },
+        {
+          "attempted_episodes": 41,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1883,
+                  -700
+                ],
+                [
+                  2035,
+                  -581
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 373
+            },
+            {
+              "attempt": 3,
+              "pair_pos": [
+                [
+                  1645,
+                  654
+                ],
+                [
+                  1766,
+                  647
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 146
+            },
+            {
+              "attempt": 15,
+              "pair_pos": [
+                [
+                  2381,
+                  887
+                ],
+                [
+                  2430,
+                  649
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 358
+            },
+            {
+              "attempt": 16,
+              "pair_pos": [
+                [
+                  1818,
+                  -714
+                ],
+                [
+                  2031,
+                  -674
+                ]
+              ],
+              "pair_roles": [
+                "striker",
+                "open_support"
+              ],
+              "step": 363
+            },
+            {
+              "attempt": 20,
+              "pair_pos": [
+                [
+                  2284,
+                  -750
+                ],
+                [
+                  2243,
+                  -960
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 367
+            },
+            {
+              "attempt": 22,
+              "pair_pos": [
+                [
+                  1498,
+                  888
+                ],
+                [
+                  1565,
+                  551
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 209
+            },
+            {
+              "attempt": 23,
+              "pair_pos": [
+                [
+                  1912,
+                  540
+                ],
+                [
+                  1826,
+                  767
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 521
+            },
+            {
+              "attempt": 24,
+              "pair_pos": [
+                [
+                  1688,
+                  801
+                ],
+                [
+                  1867,
+                  897
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 384
+            }
+          ],
+          "drop_reasons": {
+            "teammate_collision": 11
+          },
+          "dropped_episodes": 11,
+          "elapsed_s": 944.2326208919985,
+          "kept_episodes": 30,
+          "name": "team_2v0_static_blocker",
+          "role_step_counts": {
+            "open_support": 18000,
+            "striker": 18000
+          },
+          "skipped_masked_label_rows": 1440,
+          "stage_id": 6
+        }
+      ],
+      "stage_id": 6,
+      "total_episodes": 120,
+      "total_rows": 140094,
+      "visible_parallel_slots": true,
+      "visible_scene_name": "RL1v0_3D_visible"
+    },
+    {
+      "active_rl_players": [
+        1,
+        2,
+        3
+      ],
+      "episodes_per_scenario": 7,
+      "filters": {
+        "collision_radius_mm": 350.0,
+        "collision_sustain_steps": 16,
+        "max_role_swaps_per_episode": 10,
+        "min_off_ball_hold_steps": 30,
+        "min_open_hold_steps": 20,
+        "off_ball_hold_radius_mm": 600.0,
+        "open_support_hold_radius_mm": 600.0,
+        "pass_intercepted_drop": true,
+        "team_state_injection": true
+      },
+      "gate_config": {
+        "dribble_arm_frames": 1,
+        "dribble_enter_angle_rad": 0.6108652381980153,
+        "dribble_enter_ball_mm": 450.0,
+        "dribble_exit_angle_rad": 0.9599310885968813,
+        "dribble_exit_ball_mm": 600.0,
+        "dribble_grace_enter_age_ms": 1500.0,
+        "dribble_grace_hold_age_ms": 2500.0,
+        "shoot_align_enter_rad": 0.5235987755982988,
+        "shoot_align_exit_rad": 0.7853981633974483,
+        "shoot_arm_frames": 3,
+        "shoot_enter_angle_rad": 0.4363323129985824,
+        "shoot_enter_ball_mm": 380.0,
+        "shoot_exit_angle_rad": 0.6108652381980153,
+        "shoot_exit_ball_mm": 460.0,
+        "shoot_goal_enter_mm": 3000.0,
+        "shoot_goal_exit_mm": 3200.0,
+        "shoot_open_enter": 0.3,
+        "shoot_open_exit": 0.2,
+        "trusted_max_age_ms": 600.0
+      },
+      "max_steps_per_episode": 800,
+      "obs_size": 47,
+      "positive_weight_gate_label_consistent": true,
+      "positive_weight_role_mask_consistent": true,
+      "pybh_rl_shm_name": "/pybh_rl_ma_teacher_stage7_18067",
+      "scenarios": [
+        {
+          "attempted_episodes": 21,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1752,
+                  736
+                ],
+                [
+                  2001,
+                  716
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 290
+            },
+            {
+              "attempt": 1,
+              "pair_pos": [
+                [
+                  -3202,
+                  3645
+                ],
+                [
+                  -3214,
+                  3640
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "off_ball_support"
+              ],
+              "step": 16
+            },
+            {
+              "attempt": 4,
+              "pair_pos": [
+                [
+                  1770,
+                  -658
+                ],
+                [
+                  1860,
+                  -704
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 304
+            },
+            {
+              "attempt": 8,
+              "pair_pos": [
+                [
+                  1840,
+                  688
+                ],
+                [
+                  2027,
+                  548
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 315
+            },
+            {
+              "attempt": 10,
+              "pair_pos": [
+                [
+                  1903,
+                  834
+                ],
+                [
+                  2011,
+                  561
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 310
+            },
+            {
+              "attempt": 12,
+              "pair_pos": [
+                [
+                  1706,
+                  708
+                ],
+                [
+                  1717,
+                  653
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 214
+            },
+            {
+              "attempt": 14,
+              "pair_pos": [
+                [
+                  1818,
+                  -768
+                ],
+                [
+                  2040,
+                  -787
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 320
+            },
+            {
+              "attempt": 18,
+              "pair_pos": [
+                [
+                  1858,
+                  786
+                ],
+                [
+                  2043,
+                  712
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 326
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 18,
+            "reset_ball_drift": 2,
+            "teammate_collision": 1
+          },
+          "dropped_episodes": 21,
+          "elapsed_s": 1019.7480250950001,
+          "kept_episodes": 0,
+          "name": "team_3v0_clean",
+          "role_step_counts": {},
+          "skipped_masked_label_rows": 793,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 37,
+          "collision_contexts": [
+            {
+              "attempt": 3,
+              "pair_pos": [
+                [
+                  2210,
+                  -704
+                ],
+                [
+                  2152,
+                  -480
+                ]
+              ],
+              "pair_roles": [
+                "striker",
+                "off_ball_support"
+              ],
+              "step": 317
+            },
+            {
+              "attempt": 4,
+              "pair_pos": [
+                [
+                  1336,
+                  -668
+                ],
+                [
+                  1468,
+                  -389
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 137
+            },
+            {
+              "attempt": 8,
+              "pair_pos": [
+                [
+                  1750,
+                  680
+                ],
+                [
+                  1829,
+                  485
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 254
+            },
+            {
+              "attempt": 9,
+              "pair_pos": [
+                [
+                  1763,
+                  943
+                ],
+                [
+                  2003,
+                  881
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 577
+            },
+            {
+              "attempt": 14,
+              "pair_pos": [
+                [
+                  1562,
+                  -611
+                ],
+                [
+                  1810,
+                  -579
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 163
+            },
+            {
+              "attempt": 15,
+              "pair_pos": [
+                [
+                  1656,
+                  -730
+                ],
+                [
+                  1840,
+                  -745
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 346
+            },
+            {
+              "attempt": 16,
+              "pair_pos": [
+                [
+                  1624,
+                  -717
+                ],
+                [
+                  1926,
+                  -837
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 310
+            },
+            {
+              "attempt": 22,
+              "pair_pos": [
+                [
+                  1767,
+                  -764
+                ],
+                [
+                  1894,
+                  -901
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 320
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 3,
+            "reset_ball_drift": 3,
+            "role_thrash(13)": 1,
+            "role_thrash(15)": 1,
+            "role_thrash(16)": 2,
+            "role_thrash(17)": 3,
+            "role_thrash(18)": 2,
+            "role_thrash(19)": 1,
+            "role_thrash(21)": 1,
+            "role_thrash(27)": 1,
+            "teammate_collision": 9
+          },
+          "dropped_episodes": 27,
+          "elapsed_s": 2319.16627799,
+          "kept_episodes": 10,
+          "name": "team_3v0_static_pinch",
+          "role_step_counts": {
+            "off_ball_support": 8000,
+            "open_support": 8000,
+            "striker": 8000
+          },
+          "skipped_masked_label_rows": 1498,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 20,
+          "collision_contexts": [
+            {
+              "attempt": 8,
+              "pair_pos": [
+                [
+                  1609,
+                  900
+                ],
+                [
+                  1541,
+                  734
+                ]
+              ],
+              "pair_roles": [
+                "striker",
+                "off_ball_support"
+              ],
+              "step": 554
+            },
+            {
+              "attempt": 11,
+              "pair_pos": [
+                [
+                  1908,
+                  -479
+                ],
+                [
+                  2192,
+                  -653
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 373
+            },
+            {
+              "attempt": 15,
+              "pair_pos": [
+                [
+                  1962,
+                  -742
+                ],
+                [
+                  1945,
+                  -882
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 378
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 2,
+            "role_thrash(24)": 1,
+            "role_thrash(35)": 1,
+            "teammate_collision": 2
+          },
+          "dropped_episodes": 6,
+          "elapsed_s": 1841.17321919,
+          "kept_episodes": 14,
+          "name": "team_3v0_dynamic",
+          "role_step_counts": {
+            "off_ball_support": 11200,
+            "open_support": 11200,
+            "striker": 11200
+          },
+          "skipped_masked_label_rows": 1043,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 34,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1783,
+                  553
+                ],
+                [
+                  1948,
+                  584
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 422
+            },
+            {
+              "attempt": 10,
+              "pair_pos": [
+                [
+                  1826,
+                  -475
+                ],
+                [
+                  1926,
+                  -645
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 481
+            },
+            {
+              "attempt": 12,
+              "pair_pos": [
+                [
+                  1886,
+                  -738
+                ],
+                [
+                  2038,
+                  -689
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 791
+            },
+            {
+              "attempt": 28,
+              "pair_pos": [
+                [
+                  1842,
+                  -760
+                ],
+                [
+                  2022,
+                  -776
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 449
+            }
+          ],
+          "drop_reasons": {
+            "role_thrash(12)": 1,
+            "role_thrash(13)": 2,
+            "role_thrash(15)": 2,
+            "role_thrash(19)": 1,
+            "role_thrash(21)": 2,
+            "role_thrash(42)": 1,
+            "teammate_collision": 4
+          },
+          "dropped_episodes": 13,
+          "elapsed_s": 2144.6164999129996,
+          "kept_episodes": 21,
+          "name": "team_3v3_full_dynamic",
+          "role_step_counts": {
+            "off_ball_support": 16800,
+            "open_support": 16800,
+            "striker": 16800
+          },
+          "skipped_masked_label_rows": 1840,
+          "stage_id": 7
+        }
+      ],
+      "stage_id": 7,
+      "total_episodes": 45,
+      "total_rows": 105624,
+      "visible_parallel_slots": true,
+      "visible_scene_name": "RL1v0_3D_visible"
+    },
+    {
+      "active_rl_players": [
+        1,
+        2,
+        3
+      ],
+      "episodes_per_scenario": 7,
+      "filters": {
+        "collision_radius_mm": 350.0,
+        "collision_sustain_steps": 16,
+        "max_role_swaps_per_episode": 10,
+        "min_off_ball_hold_steps": 30,
+        "min_open_hold_steps": 20,
+        "off_ball_hold_radius_mm": 600.0,
+        "open_support_hold_radius_mm": 600.0,
+        "pass_intercepted_drop": true,
+        "team_state_injection": true
+      },
+      "gate_config": {
+        "dribble_arm_frames": 1,
+        "dribble_enter_angle_rad": 0.6108652381980153,
+        "dribble_enter_ball_mm": 450.0,
+        "dribble_exit_angle_rad": 0.9599310885968813,
+        "dribble_exit_ball_mm": 600.0,
+        "dribble_grace_enter_age_ms": 1500.0,
+        "dribble_grace_hold_age_ms": 2500.0,
+        "shoot_align_enter_rad": 0.5235987755982988,
+        "shoot_align_exit_rad": 0.7853981633974483,
+        "shoot_arm_frames": 3,
+        "shoot_enter_angle_rad": 0.4363323129985824,
+        "shoot_enter_ball_mm": 380.0,
+        "shoot_exit_angle_rad": 0.6108652381980153,
+        "shoot_exit_ball_mm": 460.0,
+        "shoot_goal_enter_mm": 3000.0,
+        "shoot_goal_exit_mm": 3200.0,
+        "shoot_open_enter": 0.3,
+        "shoot_open_exit": 0.2,
+        "trusted_max_age_ms": 600.0
+      },
+      "max_steps_per_episode": 800,
+      "obs_size": 47,
+      "positive_weight_gate_label_consistent": true,
+      "positive_weight_role_mask_consistent": true,
+      "pybh_rl_shm_name": "/pybh_rl_ma_teacher_stage7_569089",
+      "scenarios": [
+        {
+          "attempted_episodes": 21,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  2246,
+                  987
+                ],
+                [
+                  2255,
+                  745
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "off_ball_support"
+              ],
+              "step": 310
+            },
+            {
+              "attempt": 4,
+              "pair_pos": [
+                [
+                  1588,
+                  -751
+                ],
+                [
+                  1750,
+                  -623
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 299
+            },
+            {
+              "attempt": 13,
+              "pair_pos": [
+                [
+                  1902,
+                  538
+                ],
+                [
+                  1932,
+                  422
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 385
+            },
+            {
+              "attempt": 14,
+              "pair_pos": [
+                [
+                  1576,
+                  721
+                ],
+                [
+                  1869,
+                  629
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 324
+            },
+            {
+              "attempt": 16,
+              "pair_pos": [
+                [
+                  1744,
+                  -650
+                ],
+                [
+                  1824,
+                  -466
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 386
+            },
+            {
+              "attempt": 18,
+              "pair_pos": [
+                [
+                  1763,
+                  463
+                ],
+                [
+                  1893,
+                  530
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 232
+            },
+            {
+              "attempt": 19,
+              "pair_pos": [
+                [
+                  1810,
+                  -721
+                ],
+                [
+                  2001,
+                  -662
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 448
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 13,
+            "role_thrash(11)": 1,
+            "teammate_collision": 5
+          },
+          "dropped_episodes": 19,
+          "elapsed_s": 1328.0846311940004,
+          "kept_episodes": 2,
+          "name": "team_3v0_clean",
+          "role_step_counts": {
+            "off_ball_support": 1600,
+            "open_support": 1600,
+            "striker": 1600
+          },
+          "skipped_masked_label_rows": 832,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 43,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1738,
+                  815
+                ],
+                [
+                  2083,
+                  786
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 315
+            },
+            {
+              "attempt": 1,
+              "pair_pos": [
+                [
+                  1968,
+                  -715
+                ],
+                [
+                  1861,
+                  -723
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "off_ball_support"
+              ],
+              "step": 276
+            },
+            {
+              "attempt": 2,
+              "pair_pos": [
+                [
+                  1685,
+                  -737
+                ],
+                [
+                  1750,
+                  -632
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 338
+            },
+            {
+              "attempt": 3,
+              "pair_pos": [
+                [
+                  2011,
+                  686
+                ],
+                [
+                  2194,
+                  796
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 217
+            },
+            {
+              "attempt": 5,
+              "pair_pos": [
+                [
+                  1750,
+                  -687
+                ],
+                [
+                  1844,
+                  -548
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 347
+            },
+            {
+              "attempt": 6,
+              "pair_pos": [
+                [
+                  1820,
+                  980
+                ],
+                [
+                  2025,
+                  954
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 218
+            },
+            {
+              "attempt": 8,
+              "pair_pos": [
+                [
+                  2011,
+                  -455
+                ],
+                [
+                  2146,
+                  -469
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 304
+            },
+            {
+              "attempt": 9,
+              "pair_pos": [
+                [
+                  1811,
+                  -680
+                ],
+                [
+                  2017,
+                  -659
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 313
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 12,
+            "role_thrash(11)": 1,
+            "role_thrash(14)": 2,
+            "role_thrash(15)": 1,
+            "role_thrash(18)": 1,
+            "role_thrash(36)": 1,
+            "teammate_collision": 15
+          },
+          "dropped_episodes": 33,
+          "elapsed_s": 4618.206937843001,
+          "kept_episodes": 10,
+          "name": "team_3v0_static_pinch",
+          "role_step_counts": {
+            "off_ball_support": 8000,
+            "open_support": 8000,
+            "striker": 8000
+          },
+          "skipped_masked_label_rows": 1893,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 22,
+          "collision_contexts": [
+            {
+              "attempt": 3,
+              "pair_pos": [
+                [
+                  1795,
+                  853
+                ],
+                [
+                  1979,
+                  644
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 509
+            },
+            {
+              "attempt": 13,
+              "pair_pos": [
+                [
+                  1568,
+                  -1240
+                ],
+                [
+                  1492,
+                  -1300
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 168
+            },
+            {
+              "attempt": 18,
+              "pair_pos": [
+                [
+                  1899,
+                  820
+                ],
+                [
+                  2086,
+                  827
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 663
+            }
+          ],
+          "drop_reasons": {
+            "agent_out_of_bounds": 4,
+            "role_thrash(12)": 1,
+            "teammate_collision": 3
+          },
+          "dropped_episodes": 8,
+          "elapsed_s": 1943.789556011001,
+          "kept_episodes": 14,
+          "name": "team_3v0_dynamic",
+          "role_step_counts": {
+            "off_ball_support": 11200,
+            "open_support": 11200,
+            "striker": 11200
+          },
+          "skipped_masked_label_rows": 881,
+          "stage_id": 7
+        },
+        {
+          "attempted_episodes": 29,
+          "collision_contexts": [
+            {
+              "attempt": 0,
+              "pair_pos": [
+                [
+                  1809,
+                  554
+                ],
+                [
+                  1883,
+                  677
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "open_support"
+              ],
+              "step": 750
+            },
+            {
+              "attempt": 2,
+              "pair_pos": [
+                [
+                  1957,
+                  -793
+                ],
+                [
+                  2208,
+                  -620
+                ]
+              ],
+              "pair_roles": [
+                "striker",
+                "off_ball_support"
+              ],
+              "step": 341
+            },
+            {
+              "attempt": 10,
+              "pair_pos": [
+                [
+                  1951,
+                  -703
+                ],
+                [
+                  2132,
+                  -686
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 718
+            },
+            {
+              "attempt": 12,
+              "pair_pos": [
+                [
+                  2167,
+                  -850
+                ],
+                [
+                  2398,
+                  -946
+                ]
+              ],
+              "pair_roles": [
+                "open_support",
+                "striker"
+              ],
+              "step": 401
+            },
+            {
+              "attempt": 20,
+              "pair_pos": [
+                [
+                  1980,
+                  -570
+                ],
+                [
+                  2217,
+                  -456
+                ]
+              ],
+              "pair_roles": [
+                "off_ball_support",
+                "striker"
+              ],
+              "step": 528
+            }
+          ],
+          "drop_reasons": {
+            "reset_ball_drift": 1,
+            "role_thrash(19)": 1,
+            "role_thrash(20)": 1,
+            "teammate_collision": 5
+          },
+          "dropped_episodes": 8,
+          "elapsed_s": 2045.5212398580006,
+          "kept_episodes": 21,
+          "name": "team_3v3_full_dynamic",
+          "role_step_counts": {
+            "off_ball_support": 16800,
+            "open_support": 16800,
+            "striker": 16800
+          },
+          "skipped_masked_label_rows": 2256,
+          "stage_id": 7
+        }
+      ],
+      "stage_id": 7,
+      "total_episodes": 47,
+      "total_rows": 109790,
+      "visible_parallel_slots": true,
+      "visible_scene_name": "RL1v0_3D_visible"
+    }
+  ],
+  "stage_id": -1,
+  "stages": [
+    6,
+    7
+  ],
+  "total_episodes": 212,
+  "total_rows": 355508
+}

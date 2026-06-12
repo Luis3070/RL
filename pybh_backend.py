@@ -94,6 +94,15 @@ VISIBLE_BALL_SETTLE_FALLBACK = os.environ.get("RL_VISIBLE_BALL_SETTLE_FALLBACK",
 }
 
 
+def _finite_or(value, fallback: float) -> float:
+    """float(value) if finite, else fallback — wire fields can carry NaN."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    return result if math.isfinite(result) else float(fallback)
+
+
 def _normalize_angle(theta: float) -> float:
     return math.atan2(math.sin(theta), math.cos(theta))
 
@@ -286,6 +295,17 @@ class BackendObservation:
     natural_ball_consistent_with_game_state: bool = False
     requested_skill: str = ""
     requested_pass_target: int = -1
+    motion_request: int = -1
+    provider_motion_request: int = -1
+    provider_call_count: int = 0
+    provider_target_x: float = 0.0
+    provider_target_y: float = 0.0
+    provider_target_theta: float = 0.0
+    skill_behavior_motion_request: int = -1
+    skill_behavior_call_count: int = 0
+    skill_behavior_walk_target_x: float = 0.0
+    skill_behavior_walk_target_y: float = 0.0
+    skill_behavior_walk_target_theta: float = 0.0
     ball_rel_x: float = 0.0
     ball_rel_y: float = 0.0
     ball_end_rel_x: float = 0.0
@@ -387,6 +407,17 @@ class BackendObservation:
             natural_ball_consistent_with_game_state=bool(payload.get("natural_ball_consistent_with_game_state", False)),
             requested_skill=str(payload.get("requested_skill", "")),
             requested_pass_target=int(payload.get("requested_pass_target", -1)),
+            motion_request=int(payload.get("motion_request", -1)),
+            provider_motion_request=int(payload.get("provider_motion_request", -1)),
+            provider_call_count=int(payload.get("provider_call_count", 0)),
+            provider_target_x=float(payload.get("provider_target_x", 0.0)),
+            provider_target_y=float(payload.get("provider_target_y", 0.0)),
+            provider_target_theta=float(payload.get("provider_target_theta", 0.0)),
+            skill_behavior_motion_request=int(payload.get("skill_behavior_motion_request", -1)),
+            skill_behavior_call_count=int(payload.get("skill_behavior_call_count", 0)),
+            skill_behavior_walk_target_x=float(payload.get("skill_behavior_walk_target_x", 0.0)),
+            skill_behavior_walk_target_y=float(payload.get("skill_behavior_walk_target_y", 0.0)),
+            skill_behavior_walk_target_theta=float(payload.get("skill_behavior_walk_target_theta", 0.0)),
             ball_rel_x=float(payload.get("ball_rel_x", fallback_rel_x)),
             ball_rel_y=float(payload.get("ball_rel_y", fallback_rel_y)),
             ball_end_rel_x=float(payload.get("ball_end_rel_x", fallback_rel_x)),
@@ -432,12 +463,20 @@ class BackendObservation:
             teammate_poses=tuple(zip(payload.get("teammate_x_mm", []), payload.get("teammate_y_mm", []), payload.get("teammate_theta", []),)),
             teammate_ages_ms=tuple(payload.get("teammate_age_ms", [])),
             teammate_activities=tuple(payload.get("teammate_activity", [])),
-            global_team_ball_x_mm=float(payload.get("global_team_ball_x_mm", 0.0)),
-            global_team_ball_y_mm=float(payload.get("global_team_ball_y_mm", 0.0)),
-            global_team_ball_age_ms=float(payload.get("global_team_ball_age_ms", 0.0)),
-            global_team_ball_valid=bool(payload.get("global_team_ball_valid", False)),
-            goal_opponent_x_mm=float( payload.get("goal_opponent_x_mm", 0.0)),
-            goal_opponent_y_mm=float(payload.get("goal_opponent_y_mm", 0.0)),
+            # Finite-guarded: with no team comm (isolated slot sims, or comm
+            # dropouts on hardware) the TeammatesBallModel wire fields can be
+            # NaN. A NaN here propagates into the encoded obs and poisons the
+            # policy logits silently. NaN team ball -> (0,0) + invalid.
+            global_team_ball_x_mm=_finite_or(payload.get("global_team_ball_x_mm", 0.0), 0.0),
+            global_team_ball_y_mm=_finite_or(payload.get("global_team_ball_y_mm", 0.0), 0.0),
+            global_team_ball_age_ms=_finite_or(payload.get("global_team_ball_age_ms", 0.0), 0.0),
+            global_team_ball_valid=(
+                bool(payload.get("global_team_ball_valid", False))
+                and math.isfinite(float(payload.get("global_team_ball_x_mm", 0.0)))
+                and math.isfinite(float(payload.get("global_team_ball_y_mm", 0.0)))
+            ),
+            goal_opponent_x_mm=_finite_or(payload.get("goal_opponent_x_mm", 0.0), 0.0),
+            goal_opponent_y_mm=_finite_or(payload.get("goal_opponent_y_mm", 0.0), 0.0),
         )
 
 

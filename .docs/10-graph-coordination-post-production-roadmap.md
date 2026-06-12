@@ -2261,11 +2261,19 @@ This is the honest first-pass bar. The "beat BH" target is §14.26.
 - [ ] `environment.py` carries the per-env team state from §14.17.1.
 - [ ] Per-step orchestration § 14.17.2 wires roles + EMA + last_pass into info per § 14.17.3.
 - [ ] Per-agent fallen-stuck § 14.17.5 terminates team episode correctly.
-- [ ] `teacher_production_dataset.py` runs the multi-agent dataset gen and produces `samples.npz` with `role_ids` and `coordination_target_xy` arrays.
-- [ ] Audit `summary.json` shows `positive_weight_gate_label_consistent: true` AND `positive_weight_role_mask_consistent: true`.
+- [x] `teacher_multiagent_dataset.py` runs the multi-agent dataset gen and produces `samples.npz` with `role_ids` and `coordination_target_xy` arrays.
+- [x] Audit `summary.json` shows `positive_weight_gate_label_consistent: true` AND `positive_weight_role_mask_consistent: true`.
 - [ ] Stages 6 and 7 added to `production_curriculum.py` per §14.21.
 - [ ] At least 100 episodes per stage in the dataset.
 - [ ] `test_dataset_filter_v2.py` tests passing.
+
+2026-06-10 handoff update:
+- Quarantined: `runs/teacher_multiagent_dataset/dataset_multiagent_train_20260610_0805/samples.npz`. The audit missed a silent failure: striker rows were walk-only (`dribble_armed=0`, `shoot_armed=0`) and must not be used for BC.
+- Root cause isolated: the single multi-real `RLMAStage{6,7}_3D` scenes accepted BHuman walk commands but did not produce reliable visible locomotion. The collector now uses the production-style `VisibleParallelRuntime` slot topology (`RL1v0_3D_visible` per RL field player).
+- Train-start sane dataset: `runs/teacher_multiagent_dataset/dataset_multiagent_train_20260610_sane_v1/samples.npz` — stages 6+7, 11 kept episodes, 9,637 rows, 47-dim obs, `role_ids`, `coordination_target_xy`, `label_consistent`.
+- Audit result: `runs/teacher_multiagent_dataset/dataset_multiagent_train_20260610_sane_v1/audit.json` passed with zero role-mask bad rows, `striker_dribble_armed_rows=861`, `striker_shoot_armed_rows=154`, all six scenarios represented.
+- Mechanical BC check: `train_multiagent.MultiAgentBCReplayRegularizer` loads the dataset, builds stage/role/skill buckets, samples stages 6 and 7, and runs one CPU BC update.
+- Limitation: pass labels are still absent (`pass_armed_rows=0`), so this is a safe train-start corpus for support positioning plus striker walk/dribble/shoot retention, not a pass-rich final teacher corpus.
 
 #### Thu commit acceptance (Luis + Laura)
 

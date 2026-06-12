@@ -48,6 +48,20 @@ class ObsIndex(IntEnum):
     team_ball_agrees_with_mine = 38
     opponent_goal_x_rel = 39
     opponent_goal_y_rel = 40
+    # Multi-agent skill-arm extension (Design A continued). Block A row, indices 41-43.
+    # Mirrors shoot_armed/dribble_armed/shoot_arm_progress at 23/24/25 — the per-step
+    # forbid-invalid mask reads these columns and reproduces the gate decision purely
+    # from stored obs. Zero by default so 26→47 zero-pad warm-start preserves behaviour.
+    pass_armed = 41
+    observe_armed = 42
+    pass_arm_progress = 43
+    # Multi-agent role one-hot (Block G), indices 44-46. Exactly one of the three is 1.0
+    # for an RL agent each step (env-computed via assign_roles + hysteresis); the GK
+    # reads false on all three from the RL side. Drives role-conditioned mask in
+    # train.py:gate_skill_mask_from_obs per §11.A.4.
+    is_striker = 44
+    is_open_support = 45
+    is_off_ball_support = 46
 
 
 OBS_FEATURE_NAMES = tuple(index.name for index in ObsIndex)

@@ -34,7 +34,12 @@ from curriculum import (
 from gate import GateConfig, SkillGate
 from observation import OBS_FEATURE_NAMES, OBS_SIZE
 from pybh_backend import BackendObservation, PyBHBackend, WorldSpec
-from production_curriculum import ProductionScenario, production_scenarios, production_topup_scenarios
+from production_curriculum import (
+    ProductionScenario,
+    production_scenarios,
+    production_topup_scenarios,
+    team_production_scenarios,
+)
 from reward import (
     TAKEOVER_GRACE_STEPS,
     StepContext,
@@ -230,6 +235,15 @@ class RealSimRobotEnv(ParallelEnv):
         # policy's per-step forbid-invalid mask is a pure function of the stored obs.
         self._skill_gate = SkillGate(GateConfig.from_env())
         self._gate_decision = None
+        # Multi-agent team hook (None for single-agent — zero behavior change).
+        # Set by TeamSlotSimRobotEnv: callable(env, obs, base_decision) ->
+        # (injected_obs, team_decision). The hook owns cross-sim teammate
+        # injection and the team-augmented gate bits (obs[41:47]).
+        self._team_hook = None
+        # Current role + coordination target for this slot (set via the hook);
+        # drive role-aware residual anchor decoding for support walk actions.
+        self._team_role: str | None = None
+        self._team_coordination_target: tuple[float, float] | None = None
         self._episode_step = 0
         self._skill_history: list[str] = []
         self._trusted_takeover_grace = 0
@@ -296,6 +310,8 @@ class RealSimRobotEnv(ParallelEnv):
         obs = self.backend.reset(world_spec=self._current_world_spec)
         self._skill_gate.reset()
         self._gate_decision = self._skill_gate.step(obs)
+        if self._team_hook is not None:
+            obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
         encoded = self._encode_obs(obs)
         self._last_obs = encoded
         self._last_backend_obs = obs
@@ -357,6 +373,10 @@ class RealSimRobotEnv(ParallelEnv):
             scenarios.extend(production_scenarios(1))
         if {"topup", "repair", "bridge"} & set_tokens:
             scenarios.extend(production_topup_scenarios(1))
+        if {"team", "multiagent"} & set_tokens:
+            # Stage 6/7 multi-agent team scenarios (train_multiagent_production.py
+            # sets RL_PRODUCTION_SCENARIO_SET=team).
+            scenarios.extend(team_production_scenarios(1))
         if not scenarios:
             raise ValueError(f"RL_PRODUCTION_SCENARIO_SET={scenario_set!r} did not select any scenarios")
 
@@ -532,6 +552,8 @@ class RealSimRobotEnv(ParallelEnv):
         if _STEP_PROFILE:
             _t2 = time.perf_counter()
         self._gate_decision = self._skill_gate.step(obs)
+        if self._team_hook is not None:
+            obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
         encoded = self._encode_obs(obs)
         if _STEP_PROFILE:
             _t3 = time.perf_counter()
@@ -645,7 +667,20 @@ class RealSimRobotEnv(ParallelEnv):
         residual_x *= float(param_mask[0])
         residual_y *= float(param_mask[1])
         residual_theta *= float(param_mask[2])
-        anchors = build_fallback_action_targets(raw_action.skill_name, obs)
+        # Role-aware anchor: support walk residuals in the multi-agent dataset are
+        # anchored on the EMA coordination target (multiagent_teacher.build_open_lane_anchor),
+        # NOT the ball. Decoding them ball-anchored produces degenerate/garbage walk
+        # targets (the doc-28 "walk chosen but robot frozen" failure). Single-agent
+        # path (_team_role None) is bit-identical to before.
+        if (
+            self._team_role in ("open_support", "off_ball_support")
+            and raw_action.skill_name == "walk"
+            and self._team_coordination_target is not None
+        ):
+            from multiagent_teacher import build_open_lane_anchor
+            anchors = build_open_lane_anchor(obs, self._team_coordination_target)
+        else:
+            anchors = build_fallback_action_targets(raw_action.skill_name, obs)
         target_x = float(anchors["target_x"] + residual_x * ACTION.residual_x_range)
         target_y = float(anchors["target_y"] + residual_y * ACTION.residual_y_range)
         target_theta = self._wrap_angle(float(anchors["target_theta"] + residual_theta * ACTION.residual_theta_range))
@@ -859,13 +894,25 @@ class RealSimRobotEnv(ParallelEnv):
             float(np.clip(gy / ACTION.y_range, -1.0, 1.0)),
         ]
 
+        # Multi-agent extension (Block A continued + Block G), indices 41-46.
+        # Six floats: pass_armed, observe_armed, pass_arm_progress, is_striker,
+        # is_open_support, is_off_ball_support. Default to zeros when the env's
+        # gate_decision was produced by the single-agent SkillGate.step (which sets
+        # only the legacy 3 fields); the orchestrator overrides via dataclasses.replace
+        # before per-step encoding for multi-agent stages.
+        if self._gate_decision is not None:
+            team_gate_features = self._gate_decision.obs_features_team()
+        else:
+            team_gate_features = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
         return np.asarray(
             base_features
             + teammate_features
             + team_ball_features
             + engagement_features
             + [consensus]
-            + goal_features,
+            + goal_features
+            + team_gate_features,
             dtype=np.float32,
         )
 

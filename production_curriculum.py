@@ -224,6 +224,217 @@ def production_topup_scenarios(episodes: int) -> list[ProductionScenario]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Multi-agent scenarios — §14.21 LOCKED weights for Monday 2026-06-15 demo
+# ---------------------------------------------------------------------------
+
+def _team_2v0_clean_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 6 baseline: ball in production band, 1 BH GK + 2 RL field, no opponents.
+
+    Striker spawns approaching the ball; the open-support spawns ahead-and-side so
+    the open-lane teacher has a clean receive position to anchor on. GK is parked
+    in own goal area (BHuman handles it).
+    """
+    ball_to_goal = float(rng.uniform(*PRODUCTION_BAND_MM))
+    ball_x = float(GOAL_X - ball_to_goal)
+    ball_y = _clip_y(float(rng.uniform(-450.0, 450.0)))
+    striker_x = ball_x - float(rng.uniform(700.0, 1050.0))
+    striker_y = _clip_y(ball_y + float(rng.uniform(-180.0, 180.0)))
+    support_side = 1.0 if ball_y >= 0.0 else -1.0
+    # Forward spawn (BHuman Tactic templates position the forward high from the
+    # start). Spawning at x=800 made the support unreachable for the whole chain:
+    # the striker outruns it and pass_dist exceeds MAX_PASS_DISTANCE_MM by
+    # mid-drive (2026-06-10 probe: p90 pass_dist 5846mm, zero pass proposals).
+    support = WorldPlayerSpec(
+        number=2,
+        x=float(rng.uniform(2200.0, 2600.0)),
+        y=float(rng.uniform(1150.0, 1400.0)) * support_side,
+        theta=math.atan2(-support_side, 1.0),
+    )
+    gk = WorldPlayerSpec(number=3, x=-4000.0, y=0.0, theta=0.0)
+    robot_theta = math.atan2(ball_y - striker_y, ball_x - striker_x)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray([striker_x, striker_y], dtype=np.float32),
+        robot_theta=robot_theta,
+        teammates=(support, gk),
+        opponents=(),
+    )
+
+
+def _team_2v0_static_blocker_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 6 with one static opponent blocking the striker's direct lane.
+
+    Goal of this scenario: force the smashOrPass decision to consider pass to the
+    support. Static opponent placed near the ball-to-goal line within the front-cone
+    proxy, so `nearest_opponent_front_dist` drops below OPPONENT_LANE_CLEARANCE_MM
+    and pass_reachable_proxy excludes the direct shoot.
+    """
+    base = _team_2v0_clean_world(rng)
+    support_side = 1.0 if base.ball_y >= 0.0 else -1.0
+    support = WorldPlayerSpec(
+        number=2,
+        x=float(rng.uniform(2200.0, 2600.0)),
+        y=float(rng.uniform(1150.0, 1400.0)) * support_side,
+        theta=0.0,
+    )
+    gk = WorldPlayerSpec(number=3, x=-4000.0, y=0.0, theta=0.0)
+    # Place one opponent ~700mm in front of the ball.
+    opp_x = float(base.ball_x + 700.0)
+    opp_y = _clip_y(float(base.ball_y + float(rng.uniform(-200.0, 200.0))))
+    blocker = WorldPlayerSpec(number=1, x=opp_x, y=opp_y, theta=math.pi)
+    return build_world_spec(
+        ball_pos=np.asarray([base.ball_x, base.ball_y], dtype=np.float32),
+        robot_pos=np.asarray([base.robot_x, base.robot_y], dtype=np.float32),
+        robot_theta=base.robot_theta,
+        teammates=(support, gk),
+        opponents=(blocker,),
+    )
+
+
+def _team_3v0_clean_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 7 baseline: 1 BH GK + 3 RL field, no opponents. All three roles emerge."""
+    ball_to_goal = float(rng.uniform(*PRODUCTION_BAND_MM))
+    ball_x = float(GOAL_X - ball_to_goal)
+    ball_y = _clip_y(float(rng.uniform(-500.0, 500.0)))
+    striker_x = ball_x - float(rng.uniform(800.0, 1100.0))
+    striker_y = _clip_y(ball_y + float(rng.uniform(-180.0, 180.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    # Forward spawns mirroring the Tactic-template slots (see stage-6 rationale):
+    # open_support high on the ball side as the primary receive option, off_ball
+    # mid-depth opposite side as the triangle vertex.
+    open_support = WorldPlayerSpec(
+        number=2,
+        x=float(rng.uniform(2200.0, 2600.0)),
+        y=float(rng.uniform(1150.0, 1400.0)) * side,
+        theta=math.atan2(-side, 1.0),
+    )
+    off_ball_support = WorldPlayerSpec(
+        number=3,
+        x=float(rng.uniform(1300.0, 1700.0)),
+        y=float(rng.uniform(-1400.0, -1150.0)) * side,
+        theta=math.atan2(side, 1.0),
+    )
+    gk = WorldPlayerSpec(number=4, x=-4000.0, y=0.0, theta=0.0)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray([striker_x, striker_y], dtype=np.float32),
+        robot_theta=math.atan2(ball_y - striker_y, ball_x - striker_x),
+        teammates=(open_support, off_ball_support, gk),
+        opponents=(),
+    )
+
+
+def _team_3v0_static_pinch_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 7 with 2 static opponents pinching the central lane."""
+    base = _team_3v0_clean_world(rng)
+    pinch_a = WorldPlayerSpec(
+        number=1, x=float(base.ball_x + 700.0),
+        y=_clip_y(float(base.ball_y + 350.0)), theta=math.pi,
+    )
+    pinch_b = WorldPlayerSpec(
+        number=2, x=float(base.ball_x + 700.0),
+        y=_clip_y(float(base.ball_y - 350.0)), theta=math.pi,
+    )
+    return build_world_spec(
+        ball_pos=np.asarray([base.ball_x, base.ball_y], dtype=np.float32),
+        robot_pos=np.asarray([base.robot_x, base.robot_y], dtype=np.float32),
+        robot_theta=base.robot_theta,
+        teammates=base.teammates,
+        opponents=(pinch_a, pinch_b),
+    )
+
+
+def _team_3v0_dynamic_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 7 with 2-3 dynamic opponents using BH default behaviour."""
+    base = _team_3v0_clean_world(rng)
+    robot_pos_arr = np.asarray([base.robot_x, base.robot_y], dtype=np.float32)
+    ball_pos_arr = np.asarray([base.ball_x, base.ball_y], dtype=np.float32)
+    opps = _dynamic_obstacles(robot_pos_arr, ball_pos_arr, episode_step=0)
+    return build_world_spec(
+        ball_pos=ball_pos_arr,
+        robot_pos=robot_pos_arr,
+        robot_theta=base.robot_theta,
+        teammates=base.teammates,
+        opponents=opps,
+    )
+
+
+def _team_3v3_full_dynamic_world(rng: np.random.Generator) -> WorldSpec:
+    """Monday demo distribution: 1 BH GK + 3 RL field vs full BH (1 GK + 3 field, dynamic).
+
+    Opponent placement matches `_team_3v0_dynamic_world` for the field opponents plus an
+    opponent-side GK at the opposite goal. PPO training spends ~3.0 weight here per
+    §14.21.3 — non-negotiable; this is the only scenario with the exact perceptual
+    conditions of the Monday demo.
+    """
+    base = _team_3v0_dynamic_world(rng)
+    # Add opponent-side GK at opposite goal area.
+    opp_gk = WorldPlayerSpec(number=3, x=float(GOAL_X) - 300.0, y=0.0, theta=math.pi)
+    opps = tuple(base.opponents) + (opp_gk,)
+    return build_world_spec(
+        ball_pos=np.asarray([base.ball_x, base.ball_y], dtype=np.float32),
+        robot_pos=np.asarray([base.robot_x, base.robot_y], dtype=np.float32),
+        robot_theta=base.robot_theta,
+        teammates=base.teammates,
+        opponents=opps,
+    )
+
+
+def team_production_scenarios(episodes: int) -> list[ProductionScenario]:
+    """LOCKED scenario set + weights for Monday 2026-06-15 demo (§14.21.2 and §14.21.3).
+
+    Weights are encoded by repeating scenarios — the dataset collector iterates the list
+    and runs `scenario.episodes` per entry. Repeating means more dataset rows from that
+    distribution. This matches the existing `production_scenarios` shape so no
+    teacher_production_dataset.py rewrite is required for stage 6+ iteration.
+
+    Stage 6 (warmup 2v0): 3.0 clean + 1.0 static_blocker.
+    Stage 7 (adversarial 3v3): 0.5 clean + 1.5 static_pinch + 2.0 dynamic + 3.0 full_dynamic.
+
+    Weighting is integer-scaled by multiplying base `episodes`. For the canonical sprint
+    config (episodes=4), this gives:
+      - 2v0_clean × 12, 2v0_static_blocker × 4
+      - 3v0_clean × 2, 3v0_static_pinch × 6, 3v0_dynamic × 8, 3v3_full_dynamic × 12
+    """
+    e = max(1, int(episodes))
+    return [
+        ProductionScenario(
+            name="team_2v0_clean_band", stage_id=6,
+            description="Stage 6 baseline: 1 GK + 2 RL field, ball in 2.5-3.0m band, no opponents.",
+            world_fn=_team_2v0_clean_world, episodes=e * 3, obstacles="none",
+        ),
+        ProductionScenario(
+            name="team_2v0_static_blocker", stage_id=6,
+            description="Stage 6 with one static opponent in striker's direct lane — forces pass consideration.",
+            world_fn=_team_2v0_static_blocker_world, episodes=e * 1, obstacles="static",
+        ),
+        ProductionScenario(
+            name="team_3v0_clean", stage_id=7,
+            description="Stage 7 baseline: 1 GK + 3 RL field, no opponents, single-agent retention reference.",
+            world_fn=_team_3v0_clean_world, episodes=max(e // 2, 1), obstacles="none",
+        ),
+        ProductionScenario(
+            name="team_3v0_static_pinch", stage_id=7,
+            description="Stage 7 with 2 static opponents pinching the central lane.",
+            world_fn=_team_3v0_static_pinch_world, episodes=int(e * 1.5), obstacles="static",
+        ),
+        ProductionScenario(
+            name="team_3v0_dynamic", stage_id=7,
+            description="Stage 7 with 2-3 dynamic opponents using BH default behaviour.",
+            world_fn=_team_3v0_dynamic_world, episodes=e * 2, obstacles="dynamic",
+        ),
+        ProductionScenario(
+            name="team_3v3_full_dynamic", stage_id=7,
+            description=(
+                "Monday demo: 1 BH GK + 3 RL field vs full BH (1 GK + 3 field, dynamic). "
+                "Highest weight — the only scenario with the exact perceptual conditions of the demo."
+            ),
+            world_fn=_team_3v3_full_dynamic_world, episodes=e * 3, obstacles="dynamic",
+        ),
+    ]
+
+
 def production_scenarios(episodes: int) -> list[ProductionScenario]:
     """Return the production situations, scaling episode counts off the requested `episodes`.
 
