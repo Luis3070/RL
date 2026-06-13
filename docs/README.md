@@ -23,6 +23,7 @@ Lectura recomendada:
 17. [SimRobot estable y partido hibrido RL vs B-Human](./21-simrobot-estable-y-rl-vs-bhuman.md)
 18. [Stage 8 defender: SimRobot visible single-process](./31-stage8-defender-visible-debug.md)
 19. [Stage 8 defender: checklist operativo](./32-stage8-defender-checklist.md)
+20. [Stage 8 defender: evaluacion del train inicial](./33-stage8-defender-initial-train-eval.md)
 
 Resumen corto:
 

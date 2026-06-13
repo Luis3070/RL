@@ -226,6 +226,23 @@ class MultiAgentBCCompetenceGate(BCCompetenceGate):
     """
 
     def update(self, summary: Mapping[str, object]) -> dict[str, float]:
+        if int(float(summary.get("stage_id", 0.0))) == 8:
+            defender_competence = float(summary.get("defender_competence_rate", summary.get("defender_score", 0.0)))
+            defender_competence = float(np.clip(defender_competence, 0.0, 1.0))
+            if not self.initialized:
+                self.competence_ema = defender_competence
+                self.initialized = True
+            else:
+                self.competence_ema = (1.0 - self.alpha) * self.competence_ema + self.alpha * defender_competence
+            return {
+                "bc_competence_striker": float(summary.get("takeover_success_rate", 0.0)),
+                "bc_competence_open_support": float(summary.get("defender_cover_corridor_rate", 0.0)),
+                "bc_competence_off_ball_support": defender_competence,
+                "bc_competence": defender_competence,
+                "bc_competence_ema": float(self.competence_ema),
+                "bc_beta": self.beta(),
+            }
+
         striker_competence = float(summary.get("clean_finish_rate", 0.0))
         if striker_competence <= 0.0:
             striker_competence = float(summary.get("dribble_compat_rate", 0.0))

@@ -4,7 +4,7 @@ import math
 import os
 import time
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Dict, Mapping, Optional
 
 import gymnasium as gym
@@ -20,7 +20,7 @@ from action import (
     action_param_mask,
     skill_mask,
 )
-from config import ACTION, ENV
+from config import ACTION, ENV, GOAL_X
 from curriculum import (
     get_dynamic_world_update,
     get_stage_spec,
@@ -543,6 +543,7 @@ class RealSimRobotEnv(ParallelEnv):
             post_takeover_finishing_active=finishing_active,
         )
         evaluation = evaluate_step(step_ctx, self._episode_stage_spec.reward_weights)
+        evaluation = self._augment_stage8_defense_reward(evaluation, step_ctx)
         if evaluation.stable_trusted_takeover:
             self._trusted_takeover_grace = TAKEOVER_GRACE_STEPS
             self._post_takeover_finishing_steps = max(
@@ -975,6 +976,15 @@ class RealSimRobotEnv(ParallelEnv):
             "clearance_positive_steps": 0,
             "obstacle_present_steps": 0,
             "corridor_keep_steps": 0,
+            "defense_phase_steps": 0,
+            "defender_goal_side_steps": 0,
+            "defender_cover_corridor_steps": 0,
+            "defender_danger_steps": 0,
+            "defender_danger_cover_steps": 0,
+            "defender_block_steps": 0,
+            "defender_pass_steps": 0,
+            "defender_gk_near_steps": 0,
+            "defender_corridor_distance_sum": 0.0,
             "dynamic_updates": 0,
             "post_takeover_progress_sum": 0.0,
             "post_takeover_finishing_steps": 0,
@@ -1200,8 +1210,112 @@ class RealSimRobotEnv(ParallelEnv):
         if evaluation.terms["corridor_keep"] > 0.0:
             tracker["corridor_keep_steps"] += 1
 
+        if step_ctx.stage == 8:
+            defense = self._defense_metrics_from_obs(step_ctx.obs)
+            tracker["defense_phase_steps"] += int(defense["defense_phase"])
+            tracker["defender_goal_side_steps"] += int(defense["defense_phase"] and defense["goal_side"])
+            tracker["defender_cover_corridor_steps"] += int(defense["defense_phase"] and defense["cover_corridor"])
+            tracker["defender_danger_steps"] += int(defense["danger"])
+            tracker["defender_danger_cover_steps"] += int(defense["danger"] and defense["cover_corridor"])
+            tracker["defender_block_steps"] += int(step_ctx.skill_name == "block")
+            tracker["defender_pass_steps"] += int(step_ctx.skill_name == "pass")
+            tracker["defender_gk_near_steps"] += int(defense["defense_phase"] and defense["gk_near"])
+            if defense["defense_phase"]:
+                tracker["defender_corridor_distance_sum"] += float(defense["corridor_distance_mm"])
+
         tracker["post_takeover_progress_sum"] += evaluation.terms["ball_progress_post_takeover"]
         tracker["goal"] = tracker["goal"] or step_ctx.goal_scored
+
+    def _defense_metrics_from_obs(self, obs: BackendObservation) -> Dict[str, float | bool]:
+        own_goal = np.asarray([-float(GOAL_X), 0.0], dtype=np.float32)
+        ball = np.asarray([float(obs.ball_x), float(obs.ball_y)], dtype=np.float32)
+        robot = np.asarray([float(obs.robot_x), float(obs.robot_y)], dtype=np.float32)
+        goal_to_ball = ball - own_goal
+        denom = float(np.dot(goal_to_ball, goal_to_ball))
+        if denom <= 1.0:
+            projection = 0.0
+            corridor_distance = float(np.linalg.norm(robot - own_goal))
+        else:
+            projection = float(np.clip(np.dot(robot - own_goal, goal_to_ball) / denom, 0.0, 1.0))
+            closest = own_goal + projection * goal_to_ball
+            corridor_distance = float(np.linalg.norm(robot - closest))
+
+        defense_phase = bool(float(obs.ball_x) < 250.0)
+        danger = bool(float(obs.ball_x) < -500.0 and abs(float(obs.ball_y)) < 1800.0)
+        goal_side = bool(float(obs.robot_x) <= float(obs.ball_x) + 250.0)
+        cover_corridor = bool(defense_phase and goal_side and 0.05 <= projection <= 0.95 and corridor_distance <= 750.0)
+
+        gk_near = False
+        for pose in obs.teammate_poses:
+            tx, ty = float(pose[0]), float(pose[1])
+            if tx < -3500.0 and math.hypot(float(obs.robot_x) - tx, float(obs.robot_y) - ty) < 650.0:
+                gk_near = True
+                break
+
+        return {
+            "defense_phase": defense_phase,
+            "danger": danger,
+            "goal_side": goal_side,
+            "cover_corridor": cover_corridor,
+            "gk_near": gk_near,
+            "corridor_distance_mm": corridor_distance,
+        }
+
+    def _augment_stage8_defense_reward(self, evaluation: StepEvaluation, step_ctx: StepContext) -> StepEvaluation:
+        if step_ctx.stage != 8:
+            return evaluation
+
+        defense = self._defense_metrics_from_obs(step_ctx.obs)
+        defense_phase = bool(defense["defense_phase"])
+        danger = bool(defense["danger"])
+        goal_side = bool(defense["goal_side"])
+        cover_corridor = bool(defense["cover_corridor"])
+        gk_near = bool(defense["gk_near"])
+        corridor_distance = float(defense["corridor_distance_mm"])
+
+        own_goal_x = -float(GOAL_X)
+        threat_reduction = 0.0
+        if step_ctx.prev_obs is not None:
+            prev_dist = math.hypot(float(step_ctx.prev_obs.ball_x) - own_goal_x, float(step_ctx.prev_obs.ball_y))
+            cur_dist = math.hypot(float(step_ctx.obs.ball_x) - own_goal_x, float(step_ctx.obs.ball_y))
+            threat_reduction = float(np.clip((cur_dist - prev_dist) / 300.0, -1.0, 1.0))
+
+        terms = dict(evaluation.terms)
+        weighted_terms = dict(evaluation.weighted_terms)
+        defense_terms = {
+            "defense_goal_side": 1.0 if defense_phase and goal_side else 0.0,
+            "defense_cover_corridor": 1.0 if defense_phase and cover_corridor else 0.0,
+            "defense_danger_cover": 1.0 if danger and cover_corridor else 0.0,
+            "defense_block": 1.0 if danger and step_ctx.skill_name == "block" else 0.0,
+            "defense_pass_clear": 1.0 if defense_phase and step_ctx.skill_name == "pass" and not danger else 0.0,
+            "defense_threat_reduction": threat_reduction if defense_phase else 0.0,
+            "defense_abandon": 1.0 if defense_phase and not goal_side else 0.0,
+            "defense_far_corridor": float(np.clip(corridor_distance / 1800.0, 0.0, 1.0)) if defense_phase else 0.0,
+            "defense_gk_near": 1.0 if defense_phase and gk_near else 0.0,
+            "defense_collision": 1.0 if step_ctx.collision else 0.0,
+        }
+        defense_weights = {
+            "defense_goal_side": 0.035,
+            "defense_cover_corridor": 0.060,
+            "defense_danger_cover": 0.050,
+            "defense_block": 0.030,
+            "defense_pass_clear": 0.020,
+            "defense_threat_reduction": 0.030,
+            "defense_abandon": -0.070,
+            "defense_far_corridor": -0.035,
+            "defense_gk_near": -0.080,
+            "defense_collision": -0.120,
+        }
+        for name, value in defense_terms.items():
+            terms[name] = float(value)
+            weighted_terms[name] = float(defense_weights[name] * value)
+
+        return replace(
+            evaluation,
+            terms=terms,
+            weighted_terms=weighted_terms,
+            total_reward=float(sum(weighted_terms.values())),
+        )
 
     def _derive_collision(self, obs: BackendObservation) -> bool:
         fall_event = int(obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE
@@ -1391,6 +1505,32 @@ class RealSimRobotEnv(ParallelEnv):
                 1.0,
             )
         )
+        defense_phase_steps = max(1, int(tracker["defense_phase_steps"]))
+        defender_danger_steps = max(1, int(tracker["defender_danger_steps"]))
+        defender_goal_side_rate = float(tracker["defender_goal_side_steps"] / defense_phase_steps)
+        defender_cover_corridor_rate = float(tracker["defender_cover_corridor_steps"] / defense_phase_steps)
+        defender_danger_cover_rate = float(tracker["defender_danger_cover_steps"] / defender_danger_steps)
+        defender_gk_near_rate = float(tracker["defender_gk_near_steps"] / defense_phase_steps)
+        defender_corridor_distance_mean = float(tracker["defender_corridor_distance_sum"] / max(1, tracker["defense_phase_steps"]))
+        defender_skill_balance = float(
+            np.clip(
+                float(tracker["skill_counts"].get("walk", 0) + tracker["skill_counts"].get("stand", 0) + tracker["skill_counts"].get("block", 0))
+                / steps,
+                0.0,
+                1.0,
+            )
+        )
+        defender_score = float(
+            np.clip(
+                0.35 * defender_goal_side_rate
+                + 0.35 * defender_cover_corridor_rate
+                + 0.15 * defender_danger_cover_rate
+                + 0.10 * (1.0 - collision_episode)
+                + 0.05 * (1.0 - defender_gk_near_rate),
+                0.0,
+                1.0,
+            )
+        )
 
         return {
             "stage_id": float(self._episode_stage_id),
@@ -1447,10 +1587,14 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_walk_rate": float(tracker["policy_skill_counts"].get("walk", 0) / steps),
             "policy_dribble_rate": float(tracker["policy_skill_counts"].get("dribble", 0) / steps),
             "policy_shoot_rate": float(tracker["policy_skill_counts"].get("shoot", 0) / steps),
+            "policy_pass_rate": float(tracker["policy_skill_counts"].get("pass", 0) / steps),
+            "policy_block_rate": float(tracker["policy_skill_counts"].get("block", 0) / steps),
             "executed_stand_rate": float(tracker["skill_counts"].get("stand", 0) / steps),
             "executed_walk_rate": float(tracker["skill_counts"].get("walk", 0) / steps),
             "executed_dribble_rate": float(tracker["skill_counts"].get("dribble", 0) / steps),
             "executed_shoot_rate": float(tracker["skill_counts"].get("shoot", 0) / steps),
+            "executed_pass_rate": float(tracker["skill_counts"].get("pass", 0) / steps),
+            "executed_block_rate": float(tracker["skill_counts"].get("block", 0) / steps),
             "policy_skill_prob_walk_mean": float(tracker["policy_skill_prob_sums"].get("walk", 0.0) / steps),
             "policy_skill_prob_dribble_mean": float(tracker["policy_skill_prob_sums"].get("dribble", 0.0) / steps),
             "policy_skill_prob_shoot_mean": float(tracker["policy_skill_prob_sums"].get("shoot", 0.0) / steps),
@@ -1459,6 +1603,14 @@ class RealSimRobotEnv(ParallelEnv):
             "obstacle_clearance_success": obstacle_clearance_success,
             "dynamic_obstacle_success": dynamic_obstacle_success,
             "corridor_keep_rate": corridor_keep_rate,
+            "defense_phase_rate": float(tracker["defense_phase_steps"] / steps),
+            "defender_goal_side_rate": defender_goal_side_rate,
+            "defender_cover_corridor_rate": defender_cover_corridor_rate,
+            "defender_danger_cover_rate": defender_danger_cover_rate,
+            "defender_gk_near_rate": defender_gk_near_rate,
+            "defender_corridor_distance_mean": defender_corridor_distance_mean,
+            "defender_skill_balance": defender_skill_balance,
+            "defender_score": defender_score,
             "ball_progress_post_takeover_mean": float(tracker["post_takeover_progress_sum"] / steps),
             "post_takeover_finishing_rate": float(tracker["post_takeover_finishing_steps"] / steps),
             "stability_score": stability_score,

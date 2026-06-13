@@ -569,9 +569,11 @@ def _visible_runtime_for_run(run_cfg: ScriptRunConfig, env_cfg: EnvConfig) -> Vi
         shm_name = f"/pybh_rl_{os.getpid()}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         os.environ["PYBH_RL_SHM_NAME"] = shm_name
     print(f"[shm] PYBH_RL_SHM_NAME={shm_name}", flush=True)
-    # RL_SCENE_NAME overrides the SimRobot scene. ci=60 ("RL1v0_3D_visible_ci60") was tested
-    # and abandoned: BallPerceptor fails at 60fps. Default ci=30 gives ~27 steps/sec.
-    scene_name = os.environ.get("RL_SCENE_NAME", "RL1v0_3D_visible")
+    # RL_SCENE_NAME overrides the SimRobot scene. By default, use the stage
+    # scene selected by curriculum.get_stage_scene_path instead of the legacy
+    # single-agent visible scene.
+    default_scene_name = env_cfg.backend.simrobot_scene_path.stem if env_cfg.backend.simrobot_scene_path else "RL1v0_3D_visible"
+    scene_name = os.environ.get("RL_SCENE_NAME", default_scene_name)
     return VisibleParallelRuntime(
         player_numbers=env_cfg.parallel_player_numbers,
         shm_name=shm_name,
@@ -1054,16 +1056,28 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "policy_walk_rate",
         "policy_dribble_rate",
         "policy_shoot_rate",
+        "policy_pass_rate",
+        "policy_block_rate",
         "executed_stand_rate",
         "executed_walk_rate",
         "executed_dribble_rate",
         "executed_shoot_rate",
+        "executed_pass_rate",
+        "executed_block_rate",
         "policy_skill_prob_walk_mean",
         "policy_skill_prob_dribble_mean",
         "policy_skill_prob_shoot_mean",
         "obstacle_clearance_success",
         "dynamic_obstacle_success",
         "corridor_keep_rate",
+        "defense_phase_rate",
+        "defender_goal_side_rate",
+        "defender_cover_corridor_rate",
+        "defender_danger_cover_rate",
+        "defender_gk_near_rate",
+        "defender_corridor_distance_mean",
+        "defender_skill_balance",
+        "defender_score",
         "ball_progress_post_takeover_mean",
         "post_takeover_finishing_rate",
         "stability_score",
@@ -1130,6 +1144,7 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
     summary["dribble_in_dribble_zone_rate"] = summary.get("dribble_compat_rate", 0.0)
     summary["shoot_in_shoot_zone_rate"] = summary.get("shoot_compat_rate", 0.0)
     summary["bad_duel_rate"] = 0.0
+    summary["defender_competence_rate"] = summary.get("defender_score", 0.0)
 
     reward_terms_sum: Dict[str, float] = {}
     reward_weighted_terms_sum: Dict[str, float] = {}
@@ -1645,6 +1660,34 @@ def print_eval_summary(
         "entropy_loss",
         "entropy",
     )
+    if int(stage_id) == 8:
+        defender_score = float(summary.get("defender_score", 0.0))
+        defender_goal_side_rate = float(summary.get("defender_goal_side_rate", 0.0))
+        defender_cover_corridor_rate = float(summary.get("defender_cover_corridor_rate", 0.0))
+        defender_danger_cover_rate = float(summary.get("defender_danger_cover_rate", 0.0))
+        defender_gk_near_rate = float(summary.get("defender_gk_near_rate", 0.0))
+        defender_corridor_distance_mean = float(summary.get("defender_corridor_distance_mean", 0.0))
+        executed_block_rate = float(summary.get("executed_block_rate", 0.0))
+        executed_pass_rate = float(summary.get("executed_pass_rate", 0.0))
+        defense_phase_rate = float(summary.get("defense_phase_rate", 0.0))
+        print(
+            "[eval] "
+            f"step={timestep} stage={stage_id} "
+            f"reward_mean={reward_mean:.3f} defender_score={defender_score:.3f} "
+            f"goal_side={defender_goal_side_rate:.3f} cover={defender_cover_corridor_rate:.3f} "
+            f"danger_cover={defender_danger_cover_rate:.3f} gk_near={defender_gk_near_rate:.3f} "
+            f"corridor_mm={defender_corridor_distance_mean:.0f} defense_phase={defense_phase_rate:.3f} "
+            f"block={executed_block_rate:.3f} pass={executed_pass_rate:.3f} "
+            f"collision={collision_rate:.3f} stability={stability_score:.3f} "
+            f"policy_incompat={policy_incompatible_takeover_rate:.3f} "
+            f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
+            f"ball_conf={ball_confidence_score_mean:.3f} "
+            f"bc_beta={bc_beta:.4f} bc_ema={bc_competence_ema:.3f} "
+            f"policy_loss={policy_loss:.4f} value_loss={value_loss:.4f} entropy={entropy:.4f} "
+            f"wire={wire_audit.get('wire_audit_status', 'UNKNOWN')}",
+            flush=True,
+        )
+        return
     print(
         "[eval] "
         f"step={timestep} stage={stage_id} "

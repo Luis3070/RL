@@ -873,7 +873,10 @@ def _natural_dynamic_world_update(
         dtype=np.float32,
     )
     targets = base_targets + sway
-    max_opp_speed_mm_s = 420.0 if stage_id >= 4 else 330.0
+    if stage_id == 8:
+        max_opp_speed_mm_s = float(os.getenv("RL_MA_STAGE8_OPP_SPEED_MM_S", "180.0"))
+    else:
+        max_opp_speed_mm_s = 420.0 if stage_id >= 4 else 330.0
     max_opp_step = max_opp_speed_mm_s * dt_s
     for index in range(min(len(state.opponent_positions), len(targets))):
         delta = _limit_vector(targets[index] - state.opponent_positions[index], max_opp_step)
@@ -887,7 +890,11 @@ def _natural_dynamic_world_update(
     ball_target = observed_ball_pos + direction * (35.0 * math.sin(episode_step * 0.021)) + lateral * (
         55.0 * math.sin(episode_step * 0.017)
     )
-    ball_delta = _limit_vector(ball_target - state.ball_pos, (120.0 if stage_id >= 4 else 80.0) * dt_s)
+    if stage_id == 8:
+        max_ball_speed_mm_s = float(os.getenv("RL_MA_STAGE8_BALL_SPEED_MM_S", "60.0"))
+    else:
+        max_ball_speed_mm_s = 120.0 if stage_id >= 4 else 80.0
+    ball_delta = _limit_vector(ball_target - state.ball_pos, max_ball_speed_mm_s * dt_s)
     state.ball_vel = ball_delta / dt_s
     state.ball_pos = state.ball_pos + ball_delta
     state.ball_pos[0], state.ball_pos[1] = _clip_field(float(state.ball_pos[0]), float(state.ball_pos[1]))
@@ -910,6 +917,8 @@ def get_dynamic_world_update(
     dynamic_state: DynamicWorldState | None = None,
 ) -> Dict[str, object] | None:
     stage = get_stage_spec(stage_id)
+    if stage_id == 8 and os.getenv("RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES", "1") in {"0", "false", "False", "no", "NO"}:
+        return None
     if stage.obstacle_mode != "dynamic":
         return None
     if stage.dynamic_update_interval_steps <= 0 or episode_step % stage.dynamic_update_interval_steps != 0:

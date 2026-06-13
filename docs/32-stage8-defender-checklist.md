@@ -1,12 +1,15 @@
 # Stage 8 Defender: checklist operativo
 
-Estado al 2026-06-12: el pipeline visible stage 8 ya corre en modo
+Estado al 2026-06-13: el pipeline visible stage 8 ya corre en modo
 single-SimRobot, con escena multiagente corregida y `PYBH_RL_SHM_NAME` fresco
-automatico. Ya existe un dataset completo de volumen razonable en
-`runs/teacher_multiagent_dataset/dataset_stage8_20260612_212404`, pero el audit
-todavia no lo aprueba como dataset final por cobertura defensiva insuficiente.
-Tambien existe un dataset bootstrap auditable:
-`runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v1`.
+automatico. Se consolidaron las runs reales disponibles, incluyendo mas
+`transition_midfield`, y se genero un dataset defensivo bootstrap auditable:
+`runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v2`.
+Ese dataset ya fue mezclado con el dataset ofensivo stage 6/7 en
+`runs/teacher_multiagent_dataset/dataset_attack_plus_defense_stage8_v1`.
+El fine-tune inicial stage 8 termino en
+`runs/defender_stage8_v4_defreward_single_dynamic`; el checkpoint recomendado
+para continuar es `checkpoint_stage8_step4000.pt`.
 
 ## 0. Preparar shell
 
@@ -281,25 +284,42 @@ PASS esperado:
 
 ### Bootstrap desde runs existentes
 
-Estado: PASS. Se genero:
+Estado: PASS. Se genero la version final actual:
 
-- `runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v1`
-- `total_rows=94463`
-- `transition_midfield=9702 rows`
-- `block=14170 rows`
+- `runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v2`
+- `source_count=8`
+- `total_rows_raw=122090`
+- `total_rows=133193`
+- `total_episodes=100`
+- `transition_midfield=47222 rows`
+- `block=19979 rows`
 - `defender_block_frac=0.38`
 - audit `passed=true`
+
+Distribucion por escenario:
+
+- `defense_1v3_static_entry`: 26205 rows
+- `defense_2v3_dynamic`: 24297 rows
+- `defense_3v3_full`: 35469 rows
+- `transition_midfield`: 47222 rows
+
+Distribucion por skill:
+
+- `walk`: 80950
+- `stand`: 17585
+- `dribble`: 14679
+- `block`: 19979
 
 Comando:
 
 ```bash
 python build_stage8_defense_dataset.py \
-  --output-dir runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v1 \
-  --min-transition-rows 9000 \
+  --output-dir runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v2 \
+  --min-transition-rows 30000 \
   --min-block-frac 0.15
 
 python teacher_multiagent_dataset_audit.py \
-  runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v1 \
+  runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v2 \
   --min-striker-shoot-armed 0 \
   --min-striker-shoot-frac 0 \
   --min-striker-pass-armed 0 \
@@ -311,7 +331,7 @@ existentes; no genera estados nuevos fuera de los runs.
 
 ## 7. Mezclar ataque + defensa
 
-Estado: pendiente.
+Estado: PASS.
 
 El fine-tune no debe olvidar ataque. Mezclar dataset de ataque stage 7 con el
 defensivo stage 8.
@@ -319,49 +339,152 @@ defensivo stage 8.
 ```bash
 python merge_multiagent_teacher_datasets.py \
   runs/teacher_multiagent_dataset/dataset_multiagent_train_20260611_full_v1 \
-  runs/teacher_multiagent_dataset/dataset_defense_stage8_v1 \
+  runs/teacher_multiagent_dataset/dataset_defense_stage8_bootstrap_v2 \
   --output-dir runs/teacher_multiagent_dataset/dataset_attack_plus_defense_stage8_v1
 ```
 
-PASS esperado:
+Resultado:
 
-- merge valida que `gate_config` sea compatible;
-- `samples.npz` contiene obs 47;
-- resumen conserva filas de ataque y defensa.
+- `gate_config` compatible;
+- `obs_size=47`;
+- `stage_id=-1`, `stages=[6, 7, 8]`;
+- `total_rows=488701`;
+- `total_episodes=312`;
+- `positive_weight_gate_label_consistent=true`;
+- `positive_weight_role_mask_consistent=true`.
+
+Distribucion de skills del dataset mixto:
+
+- `walk`: 255687
+- `stand`: 161139
+- `dribble`: 36093
+- `block`: 19979
+- `pass`: 11808
+- `shoot`: 3995
 
 ## 8. Fine-tune
 
-Estado: pendiente.
+Estado: PASS inicial.
 
-Checkpoint de arranque preferido: el stage 7 multiagente actual. Verificar el
-path exacto antes de correr.
+Run inicial:
+
+- `runs/defender_stage8_v4_defreward_single_dynamic`
+- telemetria:
+  `runs/defender_stage8_v4_defreward_single_dynamic/telemetry/multiagent_stage8_finetune_train_stage8_20260613_111459`
+- dataset:
+  `runs/teacher_multiagent_dataset/dataset_attack_plus_defense_stage8_v1/samples.npz`
+- warm-start:
+  `runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt`
+- escena: `RLMAStage7_3D`
+- jugadores RL visibles: `RL_MA_PROD_PLAYERS=1`
+- steps: `12000`, eval/checkpoint cada `2000`
+
+Checkpoint recomendado para continuar: `checkpoint_stage8_step4000.pt`.
+Motivo: fue el unico punto con `wire=PASS`, `collision=0.000`,
+`policy_incompat=0.001` y reward medio alto (`0.750`). `step2000` tuvo el mejor
+`defender_score` bruto (`0.897`), pero con `collision=0.375`; `step12000`
+recupero cobertura (`defender_score=0.852`) pero tambien subio a
+`collision=0.500`.
+
+Resumen de evaluacion:
+
+| step | reward | defender_score | goal_side | cover | danger_cover | collision | wire |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 2000 | 0.231 | 0.897 | 1.000 | 0.872 | 0.865 | 0.375 | WARN |
+| 4000 | 0.750 | 0.767 | 0.954 | 0.554 | 0.594 | 0.000 | PASS |
+| 6000 | 0.490 | 0.822 | 1.000 | 0.716 | 0.730 | 0.375 | WARN |
+| 8000 | 0.623 | 0.757 | 0.898 | 0.621 | 0.672 | 0.250 | PASS |
+| 10000 | 0.729 | 0.655 | 0.867 | 0.464 | 0.513 | 0.375 | WARN |
+| 12000 | 0.082 | 0.852 | 1.000 | 0.800 | 0.812 | 0.500 | WARN |
+
+Comando usado para el run inicial:
 
 ```bash
+cd /home/rafael/Documentos/HSL/RL
+source .venv/bin/activate
+unset PYBH_RL_SHM_NAME
+
+export PYTHONPATH=/home/rafael/Documentos/HSL/RL:/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python
+export LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
+export RL_SCENE_NAME=RLMAStage7_3D
+export RL_MA_PROD_PLAYERS=1
+export RL_MA_PROD_SIMROBOT_LAUNCH=1
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_PROD_SCENARIO_SET=defense \
-RL_MA_PROD_EXPERIMENT_NAME=defender_stage8_v1 \
-RL_MA_PROD_TRAIN_STEPS=5000 \
+RL_MA_PROD_EXPERIMENT_NAME=defender_stage8_v4_defreward_single_dynamic \
+RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES=1 \
+RL_MA_STAGE8_OPP_SPEED_MM_S=120 \
+RL_MA_STAGE8_BALL_SPEED_MM_S=40 \
+RL_MA_PROD_TRAIN_STEPS=12000 \
 RL_MA_PROD_MAX_EPISODE_STEPS=600 \
+RL_MA_PROD_EVAL_INTERVAL=2000 \
+RL_MA_PROD_CHECKPOINT_INTERVAL=2000 \
+RL_MA_PROD_EVAL_EPISODES=8 \
+RL_MA_PROD_BC_REPLAY_WEIGHT=0.15 \
+RL_MA_PROD_BC_BETA_MAX=0.12 \
+RL_MA_PROD_BC_BETA_MIN=0.04 \
+RL_MA_PROD_BC_REPLAY_UPDATES=3 \
 python train_multiagent_production.py \
   --stage-id 8 \
   --checkpoint runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
   --dataset runs/teacher_multiagent_dataset/dataset_attack_plus_defense_stage8_v1/samples.npz
 ```
 
-PASS esperado:
+PASS esperado para siguientes corridas:
 
 - guarda checkpoints stage 8;
 - no crashea por stage choices;
 - mantiene floor de ataque;
 - mejora metricas defensivas sin colisiones sistematicas con GK/supports.
 
+Metricas stage 8 relevantes en el log `[eval]`:
+
+- `defender_score`: agregado defensivo, no reward ofensivo heredado.
+- `goal_side`: fraccion de fase defensiva en que el robot queda del lado de su
+  arco respecto al balon.
+- `cover`: fraccion de fase defensiva en el corredor arco-propio -> balon.
+- `danger_cover`: cobertura del corredor cuando el balon esta en zona peligrosa.
+- `gk_near`: cercania indebida al goalkeeper; debe tender a 0.
+- `corridor_mm`: distancia media al corredor arco-propio -> balon; menor es mejor.
+- `block` / `pass`: tasas de ejecucion de esas skills.
+- `collision`, `stability`, `wire`: sanidad fisica/perceptual.
+
+Para stage 8, `bc_ema` ahora usa `defender_score` como competencia principal en
+vez de `clean_finish`, porque `finish/takeover` son metricas ofensivas heredadas.
+
+Reward stage 8:
+
+- Se conserva el reward base heredado para no romper la compatibilidad del
+  checkpoint stage 7.
+- Encima se agrega shaping defensivo por step: `defense_goal_side`,
+  `defense_cover_corridor`, `defense_danger_cover`, `defense_block`,
+  `defense_pass_clear`, `defense_threat_reduction`.
+- Penaliza `defense_abandon`, `defense_far_corridor`, `defense_gk_near` y
+  `defense_collision`.
+- Estos terminos aparecen en `reward_terms_mean` y `reward_weighted_terms_mean`
+  dentro de la telemetria/eval summary.
+
+Nota operativa: stage 8 arranca con `RL_MA_PROD_PLAYERS=1` y
+`RL_MA_PROD_SIMROBOT_LAUNCH=1` para usar un solo SimRobot visible. El modo
+completo con tres slots se debe probar despues con `RL_MA_PROD_PLAYERS=1,2,3`,
+cuando el fine-tune de un slot ya sea estable.
+
+Mantener `RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES=1`: stage 8 debe seguir siendo
+dinamico. Para evitar movimientos raros cuando un oponente cae, el runtime C++
+ignora dynamic teleports sobre robots que no estan upright, y el curriculum usa
+velocidades conservadoras por defecto (`RL_MA_STAGE8_OPP_SPEED_MM_S=180`,
+`RL_MA_STAGE8_BALL_SPEED_MM_S=60`). Si hace falta estresar mas, subir esas
+velocidades gradualmente.
+
 ## 9. Evaluacion y export
 
-Estado: pendiente.
+Estado: pendiente sobre el checkpoint recomendado.
 
 Antes de exportar:
 
+- partir de `runs/defender_stage8_v4_defreward_single_dynamic/checkpoint_stage8_step4000.pt`
+  salvo que una re-evaluacion multi-seed demuestre otro candidato mejor;
 - correr evaluator ofensivo para confirmar que no se rompio ataque;
 - correr evaluacion stage 8 defensiva;
 - revisar `defender_cover_hold_rate`, `defender_gk_collision_rate`,
@@ -384,7 +507,7 @@ PASS esperado:
 
 ## Punto actual
 
-Estamos en el paso 5, listos para regenerar dataset real:
+Estamos despues del primer fine-tune stage 8:
 
 - dry-run stage 8: PASS;
 - SimRobot visible single-process: PASS;
@@ -392,7 +515,10 @@ Estamos en el paso 5, listos para regenerar dataset real:
 - dataset real anterior `dataset_stage8_20260612_212404`: completo, `28078`
   filas, pero FAIL por cobertura defensiva;
 - smoke corregido `dataset_stage8_20260612_214346`: PASS de audit defensivo.
+- consolidado defensivo bootstrap v2: PASS de audit;
+- merge ataque+defensa: PASS.
+- fine-tune inicial `defender_stage8_v4_defreward_single_dynamic`: PASS.
 
-Siguiente accion concreta: correr de nuevo el paso 5 chunked. No probar 2
-SimRobot todavia: el single-SimRobot ya produce cobertura sana; primero generar
-el dataset real corregido y auditarlo.
+Siguiente accion concreta: evaluar/exportar desde
+`runs/defender_stage8_v4_defreward_single_dynamic/checkpoint_stage8_step4000.pt`
+o continuar fine-tuning desde ese checkpoint con eval multi-seed.

@@ -144,13 +144,16 @@ def _default_players_for_stage(stage_id: int) -> str:
 
     Stage 6: 2 RL field (+ player 3 = BH GK).
     Stage 7: 3 RL field (+ player 4 = BH GK).
-    parallel_player_numbers controls how many RealSimRobotEnv slots run in
-    parallel — keeping at the RL-field count so the scheduler doesn't oversubscribe.
+    Stage 8 starts conservatively with one visible slot; BC replay still uses
+    the mixed attack+defense corpus, and RL_MA_PROD_PLAYERS=1,2,3 can opt back
+    into full parallel rollouts once the single-slot run is stable.
     """
     if stage_id == 6:
         return "1,2"
-    if stage_id in (7, 8):
+    if stage_id == 7:
         return "1,2,3"
+    if stage_id == 8:
+        return "1"
     raise ValueError(f"Multi-agent production fine-tune supports stage 6, 7, or 8, got {stage_id}")
 
 
@@ -196,12 +199,14 @@ def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
         )
 
     players_str = os.getenv("RL_MA_PROD_PLAYERS", _default_players_for_stage(stage_id))
+    players = _parse_players(players_str)
+    simrobot_launch = _env_bool("RL_MA_PROD_SIMROBOT_LAUNCH", len(players) == 1)
     return train.ScriptRunConfig(
         mode="train",
         backend="simrobot_visible",
         obs_mode="corrected",
         simrobot_profile="3d_visible",
-        simrobot_launch=False,
+        simrobot_launch=simrobot_launch,
         embedded_3d_preflight=False,
         learner_device=os.getenv("RL_LEARNER_DEVICE", "cuda:0" if _has_cuda() else "cpu"),
         stage_id=stage_id,
@@ -252,7 +257,7 @@ def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
         post_takeover_progress_window_steps=120,
         telemetry_tag=os.getenv("RL_MA_PROD_TELEMETRY_TAG", f"multiagent_stage{stage_id}_finetune"),
         experiment_name=experiment_name,
-        parallel_player_numbers=_parse_players(players_str),
+        parallel_player_numbers=players,
         visible_parallel_display_base=_env_int("RL_MA_PROD_VISIBLE_DISPLAY_BASE", 430),
     )
 
@@ -271,6 +276,8 @@ def run(args: argparse.Namespace) -> None:
     # RL_PRODUCTION_SCENARIO_SET to pick the iterator; "team" must be wired into
     # the env's scenario factory (small env-side TODO if not yet done).
     os.environ.setdefault("RL_PRODUCTION_SCENARIO_RESETS", "1")
+    if int(args.stage_id) == 8 and os.getenv("RL_SCENE_NAME", "RL1v0_3D_visible") == "RL1v0_3D_visible":
+        os.environ["RL_SCENE_NAME"] = "RLMAStage7_3D"
     os.environ.setdefault(
         "RL_PRODUCTION_SCENARIO_SET",
             os.getenv("RL_MA_PROD_SCENARIO_SET", "defense" if int(args.stage_id) == 8 else "team"),
@@ -308,6 +315,7 @@ def run(args: argparse.Namespace) -> None:
         f"dataset={Path(args.dataset).expanduser().resolve()} "
         f"experiment={run_cfg.experiment_name} "
         f"steps={run_cfg.train_steps} players={run_cfg.parallel_player_numbers} "
+        f"scene={os.getenv('RL_SCENE_NAME', '')} "
         f"scenario_set={os.getenv('RL_PRODUCTION_SCENARIO_SET')} "
         f"eval_episodes={run_cfg.eval_episodes} max_episode_steps={run_cfg.max_episode_steps} "
         f"bc[beta={run_cfg.bc_beta_min:.3f}..{run_cfg.bc_beta_max:.3f},half_life={run_cfg.bc_competence_half_life_evals:g},"
