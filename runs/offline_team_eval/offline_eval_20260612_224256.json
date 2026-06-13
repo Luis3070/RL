@@ -1,0 +1,117 @@
+{
+  "meta": {
+    "onnx": "C:\\Users\\MSI\\Desktop\\Programacion\\Semillero\\RL\\ppo_team_hsl2026.onnx",
+    "corpus": "C:\\Users\\MSI\\Desktop\\Programacion\\Semillero\\RL\\runs\\teacher_multiagent_dataset\\dataset_multiagent_train_20260611_full_v1\\samples.npz",
+    "n_obs": 355508,
+    "timestamp": "2026-06-12T22:42:55",
+    "obs_dim": 47
+  },
+  "stability": {
+    "nan_inf_rate": 0.0,
+    "masked_choice_illegal_rate": 0.0,
+    "param_saturation_rate": 0.8272922128334664,
+    "determinism_ok": true,
+    "jitter_skill_flip_rate@sigma0.05": 0.00745,
+    "jitter_param_drift_l2@sigma0.05": 0.04831448197364807,
+    "info_raw_head_wants_forbidden_rate": 0.9722594146967157,
+    "info_raw_head_prob_mass_on_forbidden_mean": 0.9756482243537903,
+    "info_note": "raw_head_* are INFORMATIONAL: forbid-invalid MAPPO applies the mask at sample+update time, so the unmasked head is never trained to respect the gate. The deployed (masked) choice is illegal 0% of the time.",
+    "lights": {
+      "nan": "GREEN",
+      "gate_compliance(masked)": "GREEN",
+      "jitter": "GREEN",
+      "determinism": "GREEN"
+    },
+    "verdict": "GREEN"
+  },
+  "robustness": {
+    "noise_curve": {
+      "agree@sigma0.05": 0.9925333333333334,
+      "naninf@sigma0.05": 0.0,
+      "agree@sigma0.1": 0.9850833333333333,
+      "naninf@sigma0.1": 0.0,
+      "agree@sigma0.2": 0.9689833333333333,
+      "naninf@sigma0.2": 0.0,
+      "agree@sigma0.5": 0.9283666666666667,
+      "naninf@sigma0.5": 0.0
+    },
+    "missing_teammates_finite_rate": 1.0,
+    "missing_teammates_skill_flip_rate": 0.038766666666666665,
+    "pass_recall_clean@pass_armed_striker": 0.99575,
+    "pass_recall_noisy@sigma0.1": 0.9944166666666666,
+    "ood_tail_finite_rate": 1.0,
+    "lights": {
+      "noise": "GREEN",
+      "missing_inputs": "GREEN",
+      "pass_robustness": "GREEN",
+      "ood_tail": "GREEN"
+    },
+    "verdict": "GREEN"
+  },
+  "diversity": {
+    "overall_skill_dist": {
+      "stand": 0.09283897971353669,
+      "walk": 0.8036021692901426,
+      "shoot": 0.010975843019003792,
+      "pass": 0.03361105797900469,
+      "dribble": 0.058971949998312276,
+      "block": 0.0,
+      "mark": 0.0,
+      "observe": 0.0
+    },
+    "skill_entropy_nats": 0.7268704134881582,
+    "top1_skill_rate": 0.8036021692901426,
+    "per_role_skill_dist": {
+      "striker": {
+        "stand": 0.03246077137410178,
+        "walk": 0.6997213667693211,
+        "shoot": 0.028611233318668425,
+        "pass": 0.08761548614166301,
+        "dribble": 0.15159114239624577,
+        "block": 0.0,
+        "mark": 0.0,
+        "observe": 0.0
+      },
+      "open_support": {
+        "stand": 0.14145604395604397,
+        "walk": 0.8585439560439561,
+        "shoot": 0.0,
+        "pass": 0.0,
+        "dribble": 0.0,
+        "block": 0.0,
+        "mark": 0.0,
+        "observe": 0.0
+      },
+      "off_ball_support": {
+        "stand": 0.10855728429985856,
+        "walk": 0.8874850397127625,
+        "shoot": 0.0,
+        "pass": 0.0,
+        "dribble": 0.003957675987378958,
+        "block": 0.0,
+        "mark": 0.0,
+        "observe": 0.0
+      }
+    },
+    "striker_ball_skill_rate": 0.2678178618565772,
+    "support_shoot_or_pass_rate": 0.0,
+    "pass_recall_on_pass_armed_striker": 0.99575,
+    "policy_pass_rate_overall": 0.03361105797900469,
+    "teacher_fidelity_weighted": 0.6142196518784387,
+    "teacher_fidelity_by_role": {
+      "striker": 0.9614312949112773,
+      "open_support": 0.38543956043956046,
+      "off_ball_support": 0.42324012621042323
+    },
+    "support_walk_vs_stand_note": "Supports diverge from the teacher mainly by preferring walk over stand (both gate-legal). This is a YELLOW flag, not a defect: only the live hold-rate (support_open_hold_rate / support_triangle_hold_rate from the team env) can confirm supports HOLD position vs drift. Run the live sim.",
+    "lights": {
+      "mode_collapse": "GREEN",
+      "striker_fidelity": "GREEN",
+      "support_discipline": "GREEN",
+      "support_fidelity(info)": "YELLOW"
+    },
+    "verdict": "GREEN"
+  },
+  "overall_verdict": "GREEN",
+  "caveat": "Offline policy-function evaluation on the deployment ONNX. Closed-loop metrics (real collision rate, goal conversion, pass completion in motion) require the live SimRobot 3D loop (pybh) and are NOT covered here."
+}
