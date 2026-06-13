@@ -116,10 +116,25 @@ DEFENDER_BLOCK_FRONT_OPP_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_OPP_MM", "1
 DEFENDER_BLOCK_FRONT_BALL_X_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_BALL_X_MM", "1800.0"))
 DEFENDER_BLOCK_COVER_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_COVER_DIST_MM", "900.0"))
 
+# Recovery + defensive clearance (§Part2 D1-D3). When a defender wins the ball it
+# must clear to safety or pass out — not keep blocking/holding. D1: physical ball
+# control promotes any agent to striker immediately (bypassing role hysteresis).
+# D2/D3: a striker deep in our own third prefers a safe up-field pass, else a
+# clearance kick (shoot up-field, away from our goal), else drives the ball out.
+BALL_CONTROL_RADIUS_MM = float(os.getenv("RL_MA_BALL_CONTROL_RADIUS_MM", "350.0"))
+DEFENSIVE_CLEAR_X_MM = float(os.getenv("RL_MA_DEF_CLEAR_X_MM", "-1500.0"))
+CLEAR_PASS_MIN_UPFIELD_MM = float(os.getenv("RL_MA_DEF_CLEAR_MIN_UPFIELD_MM", "600.0"))
+CLEAR_ESCAPE_TARGET_X_MM = float(os.getenv("RL_MA_DEF_CLEAR_ESCAPE_X_MM", "0.0"))
+CLEAR_CENTRAL_DANGER_Y_MM = float(os.getenv("RL_MA_DEF_CLEAR_CENTRAL_Y_MM", "1500.0"))
+
 # EMA smoothing for coordination targets (§11.B.3.2). Lives on the env (not the teacher);
 # constants exposed here so the orchestrator imports a single source of truth.
-EMA_ALPHA_OPEN_LANE = 0.3          # 3-frame effective smoothing on open-lane center
-EMA_ALPHA_TRIANGLE = 0.2           # 5-frame effective smoothing on triangle vertex
+# v3a (§Part1 P5): lowered alphas so the target a support is asked to hold stops
+# drifting frame-to-frame. With the old 0.3/0.2 the open-lane/triangle centre tracked
+# the ball closely enough that a support could never settle inside HOLD_RADIUS — low
+# hold by construction. Slower EMA gives a still target to stand on. Env-tunable.
+EMA_ALPHA_OPEN_LANE = float(os.getenv("RL_MA_EMA_ALPHA_OPEN_LANE", "0.15"))   # ~7-frame smoothing
+EMA_ALPHA_TRIANGLE = float(os.getenv("RL_MA_EMA_ALPHA_TRIANGLE", "0.10"))     # ~10-frame smoothing
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +275,24 @@ def assign_roles(
             prev_striker = aid
             break
 
+    # D1: physical ball control overrides the TTRB hysteresis. Whoever actually has
+    # the ball plays it — without this, an agent that just won a duel/recovery keeps
+    # its prior off_ball/defender role for ROLE_HYSTERESIS_FRAMES and blocks/holds
+    # instead of clearing or passing. Recovery is exactly the case the hysteresis
+    # should NOT delay.
+    candidate_has_ball = (
+        math.hypot(float(agent_obs[candidate].ball_rel_x), float(agent_obs[candidate].ball_rel_y))
+        < BALL_CONTROL_RADIUS_MM
+        and float(agent_obs[candidate].time_since_ball_seen) <= TEAMMATE_FRESH_MAX_AGE_MS
+    )
+
     committed_striker = candidate
-    if prev_striker is not None and prev_striker in agent_ids and prev_striker != candidate:
+    if (
+        prev_striker is not None
+        and prev_striker in agent_ids
+        and prev_striker != candidate
+        and not candidate_has_ball
+    ):
         gap = distances[prev_striker] - distances[candidate]
         if gap < ROLE_MIN_DISTANCE_GAP_MM:
             # Gap too small — keep previous striker regardless of streak.
@@ -566,6 +597,37 @@ def teacher_striker(
     last_pass_target is the BHuman agent_id (player number) from the prior frame,
     or None if no recent pass. The env owns this state.
     """
+    # D2/D3: defensive-third clearance. When the striker (often a just-recovered
+    # defender, see D1) controls the ball deep in our own third, real soccer says
+    # clear to safety or pass out — NOT dribble across our own box toward the
+    # opponent goal. Prefer a safe up-field pass; else clear (kick up-field, which
+    # B-Human's goal-aware shoot does from deep); else drive the ball out toward
+    # midfield. Fires only with ball control (shoot/dribble armed), so it's gate-
+    # consistent; the clearance-shoot path relies on shoot_armed being set for
+    # clearances (baked in the dataset, see teacher_multiagent_dataset / D4).
+    controlled = bool(gate_decision.shoot_armed or gate_decision.dribble_armed)
+    if controlled and float(obs.ball_x) < DEFENSIVE_CLEAR_X_MM:
+        clear_pass_id = defensive_clear_pass_target(obs, teammate_slots)
+        if clear_pass_id >= 0 and bool(getattr(gate_decision, "pass_armed", False)):
+            return StructuredSkillAction(
+                skill_type=SkillType.pass_,
+                target_x=0.0, target_y=0.0, target_theta=0.0,
+                pass_target=clear_pass_id,
+            )
+        if gate_decision.shoot_armed and defender_clear_armed(obs, teammate_slots):
+            # Clearance kick up-field (away from our goal).
+            return StructuredSkillAction(skill_type=SkillType.shoot)
+        # Fallback: drive the ball out of the danger zone toward midfield/wing.
+        side = 1.0 if float(obs.robot_y) >= 0.0 else -1.0
+        escape_x = CLEAR_ESCAPE_TARGET_X_MM
+        escape_y = float(np.clip(abs(float(obs.robot_y)) + 600.0, 0.0, 2000.0)) * side
+        heading = math.atan2(escape_y - float(obs.robot_y), escape_x - float(obs.robot_x))
+        drive_skill = SkillType.dribble if gate_decision.dribble_armed else SkillType.walk
+        return StructuredSkillAction(
+            skill_type=drive_skill,
+            target_x=escape_x, target_y=escape_y, target_theta=heading,
+        )
+
     decision = stage_aware_teacher_action(
         obs, stage_id, prev_skill_name, gate_decision=gate_decision,
     )
@@ -1151,6 +1213,57 @@ def defender_block_armed(
     opponent_front = 0.0 < float(obs.nearest_opponent_front_dist) < DEFENDER_BLOCK_FRONT_OPP_MM
     central_threat = abs(ball_y) < OWN_GOAL_POST_Y_MM + 400.0
     return bool((ball_dist < DEFENDER_BLOCK_BALL_DIST_MM and central_threat) or ball_front or opponent_front)
+
+
+def defensive_clear_pass_target(
+    striker_obs: BackendObservation,
+    teammate_slots: list[TeammateSlot],
+) -> int:
+    """D2: pick the safest up-field outlet for a clearance pass (agent_id or -1).
+
+    Unlike the attacking smash_or_pass (which scores teammates by goal proximity),
+    a clearance wants the most UP-FIELD teammate relative to the ball — get it
+    forward and out of our third, keeping possession. Lane must be clear and the
+    pass within range; GK is never a clearance target.
+    """
+    ball_x = float(striker_obs.ball_x)
+    best_id = -1
+    best_x = ball_x + CLEAR_PASS_MIN_UPFIELD_MM  # must be at least this far up-field
+    if float(striker_obs.nearest_opponent_front_dist) <= OPPONENT_LANE_CLEARANCE_MM:
+        return -1  # front lane blocked — don't pass into pressure, clear/drive instead
+    for slot in teammate_slots:
+        if slot.is_gk or slot.agent_id < 0:
+            continue
+        pass_dist = math.hypot(
+            slot.x_field - float(striker_obs.robot_x),
+            slot.y_field - float(striker_obs.robot_y),
+        )
+        if pass_dist < MIN_PASS_DISTANCE_MM or pass_dist > MAX_PASS_DISTANCE_MM:
+            continue
+        if slot.x_field > best_x:
+            best_x = slot.x_field
+            best_id = slot.agent_id
+    return best_id
+
+
+def defender_clear_armed(
+    obs: BackendObservation,
+    teammate_slots: list[TeammateSlot],
+) -> bool:
+    """D3: synthetic clearance-shoot gate for deep, pressured, no-outlet situations.
+
+    Mirrors defender_block_armed's role: the train-time mask allows shoot only when
+    shoot_armed is set, so the dataset bakes shoot_armed=True when this fires (Design-A
+    preserved). True when the striker is deep in our own third, centrally exposed, and
+    has no safe up-field pass — i.e. the moment to hoof it clear rather than dribble
+    through our own box.
+    """
+    if float(obs.ball_x) >= DEFENSIVE_CLEAR_X_MM:
+        return False
+    if defensive_clear_pass_target(obs, teammate_slots) >= 0:
+        return False  # a safe pass exists — prefer it over a blind clearance
+    central = abs(float(obs.ball_y)) < CLEAR_CENTRAL_DANGER_Y_MM
+    return bool(central)
 
 
 def _defender_side(ball_y: float, current_side: float | None) -> float:

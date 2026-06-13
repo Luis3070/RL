@@ -1078,6 +1078,14 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "defender_corridor_distance_mean",
         "defender_skill_balance",
         "defender_score",
+        # Team coordination metrics (P0): folded into episode_metrics by
+        # TeamSlotSimRobotEnv so they are averaged across eval episodes here,
+        # instead of being read last-episode-only from LAST_TEAM_METRICS.
+        "support_open_hold_rate",
+        "support_triangle_hold_rate",
+        "role_thrash_rate",
+        "team_goal",
+        "goals_conceded_rate",
         "ball_progress_post_takeover_mean",
         "post_takeover_finishing_rate",
         "stability_score",

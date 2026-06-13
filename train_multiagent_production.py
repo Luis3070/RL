@@ -80,7 +80,8 @@ DEFAULT_STAGE8_SCENARIO_WEIGHTS = (
     "defense_1v3_static_entry:1,"
     "defense_2v3_dynamic:2,"
     "defense_3v3_full:3,"
-    "transition_midfield:1.5"
+    "transition_midfield:1.5,"
+    "defense_recovery_clear:2"
 )
 
 

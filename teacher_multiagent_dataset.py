@@ -67,6 +67,7 @@ from multiagent_teacher import (
     build_agent_id_map,
     build_team_gate_decision,
     defender_block_armed,
+    defender_clear_armed,
     defender_cover_target,
     defense_support_target,
     compute_open_lane_target,
@@ -1127,6 +1128,22 @@ def _collect_team_scenario(
                         team_state.last_pass_target_age_ms_by_striker.get(aid, 0.0),
                     )
                     pass_armed = skill_proposal == "pass"
+
+                # D4: arm shoot for a deep clearance (no safe outlet). Mirrors the
+                # block baking above — bake shoot_armed=True so the baked obs, the
+                # train-time mask, and the clearance-shoot label all agree (Design-A).
+                # Runtime reachability (live gate.py + C++ encoder) tracked in §Part2 D4.
+                if (
+                    role == "striker"
+                    and not pass_armed
+                    and (base_decision.shoot_armed or base_decision.dribble_armed)
+                    and defender_clear_armed(obs, teammate_slots)
+                ):
+                    base_decision = replace(
+                        base_decision,
+                        shoot_armed=True,
+                        shoot_arm_progress=max(float(base_decision.shoot_arm_progress), 1.0),
+                    )
 
                 team_decision = build_team_gate_decision(
                     base_decision, role=role, pass_armed=pass_armed,

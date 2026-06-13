@@ -149,15 +149,21 @@ class MultiAgentBCReplayRegularizer(BCReplayRegularizer):
         # teacher-pass contexts) but eval rollouts under-visit those contexts —
         # heavier BC sampling keeps the skill sharp while team rewards create the
         # contexts.
+        # v3a P7 (conversion): striker shoot 0.20→0.24, dribble 0.18→0.15 — the
+        # closed-loop striker over-dribbles and under-shoots (dist walk .70/dribble
+        # .15/shoot .029); pulling BC toward shoot lifts finishing.
+        # v3a P4 (support hold): supports collapsed to walk (.86 vs teacher .66 stand),
+        # so flip the walk/stand mix — open walk 0.16→0.10 / stand 0.08→0.13,
+        # off_ball walk 0.14→0.08 / stand 0.06→0.12 — so BC pulls supports to hold.
         return (
-            ("striker", "shoot", 0.20),
-            ("striker", "dribble", 0.18),
+            ("striker", "shoot", 0.24),
+            ("striker", "dribble", 0.15),
             ("striker", "walk", 0.06),
             ("striker", "pass", 0.10),
-            ("open_support", "walk", 0.16),
-            ("open_support", "stand", 0.08),
-            ("off_ball_support", "walk", 0.14),
-            ("off_ball_support", "stand", 0.06),
+            ("open_support", "walk", 0.10),
+            ("open_support", "stand", 0.13),
+            ("off_ball_support", "walk", 0.08),
+            ("off_ball_support", "stand", 0.12),
             ("off_ball_support", "dribble", 0.02),
         )
 

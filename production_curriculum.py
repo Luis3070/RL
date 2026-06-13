@@ -465,6 +465,42 @@ def _transition_midfield_world(rng: np.random.Generator) -> WorldSpec:
     return _defense_team_world(rng, ball_x_range=(-900.0, -250.0), attacker_count=1, dynamic=True, transition=True)
 
 
+def _defense_recovery_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 8 recovery: our player wins the ball deep and must clear/pass out.
+
+    The ball spawns ON one of our field players in the defensive third (it controls
+    the ball immediately → D1 promotes it to striker), an attacker presses from
+    behind (the duel it just won), and an up-field teammate is available as a
+    clearance-pass outlet. Produces the recover→safe-pass / clearance / drive-out
+    rows that the §Part2 D2/D3 teacher logic needs but the positional defense
+    scenarios never generate (there our players never get the ball).
+    """
+    ball_x = float(rng.uniform(-3000.0, -2000.0))
+    ball_y = _clip_y(float(rng.uniform(-800.0, 800.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    # Recovering player spawns essentially on the ball (within ball-control radius).
+    recoverer = (ball_x - float(rng.uniform(80.0, 220.0)), _clip_y(ball_y + float(rng.uniform(-120.0, 120.0))))
+    # Up-field outlet teammate: ahead of the ball toward midfield, off to one side.
+    outlet = (float(rng.uniform(-1200.0, 200.0)), _clip_y(side * float(rng.uniform(700.0, 1500.0))))
+    # Deep cover teammate stays back.
+    cover = (float(rng.uniform(-3600.0, -3200.0)), _clip_y(ball_y * 0.4))
+    gk = WorldPlayerSpec(number=4, x=-4300.0, y=0.0, theta=0.0)
+    # One pressing attacker just goal-side of the ball (recently dispossessed).
+    presser_x = ball_x + float(rng.uniform(250.0, 600.0))
+    opponents = (WorldPlayerSpec(number=1, x=presser_x, y=_clip_y(ball_y + float(rng.uniform(-250.0, 250.0))), theta=math.pi),)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(recoverer, dtype=np.float32),
+        robot_theta=math.atan2(ball_y - recoverer[1], ball_x - recoverer[0]),
+        teammates=(
+            WorldPlayerSpec(number=2, x=outlet[0], y=outlet[1], theta=math.atan2(ball_y - outlet[1], ball_x - outlet[0])),
+            WorldPlayerSpec(number=3, x=cover[0], y=cover[1], theta=math.atan2(ball_y - cover[1], ball_x - cover[0])),
+            gk,
+        ),
+        opponents=opponents,
+    )
+
+
 def team_defense_scenarios(episodes: int) -> list[ProductionScenario]:
     e = max(1, int(episodes))
     return [
@@ -487,6 +523,11 @@ def team_defense_scenarios(episodes: int) -> list[ProductionScenario]:
             name="transition_midfield", stage_id=8,
             description="Stage 8 midfield transition with sticky attack/defense phase.",
             world_fn=_transition_midfield_world, episodes=max(1, int(e * 1.5)), obstacles="dynamic",
+        ),
+        ProductionScenario(
+            name="defense_recovery_clear", stage_id=8,
+            description="Stage 8 recovery: our player wins the ball deep and clears/passes out (D2/D3).",
+            world_fn=_defense_recovery_world, episodes=e * 2, obstacles="dynamic",
         ),
     ]
 

@@ -64,10 +64,28 @@ STEP_DT_MS = float(os.getenv("RL_MA_TEACHER_STEP_DT_MS", "33.0"))
 # per-step here) so they don't dominate the existing per-step reward scale.
 TEAM_GOAL_BONUS = float(os.getenv("RL_MA_TEAM_GOAL_BONUS", "2.5"))
 TEAM_GOAL_CONCEDED_PENALTY = float(os.getenv("RL_MA_TEAM_GOAL_CONCEDED_PENALTY", "2.5"))
-SUPPORT_OPEN_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_OPEN_HOLD_BONUS", "0.05"))
-SUPPORT_TRIANGLE_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS", "0.02"))
+# v3a (§Part1): supports collapsed to walk (.86) vs the teacher's stand (.66) because
+# the hold bonus paid for mere proximity, not for actually standing — walking around
+# inside the radius earned the same credit. And the open/triangle split (0.05/0.02)
+# mirrored the measured hold gap (open 0.159 / triangle 0.003): the triangle bonus was
+# too small to matter. Fixes: (1) require stand to collect (SUPPORT_HOLD_REQUIRE_STAND),
+# (2) close the open/triangle gap and lift both, (3) penalise drifting back out.
+SUPPORT_OPEN_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_OPEN_HOLD_BONUS", "0.07"))
+SUPPORT_TRIANGLE_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS", "0.06"))
+SUPPORT_HOLD_REQUIRE_STAND = os.getenv("RL_MA_SUPPORT_HOLD_REQUIRE_STAND", "1") not in ("0", "false", "False")
+SUPPORT_DRIFT_PENALTY = float(os.getenv("RL_MA_SUPPORT_DRIFT_PENALTY", "0.04"))
 PASS_ATTEMPT_CREDIT = float(os.getenv("RL_MA_PASS_ATTEMPT_CREDIT", "1.0"))
 HOLD_RADIUS_MM = float(os.getenv("RL_MA_HOLD_RADIUS_MM", "600.0"))
+# v3a (§Part1): conversion was borderline (shoot_finish ~0.17-0.25) because the only
+# finishing signal was the sparse one-shot goal bonus; the striker dribbles a lot and
+# rarely commits a shot. A small DENSE reward for taking a QUALITY shot (in the validated
+# 2.5-3m band with an open lane) pushes the policy to finish more than the BC teacher.
+# Kept small relative to TEAM_GOAL_BONUS so it shapes, not dominates (the goal bonus at
+# 5.0 traded away collision discipline in v2 — same failure mode to avoid here).
+FINISH_QUALITY_BONUS = float(os.getenv("RL_MA_FINISH_QUALITY_BONUS", "0.15"))
+FINISH_SHOT_OPEN_MIN = float(os.getenv("RL_MA_FINISH_SHOT_OPEN_MIN", "0.30"))
+FINISH_BAND_MIN_MM = float(os.getenv("RL_MA_FINISH_BAND_MIN_MM", "1500.0"))
+FINISH_BAND_MAX_MM = float(os.getenv("RL_MA_FINISH_BAND_MAX_MM", "3200.0"))
 
 # Side-channel for the BC competence gate: train.py's eval summarizer has a
 # fixed metric list, so the team metrics can't flow through episode_metrics
@@ -155,6 +173,8 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_defense_steps = 0
         self._ep_defender_cover_hold_steps = 0
         self._ep_defender_gk_collision_steps = 0
+        # v3a drift penalty (P2): per-agent "was within hold radius last step" latch.
+        self._was_holding: dict[int, bool] = {pn: False for pn in self.player_numbers}
 
         # Install the per-slot hooks.
         for agent, player_number in zip(self.possible_agents, self.player_numbers, strict=True):
@@ -466,6 +486,7 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_defense_steps = 0
         self._ep_defender_cover_hold_steps = 0
         self._ep_defender_gk_collision_steps = 0
+        self._was_holding = {pn: False for pn in self.player_numbers}
         self._prev_skill = {pn: None for pn in self.player_numbers}
         poses = {pn: _world_player_pose(world, pn) for pn in self.player_numbers}
         self._spawn_side = {pn: (1.0 if poses[pn][1] >= 0.0 else -1.0) for pn in poses}
@@ -556,6 +577,8 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
             role = roles_now.get(int(player_number), "")
             env = self._envs[agent]
             raw = env._last_backend_obs
+            info = infos.get(agent, {})
+            executed_skill = (info.get("executed_skill_name") or "")
             if raw is not None and role in ("open_support", "off_ball_support"):
                 target = (
                     self._team_state.open_lane_ema if role == "open_support"
@@ -563,13 +586,36 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                 )
                 if target is not None:
                     dist = math.hypot(float(raw.robot_x) - target[0], float(raw.robot_y) - target[1])
-                    if dist < HOLD_RADIUS_MM:
+                    in_radius = dist < HOLD_RADIUS_MM
+                    # P1: pay the hold bonus only when the support is actually holding
+                    # position (executed stand), not merely passing through the radius.
+                    is_standing = (not SUPPORT_HOLD_REQUIRE_STAND) or executed_skill == "stand"
+                    if in_radius and is_standing:
                         bonus += (
                             SUPPORT_OPEN_HOLD_BONUS if role == "open_support"
                             else SUPPORT_TRIANGLE_HOLD_BONUS
                         )
-            info = infos.get(agent, {})
-            if (info.get("executed_skill_name") or "") == "pass":
+                    # P2: penalise drifting back out of a held slot (was inside last
+                    # step, now outside) when the ball hasn't arrived — discourages the
+                    # walk-away that left triangle_hold at ~0.003.
+                    was_holding = self._was_holding.get(int(player_number), False)
+                    if was_holding and not in_radius:
+                        bonus -= SUPPORT_DRIFT_PENALTY
+                    self._was_holding[int(player_number)] = in_radius
+                else:
+                    self._was_holding[int(player_number)] = False
+            else:
+                self._was_holding[int(player_number)] = False
+            # P6: dense finishing reward for the striker taking a quality shot in band.
+            if role == "striker" and executed_skill == "shoot" and raw is not None:
+                shot_open = float(getattr(raw, "shot_opening_with_obstacles", 0.0))
+                ball_to_goal = math.hypot(float(GOAL_X) - float(raw.ball_x), float(raw.ball_y))
+                if (
+                    shot_open >= FINISH_SHOT_OPEN_MIN
+                    and FINISH_BAND_MIN_MM <= ball_to_goal <= FINISH_BAND_MAX_MM
+                ):
+                    bonus += FINISH_QUALITY_BONUS
+            if executed_skill == "pass":
                 bonus += PASS_ATTEMPT_CREDIT
             if team_goal:
                 bonus += TEAM_GOAL_BONUS
@@ -603,6 +649,13 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
             metrics["goals_conceded_rate"] = float(goal_conceded)
             for agent in infos:
                 infos[agent].update(metrics)
+                # P0: also fold the team metrics into episode_metrics so the eval
+                # aggregator (which averages result["episode_metrics"][key] across
+                # episodes) sees a per-episode hold-rate and reports the MEAN — not
+                # the last-episode-only value the competence gate used to read from
+                # LAST_TEAM_METRICS.
+                ep_metrics = infos[agent].setdefault("episode_metrics", {})
+                ep_metrics.update(metrics)
             # Publish for the BC competence gate (side-channel — see module docstring).
             LAST_TEAM_METRICS.clear()
             LAST_TEAM_METRICS.update(metrics)
