@@ -21,6 +21,7 @@ MASKED_SKILLS = ("pass", "mark", "block", "observe")
 # mark/block/observe stay masked off this sprint (need opponents in obs and a
 # defensive teacher branch). See .docs/10 §14.4 and §14.26 for the deferred work.
 ACTIVE_SKILLS_MA = ("stand", "walk", "dribble", "shoot", "pass")
+ACTIVE_SKILLS_MA_DEFENDER = ("stand", "walk", "dribble", "shoot", "pass", "block")
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,8 @@ def _scene_path(stage_id: int, simrobot_profile: str) -> Path:
     if simrobot_profile == "3d_visible" and stage_id == 6:
         return BHUMAN_DIR / "Config/Scenes/RLMAStage6_3D.ros2"
     if simrobot_profile == "3d_visible" and stage_id == 7:
+        return BHUMAN_DIR / "Config/Scenes/RLMAStage7_3D.ros2"
+    if simrobot_profile == "3d_visible" and stage_id == 8:
         return BHUMAN_DIR / "Config/Scenes/RLMAStage7_3D.ros2"
     if simrobot_profile == "2d":
         if stage_id >= 2:
@@ -374,6 +377,19 @@ _STAGE_SPECS[7] = StageSpec(
     active_skill_names=ACTIVE_SKILLS_MA,
     reward_weights=_STAGE_4_REWARDS,
     max_episode_steps=400,
+    dynamic_update_interval_steps=4,
+)
+_STAGE_SPECS[8] = StageSpec(
+    stage_id=8,
+    name="multiagent_defender_3v3",
+    description="1 BH GK + 3 RL field vs defensive stage-8 worlds; block enabled for defensive off-ball role.",
+    ball_radius_min_mm=600.0,
+    ball_radius_max_mm=None,
+    full_field=True,
+    obstacle_mode="dynamic",
+    active_skill_names=ACTIVE_SKILLS_MA_DEFENDER,
+    reward_weights=_STAGE_4_REWARDS,
+    max_episode_steps=600,
     dynamic_update_interval_steps=4,
 )
 

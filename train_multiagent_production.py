@@ -55,6 +55,7 @@ DEFAULT_KL_ANCHOR_CANDIDATES = (
     ROOT / "runs/production_stability_repair_v1/checkpoint_stage4_step10000.pt",
     ROOT / "runs/production_stability_repair_v1/checkpoint_stage4_step2500.pt",
 )
+DEFAULT_STAGE8_KL_ANCHOR = ROOT / "runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt"
 
 # Multi-agent BC dataset produced by teacher_multiagent_dataset.py.
 # Picks the most recent dataset under runs/teacher_multiagent_dataset/ unless
@@ -74,6 +75,12 @@ DEFAULT_STAGE7_SCENARIO_WEIGHTS = (
     "team_3v0_static_pinch:2,"
     "team_3v0_dynamic:2,"
     "team_3v3_full_dynamic:3"
+)
+DEFAULT_STAGE8_SCENARIO_WEIGHTS = (
+    "defense_1v3_static_entry:1,"
+    "defense_2v3_dynamic:2,"
+    "defense_3v3_full:3,"
+    "transition_midfield:1.5"
 )
 
 
@@ -103,6 +110,12 @@ def _default_kl_anchor() -> Path:
         if path.exists():
             return path
     return DEFAULT_KL_ANCHOR_CANDIDATES[0]
+
+
+def _default_kl_anchor_for_stage(stage_id: int) -> Path:
+    if stage_id == 8 and DEFAULT_STAGE8_KL_ANCHOR.exists():
+        return DEFAULT_STAGE8_KL_ANCHOR
+    return _default_kl_anchor()
 
 
 def _default_dataset() -> Path:
@@ -136,9 +149,9 @@ def _default_players_for_stage(stage_id: int) -> str:
     """
     if stage_id == 6:
         return "1,2"
-    if stage_id == 7:
+    if stage_id in (7, 8):
         return "1,2,3"
-    raise ValueError(f"Multi-agent production fine-tune supports stage 6 or 7, got {stage_id}")
+    raise ValueError(f"Multi-agent production fine-tune supports stage 6, 7, or 8, got {stage_id}")
 
 
 def _default_scenario_weights_for_stage(stage_id: int) -> str:
@@ -146,6 +159,8 @@ def _default_scenario_weights_for_stage(stage_id: int) -> str:
         return DEFAULT_STAGE6_SCENARIO_WEIGHTS
     if stage_id == 7:
         return DEFAULT_STAGE7_SCENARIO_WEIGHTS
+    if stage_id == 8:
+        return DEFAULT_STAGE8_SCENARIO_WEIGHTS
     raise ValueError(f"No scenario weights for stage {stage_id}")
 
 
@@ -157,7 +172,9 @@ def _load_dataset_summary(path: Path) -> dict:
 
 def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
     experiment_name = os.getenv("RL_MA_PROD_EXPERIMENT_NAME", "multiagent_production_v1")
-    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    stage_id = int(args.stage_id)
+    checkpoint_arg = args.checkpoint or str(_default_kl_anchor_for_stage(stage_id))
+    checkpoint = Path(checkpoint_arg).expanduser().resolve()
     if not checkpoint.exists():
         raise FileNotFoundError(checkpoint)
     dataset = Path(args.dataset).expanduser().resolve()
@@ -178,7 +195,6 @@ def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
             flush=True,
         )
 
-    stage_id = int(args.stage_id)
     players_str = os.getenv("RL_MA_PROD_PLAYERS", _default_players_for_stage(stage_id))
     return train.ScriptRunConfig(
         mode="train",
@@ -192,7 +208,7 @@ def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
         max_stage_id=stage_id,                              # pin: no promotion within a fine-tune run
         train_steps=_env_int("RL_MA_PROD_TRAIN_STEPS", 20_000),
         # §14.6 Fri: stage-6 ≤ 5k, stage-7 10-15k. Total budget kept at 20k as a ceiling.
-        max_episode_steps=_env_int("RL_MA_PROD_MAX_EPISODE_STEPS", 400),
+        max_episode_steps=_env_int("RL_MA_PROD_MAX_EPISODE_STEPS", 600 if stage_id == 8 else 400),
         rollout_steps=_env_int("RL_MA_PROD_ROLLOUT_STEPS", 256),
         learning_epochs=_env_int("RL_MA_PROD_LEARNING_EPOCHS", 4),
         mini_batches=_env_int("RL_MA_PROD_MINI_BATCHES", 4),
@@ -257,7 +273,7 @@ def run(args: argparse.Namespace) -> None:
     os.environ.setdefault("RL_PRODUCTION_SCENARIO_RESETS", "1")
     os.environ.setdefault(
         "RL_PRODUCTION_SCENARIO_SET",
-        os.getenv("RL_MA_PROD_SCENARIO_SET", "team"),
+            os.getenv("RL_MA_PROD_SCENARIO_SET", "defense" if int(args.stage_id) == 8 else "team"),
     )
     os.environ.setdefault(
         "RL_PRODUCTION_SCENARIO_WEIGHTS",
@@ -288,7 +304,7 @@ def run(args: argparse.Namespace) -> None:
     print(
         "[ma-production-train] "
         f"stage={run_cfg.stage_id} "
-        f"checkpoint={Path(args.checkpoint).expanduser().resolve()} "
+        f"checkpoint={Path(args.checkpoint or _default_kl_anchor_for_stage(int(args.stage_id))).expanduser().resolve()} "
         f"dataset={Path(args.dataset).expanduser().resolve()} "
         f"experiment={run_cfg.experiment_name} "
         f"steps={run_cfg.train_steps} players={run_cfg.parallel_player_numbers} "
@@ -304,13 +320,16 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Multi-agent production fine-tune (stage 6 or 7) — sibling of train_production.py."
+        description="Multi-agent production fine-tune (stage 6, 7, or 8) — sibling of train_production.py."
     )
-    parser.add_argument("--stage-id", type=int, choices=(6, 7), default=int(os.getenv("RL_MA_PROD_STAGE", "6")))
+    parser.add_argument("--stage-id", type=int, choices=(6, 7, 8), default=int(os.getenv("RL_MA_PROD_STAGE", "6")))
     parser.add_argument(
         "--checkpoint",
-        default=os.getenv("RL_MA_PROD_CHECKPOINT", str(_default_kl_anchor())),
-        help="KL anchor checkpoint. Defaults to runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt.",
+        default=os.getenv("RL_MA_PROD_CHECKPOINT", ""),
+        help=(
+            "KL anchor checkpoint. Defaults to production_stability_repair_v1 for stages 6/7 "
+            "and multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt for stage 8 when present."
+        ),
     )
     parser.add_argument(
         "--dataset",

@@ -93,6 +93,29 @@ OPPONENT_LANE_CLEARANCE_MM = 800.0  # nearest_opponent_front_dist must exceed th
 # Exclusions
 GK_EXCLUDE_X_MM = -2000.0          # teammate with absolute x < this is treated as GK
 
+# Defensive phase / positioning (§30 handoff). Env-tunable so dataset, rollout,
+# and probes can sweep without touching the 47-dim contract.
+DEFENSE_PHASE_ENTER_X = float(os.getenv("RL_MA_DEF_PHASE_ENTER_X", "-300.0"))
+DEFENSE_PHASE_EXIT_X = float(os.getenv("RL_MA_DEF_PHASE_EXIT_X", "300.0"))
+DEFENDER_RADIUS_MM = float(os.getenv("RL_MA_DEF_RADIUS_MM", "1600.0"))
+GK_STAND_RADIUS_MM = float(os.getenv("RL_MA_DEF_GK_STAND_RADIUS_MM", "400.0"))
+OWN_GOAL_X_MM = -GOAL_X
+OWN_GOAL_POST_Y_MM = 800.0
+OWN_GOAL_AREA_LIMIT_X_MM = -3900.0
+OWN_GOAL_AREA_PUSH_X_MM = -3650.0
+OWN_GOAL_AREA_HALF_Y_MM = 1100.0
+DEFENSE_SLOT_CANDIDATE_GRID = (
+    (-2200.0, +1100.0),
+    (-1400.0, +900.0),
+    (-600.0, +1300.0),
+    (-1000.0, +400.0),
+)
+DEFENDER_BLOCK_BALL_X_MAX_MM = float(os.getenv("RL_MA_DEF_BLOCK_BALL_X_MAX_MM", "-500.0"))
+DEFENDER_BLOCK_BALL_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_BALL_DIST_MM", "2200.0"))
+DEFENDER_BLOCK_FRONT_OPP_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_OPP_MM", "1300.0"))
+DEFENDER_BLOCK_FRONT_BALL_X_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_BALL_X_MM", "1800.0"))
+DEFENDER_BLOCK_COVER_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_COVER_DIST_MM", "900.0"))
+
 # EMA smoothing for coordination targets (§11.B.3.2). Lives on the env (not the teacher);
 # constants exposed here so the orchestrator imports a single source of truth.
 EMA_ALPHA_OPEN_LANE = 0.3          # 3-frame effective smoothing on open-lane center
@@ -144,6 +167,8 @@ class TeamCoordinationState:
     last_pass_target_age_ms_by_striker: dict[int, float] = field(default_factory=dict)
     # Per-agent committed support slot for stabilityOffset (R3 / R4 hysteresis).
     support_committed_slot: dict[int, tuple[float, float]] = field(default_factory=dict)
+    phase: str = "attack"
+    defender_side_by_agent: dict[int, float] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.roles = TeamRoleHistory()
@@ -152,6 +177,24 @@ class TeamCoordinationState:
         self.last_pass_target_by_striker.clear()
         self.last_pass_target_age_ms_by_striker.clear()
         self.support_committed_slot.clear()
+        self.phase = "attack"
+        self.defender_side_by_agent.clear()
+
+
+def update_team_phase(state: TeamCoordinationState, team_ball: tuple[float, float, bool]) -> str:
+    """Sticky attack/defense phase from team ball x.
+
+    Uses a dead band around midfield so the phase cannot flicker when the ball is
+    contested near x=0. If team ball is invalid, keep the previous phase.
+    """
+    ball_x, _ball_y, valid = team_ball
+    if not valid:
+        return state.phase
+    if float(ball_x) < DEFENSE_PHASE_ENTER_X:
+        state.phase = "defense"
+    elif float(ball_x) > DEFENSE_PHASE_EXIT_X:
+        state.phase = "attack"
+    return state.phase
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +206,7 @@ def assign_roles(
     agent_obs: dict[int, BackendObservation],
     team_ball: tuple[float, float, bool],
     history: TeamRoleHistory,
+    phase: str = "attack",
 ) -> dict[int, str]:
     """R1: assign striker / open_support / off_ball_support to each RL agent.
 
@@ -240,11 +284,17 @@ def assign_roles(
     if len(non_strikers) == 0:
         roles = {committed_striker: "striker"}
     elif len(non_strikers) == 1:
-        # 2-RL: exactly one open_support.
+        # 2-RL: attack uses open_support; defense uses the remaining field
+        # player as the deep defender.
         roles = {
             committed_striker: "striker",
-            non_strikers[0]: "open_support",
+            non_strikers[0]: "off_ball_support" if phase == "defense" else "open_support",
         }
+    elif phase == "defense":
+        defender = min(non_strikers, key=lambda aid: (float(agent_obs[aid].robot_x), aid))
+        roles = {committed_striker: "striker"}
+        for aid in non_strikers:
+            roles[aid] = "off_ball_support" if aid == defender else "open_support"
     else:
         # 3-RL+: open_support = highest forward rating; rest = off_ball.
         striker_xy = (float(agent_obs[committed_striker].robot_x),
@@ -599,6 +649,51 @@ def teacher_off_ball_support(
     return _support_walk_action(tx, ty, target_theta)
 
 
+def teacher_defender(
+    obs: BackendObservation,
+    stage_id: int,
+    prev_skill_name: str | None,
+    gate_decision: GateDecision,
+    coordination_target: tuple[float, float],
+    team_ball_valid: bool = False,
+    face_ball_xy: tuple[float, float] | None = None,
+) -> StructuredSkillAction:
+    """Defensive off-ball role.
+
+    Ports Rafael's useful values without porting the obs26 actor or duplicate
+    mask: block offset is ball_y / 900, stale own ball with valid team ball walks
+    to cover instead of freezing, and hold/stand only happens near cover.
+    """
+    if gate_decision.dribble_armed or defender_block_armed(
+        obs,
+        team_ball_valid=team_ball_valid,
+        face_ball_xy=face_ball_xy,
+        coordination_target=coordination_target,
+    ):
+        return StructuredSkillAction(
+            skill_type=SkillType.block,
+            target_x=0.0,
+            target_y=_signed_block_offset(obs),
+            target_theta=0.0,
+            pass_target=0,
+        )
+    tx, ty = coordination_target
+    dx = tx - float(obs.robot_x)
+    dy = ty - float(obs.robot_y)
+    dist = math.hypot(dx, dy)
+    if (
+        dist < HOLD_TOLERANCE_OFF_BALL_MM
+        and not (team_ball_valid and float(obs.time_since_ball_seen) > TEAMMATE_FRESH_MAX_AGE_MS)
+    ):
+        return StructuredSkillAction(skill_type=SkillType.stand)
+    face_x = float(obs.ball_x)
+    face_y = float(obs.ball_y)
+    if team_ball_valid and face_ball_xy is not None:
+        face_x, face_y = face_ball_xy
+    target_theta = math.atan2(face_y - float(obs.robot_y), face_x - float(obs.robot_x))
+    return _support_walk_action(tx, ty, target_theta)
+
+
 # ---------------------------------------------------------------------------
 # Public dispatcher — §14.13
 # ---------------------------------------------------------------------------
@@ -614,6 +709,9 @@ def stage_aware_team_teacher_action(
     teammate_slots: list[TeammateSlot],
     last_pass_target: int | None,
     last_pass_target_age_ms: float,
+    phase: str = "attack",
+    team_ball_valid: bool = False,
+    face_ball_xy: tuple[float, float] | None = None,
 ) -> StructuredSkillAction:
     """Stateless dispatcher. Pure function of its inputs.
 
@@ -635,6 +733,16 @@ def stage_aware_team_teacher_action(
             obs, stage_id, prev_skill_name, gate_decision, coordination_target,
         )
     if role == "off_ball_support":
+        if phase == "defense":
+            return teacher_defender(
+                obs,
+                stage_id,
+                prev_skill_name,
+                gate_decision,
+                coordination_target,
+                team_ball_valid=team_ball_valid,
+                face_ball_xy=face_ball_xy,
+            )
         return teacher_off_ball_support(
             obs, stage_id, prev_skill_name, gate_decision, coordination_target,
         )
@@ -708,7 +816,7 @@ def _to_residual_role(
     if role == "striker":
         return absolute_to_residual_action(action, obs)
 
-    if action.skill_name not in {"walk", "dribble"}:
+    if action.skill_name not in {"walk", "dribble", "block"}:
         # stand / shoot / pass: zeros, preserve pass_target if any.
         return StructuredSkillAction(
             skill_type=action.skill_type,
@@ -722,6 +830,15 @@ def _to_residual_role(
         # Off-ball-support escape hatch: action targets the ball, so anchor on
         # the ball via the existing single-agent helper.
         return absolute_to_residual_action(action, obs)
+
+    if action.skill_name == "block":
+        return StructuredSkillAction(
+            skill_type=action.skill_type,
+            target_x=0.0,
+            target_y=float(np.clip(action.target_y, -1.0, 1.0)),
+            target_theta=0.0,
+            pass_target=action.pass_target,
+        )
 
     # Support walk — anchor on coordination_target.
     if coordination_target is None:
@@ -770,6 +887,9 @@ def team_teacher_payload(
     teammate_slots: list[TeammateSlot],
     last_pass_target: int | None,
     last_pass_target_age_ms: float,
+    phase: str = "attack",
+    team_ball_valid: bool = False,
+    face_ball_xy: tuple[float, float] | None = None,
 ) -> tuple[dict[str, float], StructuredSkillAction, StructuredSkillAction]:
     """Multi-agent analogue of teacher_policy.teacher_policy_payload.
 
@@ -790,6 +910,9 @@ def team_teacher_payload(
         teammate_slots=teammate_slots,
         last_pass_target=last_pass_target,
         last_pass_target_age_ms=last_pass_target_age_ms,
+        phase=phase,
+        team_ball_valid=team_ball_valid,
+        face_ball_xy=face_ball_xy,
     )
     residual = _to_residual_role(absolute, obs, role, coordination_target)
     payload: dict[str, float] = residual.as_dict()
@@ -872,6 +995,52 @@ def compute_triangle_target(
     return best
 
 
+def defender_cover_target(
+    defender_obs: BackendObservation,
+    ball_field_xy: tuple[float, float],
+    *,
+    current_side: float | None = None,
+) -> tuple[tuple[float, float], float]:
+    """Cover the uncovered own-goal gap on a defensive circle.
+
+    Simplified B-Human Defender::position port: pick a sticky post side, derive
+    the GK-covered edge, then intersect ball→cover_point with the defensive
+    circle centered on own goal line.
+    """
+    side = _defender_side(ball_field_xy[1], current_side)
+    gk_x, gk_y = _own_gk_pose(defender_obs)
+    goal_post = (OWN_GOAL_X_MM, OWN_GOAL_POST_Y_MM * side)
+    gk_edge = (gk_x, gk_y + GK_STAND_RADIUS_MM * side)
+    cover_point = ((goal_post[0] + gk_edge[0]) * 0.5, (goal_post[1] + gk_edge[1]) * 0.5)
+    target = _line_circle_intersection_near_ball(
+        ball_field_xy,
+        cover_point,
+        (OWN_GOAL_X_MM, 0.0),
+        DEFENDER_RADIUS_MM,
+    )
+    target = _clip_defender_target(target)
+    return target, side
+
+
+def defense_support_target(
+    support_obs: BackendObservation,
+    ball_field_xy: tuple[float, float],
+    presser_field_xy: tuple[float, float],
+    defender_field_xy: tuple[float, float],
+    forced_side: float | None = None,
+) -> tuple[float, float]:
+    side = 1.0 if (forced_side if forced_side is not None else ball_field_xy[1]) >= 0.0 else -1.0
+    candidates = [(x, y * side) for (x, y) in DEFENSE_SLOT_CANDIDATE_GRID]
+    teammates_for_sep = [presser_field_xy, defender_field_xy]
+    scored = []
+    for cand in candidates:
+        lane = _defense_lane_cover(cand, ball_field_xy)
+        sep = separation_penalty(cand, teammates_for_sep)
+        scored.append((lane * sep, cand))
+    scored.sort(reverse=True, key=lambda item: item[0])
+    return scored[0][1]
+
+
 # ---------------------------------------------------------------------------
 # TeammateSlot builder — convenience helper for callers
 # ---------------------------------------------------------------------------
@@ -947,6 +1116,122 @@ def _support_walk_action(
         target_y=float(np.clip(target_y, -ACTION.y_range, ACTION.y_range)),
         target_theta=float(np.clip(target_theta, -ACTION.theta_range, ACTION.theta_range)),
     )
+
+
+def _signed_block_offset(obs: BackendObservation) -> float:
+    return float(np.clip(float(obs.ball_rel_y) / 900.0, -1.0, 1.0))
+
+
+def defender_block_armed(
+    obs: BackendObservation,
+    *,
+    team_ball_valid: bool,
+    face_ball_xy: tuple[float, float] | None,
+    coordination_target: tuple[float, float],
+) -> bool:
+    """Synthetic high-level block gate for defensive BC labels.
+
+    The train-time role mask currently allows `block` through the same obs bit as
+    the unexpected-possession/dribble gate. A defender should also block when it
+    is close to cover and the ball/opponent threat is in front of our goal.
+    """
+    if not team_ball_valid or face_ball_xy is None:
+        return False
+    ball_x, ball_y = float(face_ball_xy[0]), float(face_ball_xy[1])
+    if ball_x > DEFENDER_BLOCK_BALL_X_MAX_MM:
+        return False
+    dist_to_cover = math.hypot(
+        float(obs.robot_x) - float(coordination_target[0]),
+        float(obs.robot_y) - float(coordination_target[1]),
+    )
+    if dist_to_cover > DEFENDER_BLOCK_COVER_DIST_MM:
+        return False
+    ball_dist = math.hypot(ball_x - float(obs.robot_x), ball_y - float(obs.robot_y))
+    ball_front = 0.0 < float(obs.ball_rel_x) < DEFENDER_BLOCK_FRONT_BALL_X_MM
+    opponent_front = 0.0 < float(obs.nearest_opponent_front_dist) < DEFENDER_BLOCK_FRONT_OPP_MM
+    central_threat = abs(ball_y) < OWN_GOAL_POST_Y_MM + 400.0
+    return bool((ball_dist < DEFENDER_BLOCK_BALL_DIST_MM and central_threat) or ball_front or opponent_front)
+
+
+def _defender_side(ball_y: float, current_side: float | None) -> float:
+    if float(ball_y) > 450.0:
+        return 1.0
+    if float(ball_y) < -450.0:
+        return -1.0
+    if current_side is not None:
+        return 1.0 if current_side >= 0.0 else -1.0
+    return 1.0 if float(ball_y) >= 0.0 else -1.0
+
+
+def _own_gk_pose(obs: BackendObservation) -> tuple[float, float]:
+    candidates: list[tuple[float, float]] = []
+    for idx, pose in enumerate(obs.teammate_poses):
+        age = float(obs.teammate_ages_ms[idx]) if idx < len(obs.teammate_ages_ms) else float("inf")
+        x, y = float(pose[0]), float(pose[1])
+        if age <= TEAMMATE_FRESH_MAX_AGE_MS and x < GK_EXCLUDE_X_MM:
+            candidates.append((x, y))
+    if candidates:
+        return min(candidates, key=lambda p: abs(p[0] - OWN_GOAL_X_MM) + abs(p[1]))
+    return (OWN_GOAL_X_MM + 200.0, 0.0)
+
+
+def _line_circle_intersection_near_ball(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    center: tuple[float, float],
+    radius: float,
+) -> tuple[float, float]:
+    x0, y0 = p0
+    x1, y1 = p1
+    cx, cy = center
+    dx = x1 - x0
+    dy = y1 - y0
+    a = dx * dx + dy * dy
+    if a < 1e-6:
+        return _clip_defender_target((OWN_GOAL_X_MM + radius, 0.0))
+    fx = x0 - cx
+    fy = y0 - cy
+    b = 2.0 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - radius * radius
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        # Project cover point direction onto circle.
+        angle = math.atan2(y1 - cy, x1 - cx)
+        return (cx + radius * math.cos(angle), cy + radius * math.sin(angle))
+    root = math.sqrt(disc)
+    ts = [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)]
+    points = [(x0 + t * dx, y0 + t * dy) for t in ts]
+    return min(points, key=lambda p: (p[0] - x0) ** 2 + (p[1] - y0) ** 2)
+
+
+def _clip_defender_target(target: tuple[float, float]) -> tuple[float, float]:
+    x = float(np.clip(target[0], -FIELD_X_HALF + 250.0, FIELD_X_HALF - 250.0))
+    y = float(np.clip(target[1], -FIELD_Y_HALF + 250.0, FIELD_Y_HALF - 250.0))
+    if x < OWN_GOAL_AREA_LIMIT_X_MM and abs(y) < OWN_GOAL_AREA_HALF_Y_MM:
+        x = OWN_GOAL_AREA_PUSH_X_MM
+    return (x, y)
+
+
+def _defense_lane_cover(candidate: tuple[float, float], ball: tuple[float, float]) -> float:
+    # Reward being between the ball and own goal, but shifted to the second lane
+    # instead of stacking on the deep defender.
+    own_goal = (OWN_GOAL_X_MM, 0.0)
+    bx, by = ball
+    cx, cy = candidate
+    vx = own_goal[0] - bx
+    vy = own_goal[1] - by
+    wx = cx - bx
+    wy = cy - by
+    seg = vx * vx + vy * vy
+    if seg < 1e-6:
+        return 0.0
+    t = float(np.clip((wx * vx + wy * vy) / seg, 0.0, 1.0))
+    px = bx + t * vx
+    py = by + t * vy
+    lane_dist = math.hypot(cx - px, cy - py)
+    depth_ok = 1.0 if cx <= max(bx + 800.0, -300.0) else 0.35
+    second_lane = math.exp(-0.5 * ((lane_dist - 900.0) / 700.0) ** 2)
+    return float(depth_ok * second_lane)
 
 
 def _map_to_range(

@@ -38,6 +38,7 @@ from production_curriculum import (
     ProductionScenario,
     production_scenarios,
     production_topup_scenarios,
+    team_defense_scenarios,
     team_production_scenarios,
 )
 from reward import (
@@ -377,6 +378,8 @@ class RealSimRobotEnv(ParallelEnv):
             # Stage 6/7 multi-agent team scenarios (train_multiagent_production.py
             # sets RL_PRODUCTION_SCENARIO_SET=team).
             scenarios.extend(team_production_scenarios(1))
+        if {"defense", "defender"} & set_tokens:
+            scenarios.extend(team_defense_scenarios(1))
         if not scenarios:
             raise ValueError(f"RL_PRODUCTION_SCENARIO_SET={scenario_set!r} did not select any scenarios")
 

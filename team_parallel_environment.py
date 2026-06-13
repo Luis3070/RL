@@ -31,7 +31,7 @@ from dataclasses import replace as dc_replace
 
 import numpy as np
 
-from config import EnvConfig
+from config import EnvConfig, GOAL_X, GOAL_Y_HALF
 from gate import GateDecision
 from multiagent_teacher import (
     EMA_ALPHA_OPEN_LANE,
@@ -40,10 +40,13 @@ from multiagent_teacher import (
     assign_roles,
     build_agent_id_map,
     build_team_gate_decision,
+    defender_cover_target,
+    defense_support_target,
     compute_open_lane_target,
     compute_triangle_target,
     smash_or_pass,
     teammate_slots_from_obs,
+    update_team_phase,
 )
 from parallel_environment import ParallelSlotSimRobotEnv
 from pybh_backend import BackendObservation, build_world_spec
@@ -59,7 +62,8 @@ STEP_DT_MS = float(os.getenv("RL_MA_TEACHER_STEP_DT_MS", "33.0"))
 # slot rewards for stages ≥6 only). Per-step hold bonuses are deliberately
 # conservative vs the §14.20 headline numbers (0.5 per-EVENT there ≈ 0.05
 # per-step here) so they don't dominate the existing per-step reward scale.
-TEAM_GOAL_BONUS = float(os.getenv("RL_MA_TEAM_GOAL_BONUS", "5.0"))
+TEAM_GOAL_BONUS = float(os.getenv("RL_MA_TEAM_GOAL_BONUS", "2.5"))
+TEAM_GOAL_CONCEDED_PENALTY = float(os.getenv("RL_MA_TEAM_GOAL_CONCEDED_PENALTY", "2.5"))
 SUPPORT_OPEN_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_OPEN_HOLD_BONUS", "0.05"))
 SUPPORT_TRIANGLE_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS", "0.02"))
 PASS_ATTEMPT_CREDIT = float(os.getenv("RL_MA_PASS_ATTEMPT_CREDIT", "1.0"))
@@ -148,6 +152,9 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_role_steps: Counter = Counter()
         self._ep_hold_steps: Counter = Counter()
         self._ep_role_swaps = 0
+        self._ep_defense_steps = 0
+        self._ep_defender_cover_hold_steps = 0
+        self._ep_defender_gk_collision_steps = 0
 
         # Install the per-slot hooks.
         for agent, player_number in zip(self.possible_agents, self.player_numbers, strict=True):
@@ -277,22 +284,50 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
             ball_age_raw = TEAM_BALL_VALID_MAX_MS + 1.0
         team_ball = (bx, by, ball_age_raw <= TEAM_BALL_VALID_MAX_MS)
 
+        phase = update_team_phase(self._team_state, team_ball)
         prev_roles = dict(self._roles)
-        roles = assign_roles(raw, team_ball, self._team_state.roles)
+        roles = assign_roles(raw, team_ball, self._team_state.roles, phase=phase)
         swaps = sum(
             1 for pn, role in roles.items() if prev_roles.get(pn) is not None and prev_roles[pn] != role
         )
         self._ep_role_swaps += swaps
 
         positions = {pn: (float(o.robot_x), float(o.robot_y)) for pn, o in raw.items()}
+        for num, sx, sy, _stheta in self._static_teammates:
+            positions[num] = (sx, sy)
         striker_id = next((pn for pn, r in roles.items() if r == "striker"), None)
         open_id = next((pn for pn, r in roles.items() if r == "open_support"), None)
         off_id = next((pn for pn, r in roles.items() if r == "off_ball_support"), None)
 
+        if off_id is not None and striker_id is not None and phase == "defense":
+            raw_tri, side = defender_cover_target(
+                raw[off_id],
+                (team_ball[0], team_ball[1]),
+                current_side=self._team_state.defender_side_by_agent.get(off_id),
+            )
+            self._team_state.defender_side_by_agent[off_id] = side
+            ema = self._team_state.triangle_ema
+            self._team_state.triangle_ema = (
+                raw_tri if ema is None
+                else (
+                    EMA_ALPHA_TRIANGLE * raw_tri[0] + (1 - EMA_ALPHA_TRIANGLE) * ema[0],
+                    EMA_ALPHA_TRIANGLE * raw_tri[1] + (1 - EMA_ALPHA_TRIANGLE) * ema[1],
+                )
+            )
         if open_id is not None and striker_id is not None:
-            raw_open = compute_open_lane_target(
-                raw[open_id], (team_ball[0], team_ball[1]), positions[striker_id],
-                forced_side=self._spawn_side.get(open_id),
+            raw_open = (
+                defense_support_target(
+                    raw[open_id],
+                    (team_ball[0], team_ball[1]),
+                    positions[striker_id],
+                    positions[off_id],
+                    forced_side=self._spawn_side.get(open_id),
+                )
+                if phase == "defense" and off_id is not None
+                else compute_open_lane_target(
+                    raw[open_id], (team_ball[0], team_ball[1]), positions[striker_id],
+                    forced_side=self._spawn_side.get(open_id),
+                )
             )
             ema = self._team_state.open_lane_ema
             self._team_state.open_lane_ema = (
@@ -302,7 +337,7 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                     EMA_ALPHA_OPEN_LANE * raw_open[1] + (1 - EMA_ALPHA_OPEN_LANE) * ema[1],
                 )
             )
-        if off_id is not None and striker_id is not None and open_id is not None:
+        if off_id is not None and striker_id is not None and open_id is not None and phase != "defense":
             raw_tri = compute_triangle_target(
                 raw[off_id], (team_ball[0], team_ball[1]),
                 positions[striker_id], positions[open_id],
@@ -341,6 +376,8 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         for pn, role in roles.items():
             self._ep_role_steps[role] += 1
             target = None
+            if self._team_state.phase == "defense":
+                self._ep_defense_steps += 1
             if role == "open_support":
                 target = self._team_state.open_lane_ema
             elif role == "off_ball_support":
@@ -349,6 +386,12 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                 dist = math.hypot(positions[pn][0] - target[0], positions[pn][1] - target[1])
                 if dist < 600.0:
                     self._ep_hold_steps[role] += 1
+                    if role == "off_ball_support" and self._team_state.phase == "defense":
+                        self._ep_defender_cover_hold_steps += 1
+            if role == "off_ball_support" and self._team_state.phase == "defense":
+                gk = self._own_gk_from_positions(positions)
+                if gk is not None and math.hypot(positions[pn][0] - gk[0], positions[pn][1] - gk[1]) < 650.0:
+                    self._ep_defender_gk_collision_steps += 1
 
         with self._team_lock:
             self._roles = roles
@@ -358,11 +401,21 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         open_steps = max(1, self._ep_role_steps.get("open_support", 0))
         off_steps = max(1, self._ep_role_steps.get("off_ball_support", 0))
         total = max(1, sum(self._ep_role_steps.values()))
+        defense_steps = max(1, self._ep_defense_steps)
         return {
             "support_open_hold_rate": float(self._ep_hold_steps.get("open_support", 0)) / open_steps,
             "support_triangle_hold_rate": float(self._ep_hold_steps.get("off_ball_support", 0)) / off_steps,
+            "defender_cover_hold_rate": float(self._ep_defender_cover_hold_steps) / defense_steps,
+            "defender_gk_collision_rate": float(self._ep_defender_gk_collision_steps) / defense_steps,
+            "defense_phase_step_frac": float(self._ep_defense_steps) / total,
             "role_thrash_rate": float(self._ep_role_swaps) / total,
         }
+
+    def _own_gk_from_positions(self, positions: dict[int, tuple[float, float]]) -> tuple[float, float] | None:
+        candidates = [pos for pn, pos in positions.items() if pn not in self.player_numbers and pos[0] < -2000.0]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda p: abs(p[0] + GOAL_X) + abs(p[1]))
 
     # ------------------------------------------------------------------
     # ParallelEnv overrides
@@ -410,6 +463,9 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_role_steps = Counter()
         self._ep_hold_steps = Counter()
         self._ep_role_swaps = 0
+        self._ep_defense_steps = 0
+        self._ep_defender_cover_hold_steps = 0
+        self._ep_defender_gk_collision_steps = 0
         self._prev_skill = {pn: None for pn in self.player_numbers}
         poses = {pn: _world_player_pose(world, pn) for pn in self.player_numbers}
         self._spawn_side = {pn: (1.0 if poses[pn][1] >= 0.0 else -1.0) for pn in poses}
@@ -417,12 +473,19 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
             self.player_numbers,
             key=lambda pn: math.hypot(poses[pn][0] - float(world.ball_x), poses[pn][1] - float(world.ball_y)),
         )
+        phase = update_team_phase(self._team_state, (float(world.ball_x), float(world.ball_y), True))
         roles: dict[int, str] = {by_ball_dist[0]: "striker"}
-        rest = sorted(by_ball_dist[1:], key=lambda pn: -poses[pn][0])
-        if rest:
-            roles[rest[0]] = "open_support"
-        for pn in rest[1:]:
-            roles[pn] = "off_ball_support"
+        rest = list(by_ball_dist[1:])
+        if phase == "defense" and rest:
+            defender = min(rest, key=lambda pn: (poses[pn][0], pn))
+            for pn in rest:
+                roles[pn] = "off_ball_support" if pn == defender else "open_support"
+        else:
+            rest = sorted(rest, key=lambda pn: -poses[pn][0])
+            if rest:
+                roles[rest[0]] = "open_support"
+            for pn in rest[1:]:
+                roles[pn] = "off_ball_support"
         with self._team_lock:
             self._roles = roles
             self._raw_obs = {}
@@ -476,11 +539,14 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
 
         # ---- §14.20 team reward terms (stages ≥6; additive on slot rewards) ----
         team_goal = False
+        goal_conceded = False
         for agent in self.possible_agents:
             env = self._envs[agent]
             if terminations.get(agent) and bool(env._episode_tracker.get("goal", False)):
                 team_goal = True
-                break
+            raw = env._last_backend_obs
+            if raw is not None and float(raw.ball_x) <= -GOAL_X and abs(float(raw.ball_y)) <= GOAL_Y_HALF:
+                goal_conceded = True
         with self._team_lock:
             roles_now = dict(self._roles)
         for agent, player_number in zip(self.possible_agents, self.player_numbers, strict=True):
@@ -507,6 +573,8 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                 bonus += PASS_ATTEMPT_CREDIT
             if team_goal:
                 bonus += TEAM_GOAL_BONUS
+            if goal_conceded:
+                bonus -= TEAM_GOAL_CONCEDED_PENALTY
             if bonus:
                 rewards[agent] = float(rewards[agent]) + bonus
                 infos.setdefault(agent, {})["team_reward_bonus"] = bonus
@@ -532,6 +600,7 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         if done_any:
             metrics = self._team_metrics()
             metrics["team_goal"] = float(team_goal)
+            metrics["goals_conceded_rate"] = float(goal_conceded)
             for agent in infos:
                 infos[agent].update(metrics)
             # Publish for the BC competence gate (side-channel — see module docstring).

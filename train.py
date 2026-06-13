@@ -40,6 +40,7 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 _SHOOT_SKILL_IDX = SKILL_ORDER.index("shoot")
 _DRIBBLE_SKILL_IDX = SKILL_ORDER.index("dribble")
 _PASS_SKILL_IDX = SKILL_ORDER.index("pass")
+_BLOCK_SKILL_IDX = SKILL_ORDER.index("block")
 _OBSERVE_SKILL_IDX = SKILL_ORDER.index("observe")
 _STAND_SKILL_IDX = SKILL_ORDER.index("stand")
 _WALK_SKILL_IDX = SKILL_ORDER.index("walk")
@@ -118,6 +119,7 @@ def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
         | (dribble_armed & is_off_ball)
         | sa_mask_dribble
     ).to(mask.dtype)
+    mask[:, _BLOCK_SKILL_IDX] = (dribble_armed & (~is_striker) & has_role).to(mask.dtype)
 
     # Observe allowed for any non-striker when armed.
     mask[:, _OBSERVE_SKILL_IDX] = (observe_armed & (~is_striker) & has_role).to(mask.dtype)

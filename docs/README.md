@@ -21,6 +21,8 @@ Lectura recomendada:
 15. [Curriculum dinamico: balon y rivales](./16-curriculum-dinamico-balon-y-rivales.md)
 16. [Handoff visible SimRobot GUI](./17-handoff-visible-simrobot-gui.md)
 17. [SimRobot estable y partido hibrido RL vs B-Human](./21-simrobot-estable-y-rl-vs-bhuman.md)
+18. [Stage 8 defender: SimRobot visible single-process](./31-stage8-defender-visible-debug.md)
+19. [Stage 8 defender: checklist operativo](./32-stage8-defender-checklist.md)
 
 Resumen corto:
 

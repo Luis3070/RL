@@ -263,6 +263,8 @@ class VisibleParallelRuntime:
     @staticmethod
     def _rewrite_scene_robot_name(path: Path, player_number: int) -> None:
         text = path.read_text(encoding="utf-8")
+        if 'name="robot2"' in text or 'name="robot3"' in text or 'name="robot4"' in text:
+            return
         text = text.replace('name="robot1"', f'name="robot{player_number}"', 1)
         path.write_text(text, encoding="utf-8")
 

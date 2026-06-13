@@ -37,7 +37,7 @@ class ActorExport(torch.nn.Module):
         return skill_logits, param_mean
 
 
-def export(checkpoint_path: str, output_path: str, active_skills: list[str]):
+def export(checkpoint_path: str, output_path: str, active_skills: list[str], specialization: str):
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     sd = ckpt["policy_state_dict"]
 
@@ -77,6 +77,7 @@ def export(checkpoint_path: str, output_path: str, active_skills: list[str]):
         "obs_size_model_trained": obs_size,
         "skill_order": list(SKILL_ORDER),
         "active_skills": active_skills,
+        "specialization": specialization,
         # Gate thresholds the policy was trained under — the deployment-side gate
         # bits (obs[23:26], obs[41:44]) MUST be computed with these values or the
         # policy sees an out-of-distribution gate signal. Mirrors the dataset's
@@ -109,5 +110,15 @@ if __name__ == "__main__":
         default="stand,walk,dribble,shoot,pass",
         help="Comma-separated active skill names recorded in the manifest.",
     )
+    p.add_argument(
+        "--specialization",
+        default="team",
+        help="Per-role specialization recorded in the manifest, e.g. striker, defender, supporter.",
+    )
     args = p.parse_args()
-    export(args.checkpoint, args.output, [s.strip() for s in args.active_skills.split(",") if s.strip()])
+    export(
+        args.checkpoint,
+        args.output,
+        [s.strip() for s in args.active_skills.split(",") if s.strip()],
+        args.specialization,
+    )

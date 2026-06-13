@@ -30,6 +30,7 @@ from pybh_backend import WorldPlayerSpec, WorldSpec, build_world_spec
 # Hard field constraint: the scoring band the shoot skill must convert from. Matches the
 # gate's shoot_goal_enter_mm (3000) so "ball in band" and "shoot may arm" line up.
 PRODUCTION_BAND_MM: tuple[float, float] = (2500.0, 3000.0)
+OWN_GOAL_X = -GOAL_X
 
 
 @dataclass(frozen=True)
@@ -379,6 +380,115 @@ def _team_3v3_full_dynamic_world(rng: np.random.Generator) -> WorldSpec:
         teammates=base.teammates,
         opponents=opps,
     )
+
+
+def _defense_team_world(
+    rng: np.random.Generator,
+    *,
+    ball_x_range: tuple[float, float],
+    attacker_count: int,
+    dynamic: bool,
+    transition: bool = False,
+) -> WorldSpec:
+    ball_x = float(rng.uniform(*ball_x_range))
+    ball_y = _clip_y(float(rng.uniform(-1200.0, 1200.0) if not transition else rng.uniform(-800.0, 800.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    presser = (
+        ball_x - float(rng.uniform(550.0, 850.0)),
+        _clip_y(ball_y + side * float(rng.uniform(80.0, 180.0))),
+    )
+    defender = (
+        float(rng.uniform(-3400.0, -3000.0)),
+        _clip_y(ball_y * 0.45),
+    )
+    supporter = (
+        float(rng.uniform(-1600.0, -1000.0)),
+        _clip_y(-side * float(rng.uniform(700.0, 1300.0))),
+    )
+    gk = WorldPlayerSpec(number=4, x=-4300.0, y=0.0, theta=0.0)
+    opponents: list[WorldPlayerSpec] = []
+    if attacker_count >= 1:
+        opponents.append(WorldPlayerSpec(number=1, x=ball_x + 400.0, y=ball_y, theta=math.pi))
+    if attacker_count >= 2:
+        opponents.append(WorldPlayerSpec(number=2, x=ball_x + 1100.0, y=_clip_y(-ball_y), theta=math.pi))
+    if attacker_count >= 3:
+        opponents.append(WorldPlayerSpec(number=3, x=float(GOAL_X) - 300.0, y=0.0, theta=math.pi))
+    if dynamic and attacker_count < 3:
+        dyn = _dynamic_obstacles(
+            np.asarray(presser, dtype=np.float32),
+            np.asarray([ball_x, ball_y], dtype=np.float32),
+            episode_step=0,
+        )
+        used_numbers = {int(player.number) for player in opponents}
+        next_number = 1
+        for player in dyn:
+            while next_number in used_numbers:
+                next_number += 1
+            if next_number > 3:
+                break
+            opponents.append(WorldPlayerSpec(
+                number=next_number,
+                x=float(player.x),
+                y=float(player.y),
+                theta=float(player.theta),
+            ))
+            used_numbers.add(next_number)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(presser, dtype=np.float32),
+        robot_theta=math.atan2(ball_y - presser[1], ball_x - presser[0]),
+        teammates=(
+            WorldPlayerSpec(number=2, x=defender[0], y=defender[1], theta=math.atan2(ball_y - defender[1], ball_x - defender[0])),
+            WorldPlayerSpec(number=3, x=supporter[0], y=supporter[1], theta=math.atan2(ball_y - supporter[1], ball_x - supporter[0])),
+            gk,
+        ),
+        opponents=tuple(opponents),
+    )
+
+
+def _defense_1v3_static_entry_world(rng: np.random.Generator) -> WorldSpec:
+    return _defense_team_world(rng, ball_x_range=(-2200.0, -1200.0), attacker_count=1, dynamic=False)
+
+
+def _defense_2v3_dynamic_world(rng: np.random.Generator) -> WorldSpec:
+    return _defense_team_world(rng, ball_x_range=(-2500.0, -800.0), attacker_count=2, dynamic=True)
+
+
+def _defense_3v3_full_world(rng: np.random.Generator) -> WorldSpec:
+    return _defense_team_world(rng, ball_x_range=(-3000.0, -1000.0), attacker_count=3, dynamic=True)
+
+
+def _transition_midfield_world(rng: np.random.Generator) -> WorldSpec:
+    # Keep this just inside the defensive phase instead of straddling x=0. When
+    # it flickers between attack/defense, support targets switch too often and
+    # the sanitizer drops every episode for hold-too-short/collision.
+    return _defense_team_world(rng, ball_x_range=(-900.0, -250.0), attacker_count=1, dynamic=True, transition=True)
+
+
+def team_defense_scenarios(episodes: int) -> list[ProductionScenario]:
+    e = max(1, int(episodes))
+    return [
+        ProductionScenario(
+            name="defense_1v3_static_entry", stage_id=8,
+            description="Stage 8 defensive entry: one static attacker, presser + deep defender + support.",
+            world_fn=_defense_1v3_static_entry_world, episodes=e * 1, obstacles="static",
+        ),
+        ProductionScenario(
+            name="defense_2v3_dynamic", stage_id=8,
+            description="Stage 8 defensive pressure with two dynamic attackers.",
+            world_fn=_defense_2v3_dynamic_world, episodes=e * 2, obstacles="dynamic",
+        ),
+        ProductionScenario(
+            name="defense_3v3_full", stage_id=8,
+            description="Stage 8 full defensive 3v3 distribution.",
+            world_fn=_defense_3v3_full_world, episodes=e * 3, obstacles="dynamic",
+        ),
+        ProductionScenario(
+            name="transition_midfield", stage_id=8,
+            description="Stage 8 midfield transition with sticky attack/defense phase.",
+            world_fn=_transition_midfield_world, episodes=max(1, int(e * 1.5)), obstacles="dynamic",
+        ),
+    ]
 
 
 def team_production_scenarios(episodes: int) -> list[ProductionScenario]:

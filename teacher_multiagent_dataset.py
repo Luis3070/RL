@@ -47,7 +47,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 _EARLY_STAGE_ID = int(os.getenv("RL_MA_TEACHER_STAGE", "6"))
-_EARLY_RL_FIELD_AGENTS_BY_STAGE = {6: 2, 7: 3}
+_EARLY_RL_FIELD_AGENTS_BY_STAGE = {6: 2, 7: 3, 8: 3}
 if _EARLY_STAGE_ID in _EARLY_RL_FIELD_AGENTS_BY_STAGE:
     _early_active = tuple(range(1, _EARLY_RL_FIELD_AGENTS_BY_STAGE[_EARLY_STAGE_ID] + 1))
     os.environ.setdefault("PYBH_RL_OVERRIDE_TEAM", "24")
@@ -59,13 +59,16 @@ from curriculum import get_stage_scene_path, get_stage_spec
 from environment import RealSimRobotEnv
 from gate import GateConfig, GateDecision, SkillGate
 from multiagent_teacher import (
-    EMA_ALPHA_OPEN_LANE,
     EMA_ALPHA_TRIANGLE,
+    EMA_ALPHA_OPEN_LANE,
     TeamCoordinationState,
     advance_pass_target_age,
     assign_roles,
     build_agent_id_map,
     build_team_gate_decision,
+    defender_block_armed,
+    defender_cover_target,
+    defense_support_target,
     compute_open_lane_target,
     compute_triangle_target,
     ema_step,
@@ -73,8 +76,9 @@ from multiagent_teacher import (
     smash_or_pass,
     team_teacher_payload,
     teammate_slots_from_obs,
+    update_team_phase,
 )
-from production_curriculum import ProductionScenario, team_production_scenarios
+from production_curriculum import ProductionScenario, team_defense_scenarios, team_production_scenarios
 from pybh_backend import BackendObservation, PyBHBackend, WorldPlayerSpec
 from visible_parallel_runtime import VisibleParallelRuntime
 
@@ -82,18 +86,23 @@ from visible_parallel_runtime import VisibleParallelRuntime
 # Run config — env-overridable for reproducible overnight runs.
 # ---------------------------------------------------------------------------
 
-STAGE_ID = int(os.getenv("RL_MA_TEACHER_STAGE", "6"))                # 6 or 7
+STAGE_ID = int(os.getenv("RL_MA_TEACHER_STAGE", "6"))                # 6, 7, or 8
 BACKEND_MODE = os.getenv("RL_MA_TEACHER_BACKEND_MODE", "simrobot_visible")
 SIMROBOT_PROFILE = os.getenv("RL_MA_TEACHER_SIMROBOT_PROFILE", "3d_visible")
 SIMROBOT_LAUNCH = os.getenv("RL_MA_TEACHER_SIMROBOT_LAUNCH", "1") == "1"
-VISIBLE_PARALLEL_SLOTS = os.getenv("RL_MA_TEACHER_VISIBLE_PARALLEL_SLOTS", "1") == "1"
-VISIBLE_SCENE_NAME = os.getenv("RL_MA_TEACHER_VISIBLE_SCENE_NAME", "RL1v0_3D_visible")
+_DEFAULT_VISIBLE_PARALLEL_SLOTS = "0" if STAGE_ID == 8 else "1"
+VISIBLE_PARALLEL_SLOTS = os.getenv("RL_MA_TEACHER_VISIBLE_PARALLEL_SLOTS", _DEFAULT_VISIBLE_PARALLEL_SLOTS) == "1"
+_DEFAULT_VISIBLE_SCENE_NAME = get_stage_scene_path(_EARLY_STAGE_ID, "3d_visible").stem
+VISIBLE_SCENE_NAME = os.getenv("RL_MA_TEACHER_VISIBLE_SCENE_NAME", _DEFAULT_VISIBLE_SCENE_NAME)
 VISIBLE_DISPLAY_BASE = int(os.getenv("RL_MA_TEACHER_DISPLAY_BASE", "180"))
 EPISODES_PER_SCENARIO = int(os.getenv("RL_MA_TEACHER_EPISODES", "4"))
 MAX_STEPS_PER_EPISODE = int(os.getenv("RL_MA_TEACHER_MAX_STEPS", "400"))
 MAX_ATTEMPT_MULTIPLIER = int(os.getenv("RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER", "2"))
 STEP_RETRIES = int(os.getenv("RL_MA_TEACHER_STEP_RETRIES", "3"))
 SEED_BASE = int(os.getenv("RL_MA_TEACHER_SEED_BASE", "880000"))
+SCENARIO_FILTER = tuple(
+    item.strip() for item in os.getenv("RL_MA_TEACHER_SCENARIOS", "").split(",") if item.strip()
+)
 OUTPUT_ROOT = Path(os.getenv(
     "RL_MA_TEACHER_OUTPUT_ROOT",
     str(ROOT_DIR / "runs" / "teacher_multiagent_dataset"),
@@ -127,7 +136,7 @@ TEAM_COMM_INTERVAL_MS = float(os.getenv("RL_MA_TEACHER_TEAM_COMM_INTERVAL_MS", "
 TEAM_BALL_VALID_MAX_MS = float(os.getenv("RL_MA_TEACHER_TEAM_BALL_VALID_MAX_MS", "2000.0"))
 
 # Stage → number of RL field players (GK is always BH, not counted).
-_RL_FIELD_AGENTS_BY_STAGE = {6: 2, 7: 3}
+_RL_FIELD_AGENTS_BY_STAGE = {6: 2, 7: 3, 8: 3}
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +218,16 @@ def _dry_run_smoke() -> int:
 
     n_rl_field = _RL_FIELD_AGENTS_BY_STAGE[STAGE_ID]
     active = _active_player_numbers(n_rl_field)
-    scenarios = [s for s in team_production_scenarios(1) if s.stage_id == STAGE_ID]
+    scenario_pool = team_defense_scenarios(1) if STAGE_ID == 8 else team_production_scenarios(1)
+    scenarios = [s for s in scenario_pool if s.stage_id == STAGE_ID]
+    if SCENARIO_FILTER:
+        wanted = set(SCENARIO_FILTER)
+        scenarios = [s for s in scenarios if s.name in wanted]
+        missing = sorted(wanted - {s.name for s in scenarios})
+        if missing:
+            raise ValueError(f"RL_MA_TEACHER_SCENARIOS unknown for stage {STAGE_ID}: {missing}")
+    if not scenarios:
+        raise ValueError(f"No scenarios selected for stage {STAGE_ID}")
     rng = np.random.default_rng(SEED_BASE)
     for scenario in scenarios:
         world = scenario.world_fn(rng)
@@ -238,7 +256,8 @@ def _dry_run_smoke() -> int:
         for aid, xy in team_positions.items()
     }
     team_state = TeamCoordinationState()
-    roles = assign_roles(obs_by_agent, (ball_xy[0], ball_xy[1], True), team_state.roles)
+    phase = update_team_phase(team_state, (ball_xy[0], ball_xy[1], True))
+    roles = assign_roles(obs_by_agent, (ball_xy[0], ball_xy[1], True), team_state.roles, phase=phase)
     if "striker" not in roles.values() or "open_support" not in roles.values():
         raise AssertionError(f"dry-run roles missing striker/open_support: {roles}")
     if n_rl_field >= 3 and "off_ball_support" not in roles.values():
@@ -246,16 +265,29 @@ def _dry_run_smoke() -> int:
 
     striker_id = next(aid for aid, role in roles.items() if role == "striker")
     open_id = next(aid for aid, role in roles.items() if role == "open_support")
-    raw_open = compute_open_lane_target(obs_by_agent[open_id], ball_xy, team_positions[striker_id])
+    raw_open = (
+        defense_support_target(
+            obs_by_agent[open_id],
+            ball_xy,
+            team_positions[striker_id],
+            team_positions[off_id],
+        )
+        if phase == "defense" and off_id is not None
+        else compute_open_lane_target(obs_by_agent[open_id], ball_xy, team_positions[striker_id])
+    )
     team_state.open_lane_ema = ema_step(team_state.open_lane_ema, raw_open, EMA_ALPHA_OPEN_LANE)
     off_id = next((aid for aid, role in roles.items() if role == "off_ball_support"), None)
     if off_id is not None:
-        raw_triangle = compute_triangle_target(
-            obs_by_agent[off_id],
-            ball_xy,
-            team_positions[striker_id],
-            team_positions[open_id],
-        )
+        if phase == "defense":
+            raw_triangle, side = defender_cover_target(obs_by_agent[off_id], ball_xy)
+            team_state.defender_side_by_agent[off_id] = side
+        else:
+            raw_triangle = compute_triangle_target(
+                obs_by_agent[off_id],
+                ball_xy,
+                team_positions[striker_id],
+                team_positions[open_id],
+            )
         team_state.triangle_ema = ema_step(team_state.triangle_ema, raw_triangle, EMA_ALPHA_TRIANGLE)
 
     encoder_env = _make_encoder_env()
@@ -308,6 +340,9 @@ def _dry_run_smoke() -> int:
                 teammate_slots=teammate_slots,
                 last_pass_target=None,
                 last_pass_target_age_ms=0.0,
+                phase=phase,
+                team_ball_valid=True,
+                face_ball_xy=ball_xy,
             )
             if "role_id" not in payload or residual.skill_name not in SKILL_ORDER:
                 raise AssertionError(f"bad payload for player {aid}: {payload}")
@@ -443,6 +478,92 @@ def _setup_pybh_active_players(active: tuple[int, ...]) -> None:
     """
     os.environ["PYBH_RL_OVERRIDE_TEAM"] = "24"
     os.environ["PYBH_RL_ACTIVE_PLAYERS"] = ",".join(str(p) for p in active)
+
+
+def _ensure_visible_shm_name() -> str | None:
+    """Use a fresh RLSharedState segment for visible collection runs.
+
+    The default /pybh_rl_shared_state_v3 can survive crashes with valid
+    magic/version and stale request counters.  A unique name per run avoids
+    request-id jumps such as 1070137xxx in both single-SimRobot and parallel
+    visible modes.
+    """
+    if BACKEND_MODE != "simrobot_visible" or not SIMROBOT_LAUNCH:
+        return os.environ.get("PYBH_RL_SHM_NAME")
+    shm_name = os.environ.get("PYBH_RL_SHM_NAME")
+    if not shm_name:
+        shm_name = f"/pybh_rl_ma_teacher_stage{STAGE_ID}_{os.getpid()}"
+        os.environ["PYBH_RL_SHM_NAME"] = shm_name
+    return shm_name
+
+
+def _write_dataset_artifacts(
+    output_dir: Path,
+    *,
+    active: tuple[int, ...],
+    parallel_slots: bool,
+    all_obs: list[np.ndarray],
+    all_actions: list[np.ndarray],
+    all_stages: list[int],
+    all_episode_ids: list[int],
+    all_step_ids: list[int],
+    all_weights: list[float],
+    all_role_ids: list[int],
+    all_coords: list[tuple[float, float]],
+    all_label_consistent: list[int],
+    scenario_summaries: list[dict[str, object]],
+    total_episodes: int,
+    partial: bool,
+) -> None:
+    samples_path = output_dir / ("samples.partial.npz" if partial else "samples.npz")
+    np.savez_compressed(
+        samples_path,
+        observations=np.asarray(all_obs, dtype=np.float32),
+        actions=np.asarray(all_actions, dtype=np.float32),
+        stages=np.asarray(all_stages, dtype=np.int64),
+        episode_ids=np.asarray(all_episode_ids, dtype=np.int64),
+        step_ids=np.asarray(all_step_ids, dtype=np.int64),
+        weights=np.asarray(all_weights, dtype=np.float32),
+        role_ids=np.asarray(all_role_ids, dtype=np.int8),
+        coordination_target_xy=np.asarray(all_coords, dtype=np.float32),
+        label_consistent=np.asarray(all_label_consistent, dtype=np.int8),
+        skill_order=np.asarray(list(SKILL_ORDER)),
+    )
+
+    summary = {
+        "stage_id": STAGE_ID,
+        "active_rl_players": list(active),
+        "visible_parallel_slots": bool(parallel_slots),
+        "visible_scene_name": VISIBLE_SCENE_NAME if parallel_slots else None,
+        "pybh_rl_shm_name": os.environ.get("PYBH_RL_SHM_NAME"),
+        "episodes_per_scenario": EPISODES_PER_SCENARIO,
+        "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
+        "obs_size": int(np.asarray(all_obs[0]).shape[-1]) if all_obs else 0,
+        "total_rows": int(len(all_obs)),
+        "total_episodes": int(total_episodes),
+        "scenarios": scenario_summaries,
+        "partial": bool(partial),
+        "positive_weight_gate_label_consistent": True,
+        "positive_weight_role_mask_consistent": True,
+        "filters": {
+            "min_open_hold_steps": MIN_KEEP_STEPS_OPEN_SUPPORT,
+            "min_off_ball_hold_steps": MIN_KEEP_STEPS_OFF_BALL_SUPPORT,
+            "open_support_hold_radius_mm": OPEN_SUPPORT_HOLD_RADIUS_MM,
+            "off_ball_hold_radius_mm": OFF_BALL_HOLD_RADIUS_MM,
+            "max_role_swaps_per_episode": MAX_ROLE_SWAPS_PER_EPISODE,
+            "pass_intercepted_drop": PASS_INTERCEPTED_DROP,
+            "collision_radius_mm": COLLISION_RADIUS_MM,
+            "collision_sustain_steps": COLLISION_SUSTAIN_STEPS,
+            "team_state_injection": True,
+        },
+        "gate_config": asdict(GateConfig.from_env()),
+    }
+    summary_path = output_dir / ("summary.partial.json" if partial else "summary.json")
+    with summary_path.open("w") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+
+    print(f"[ma-teacher] wrote {samples_path} ({len(all_obs)} rows, partial={int(partial)})")
+    print(f"[ma-teacher] wrote {summary_path}")
 
 
 def _coordinated_reset(
@@ -694,6 +815,8 @@ def _team_label_allowed(role: str, skill_name: str, decision: GateDecision) -> b
     if role == "off_ball_support":
         if skill_name == "dribble":
             return bool(decision.dribble_armed)
+        if skill_name == "block":
+            return bool(decision.dribble_armed)
         if skill_name == "observe":
             return bool(decision.observe_armed)
         return skill_name in {"stand", "walk"}
@@ -812,7 +935,8 @@ def _collect_team_scenario(
         # agent right after reset. ball_rel is perception-seeded and is garbage for
         # supports that spawn facing away from the ball.
         ball_drift_bad = False
-        for aid, o in obs_by_agent.items():
+        reset_ball_obs = obs_by_agent.items() if _use_visible_parallel_slots() else ((primary, obs_by_agent[primary]),)
+        for aid, o in reset_ball_obs:
             drift = math.hypot(
                 float(o.ball_x) - float(world_spec.ball_x),
                 float(o.ball_y) - float(world_spec.ball_y),
@@ -852,6 +976,7 @@ def _collect_team_scenario(
         }
         ep_oob_streak = 0
         ep_agent_out_of_bounds = False
+        ep_backend_error = False
         comm_snapshot: dict | None = None
 
         for step in range(1, MAX_STEPS_PER_EPISODE + 1):
@@ -885,19 +1010,44 @@ def _collect_team_scenario(
                 agent_positions[num] = (sx, sy)
                 agent_pose_ages[num] = 0.0
             team_ball = _team_ball_from_obs(obs_by_agent)
-            roles = assign_roles(obs_by_agent, team_ball, team_state.roles)
+            phase = update_team_phase(team_state, team_ball)
+            roles = assign_roles(obs_by_agent, team_ball, team_state.roles, phase=phase)
 
             # 2. Coordination targets (EMA-smoothed)
             striker_id = next((aid for aid, r in roles.items() if r == "striker"), None)
             open_id = next((aid for aid, r in roles.items() if r == "open_support"), None)
             off_id = next((aid for aid, r in roles.items() if r == "off_ball_support"), None)
 
-            if open_id is not None and striker_id is not None:
-                raw_open = compute_open_lane_target(
-                    obs_by_agent[open_id],
+            if off_id is not None and striker_id is not None and phase == "defense":
+                raw_tri, side = defender_cover_target(
+                    obs_by_agent[off_id],
                     (team_ball[0], team_ball[1]),
-                    agent_positions[striker_id],
-                    forced_side=spawn_side.get(open_id),
+                    current_side=team_state.defender_side_by_agent.get(off_id),
+                )
+                team_state.defender_side_by_agent[off_id] = side
+                team_state.triangle_ema = (
+                    raw_tri if team_state.triangle_ema is None
+                    else (
+                        EMA_ALPHA_TRIANGLE * raw_tri[0] + (1 - EMA_ALPHA_TRIANGLE) * team_state.triangle_ema[0],
+                        EMA_ALPHA_TRIANGLE * raw_tri[1] + (1 - EMA_ALPHA_TRIANGLE) * team_state.triangle_ema[1],
+                    )
+                )
+            if open_id is not None and striker_id is not None:
+                raw_open = (
+                    defense_support_target(
+                        obs_by_agent[open_id],
+                        (team_ball[0], team_ball[1]),
+                        agent_positions[striker_id],
+                        agent_positions[off_id],
+                        forced_side=spawn_side.get(open_id),
+                    )
+                    if phase == "defense" and off_id is not None
+                    else compute_open_lane_target(
+                        obs_by_agent[open_id],
+                        (team_ball[0], team_ball[1]),
+                        agent_positions[striker_id],
+                        forced_side=spawn_side.get(open_id),
+                    )
                 )
                 team_state.open_lane_ema = (
                     raw_open if team_state.open_lane_ema is None
@@ -906,7 +1056,7 @@ def _collect_team_scenario(
                         EMA_ALPHA_OPEN_LANE * raw_open[1] + (1 - EMA_ALPHA_OPEN_LANE) * team_state.open_lane_ema[1],
                     )
                 )
-            if off_id is not None and striker_id is not None and open_id is not None:
+            if off_id is not None and striker_id is not None and open_id is not None and phase != "defense":
                 raw_tri = compute_triangle_target(
                     obs_by_agent[off_id],
                     (team_ball[0], team_ball[1]),
@@ -942,6 +1092,27 @@ def _collect_team_scenario(
                 # Base gate (shoot/dribble armed); team augmentation comes next
                 base_decision = gates[aid].step(obs)
 
+                # Coordination target for this role
+                coord = (
+                    team_state.open_lane_ema if role == "open_support" and team_state.open_lane_ema is not None
+                    else team_state.triangle_ema if role == "off_ball_support" and team_state.triangle_ema is not None
+                    else (team_ball[0], team_ball[1])
+                )
+                if coord is None:
+                    coord = agent_positions[aid]  # safe fallback
+
+                if role == "off_ball_support" and phase == "defense" and defender_block_armed(
+                    obs,
+                    team_ball_valid=bool(team_ball[2]),
+                    face_ball_xy=(team_ball[0], team_ball[1]),
+                    coordination_target=coord,
+                ):
+                    base_decision = replace(
+                        base_decision,
+                        dribble_armed=True,
+                        shoot_arm_progress=max(float(base_decision.shoot_arm_progress), 1.0),
+                    )
+
                 # Compute pass_armed for the striker only. PlayBall.cpp runs
                 # smashOrPass whenever the robot is playing the ball, not only when
                 # a shot is armed — gating on shoot_armed alone starves pass: at
@@ -961,15 +1132,6 @@ def _collect_team_scenario(
                     base_decision, role=role, pass_armed=pass_armed,
                 )
 
-                # Coordination target for this role
-                coord = (
-                    team_state.open_lane_ema if role == "open_support" and team_state.open_lane_ema is not None
-                    else team_state.triangle_ema if role == "off_ball_support" and team_state.triangle_ema is not None
-                    else (team_ball[0], team_ball[1])
-                )
-                if coord is None:
-                    coord = agent_positions[aid]  # safe fallback
-
                 # Encode 47-dim obs with team-augmented gate bits
                 encoded = _encode_for_agent(encoder_env, obs, team_decision)
 
@@ -982,6 +1144,9 @@ def _collect_team_scenario(
                     teammate_slots=teammate_slots,
                     last_pass_target=team_state.last_pass_target_by_striker.get(aid),
                     last_pass_target_age_ms=team_state.last_pass_target_age_ms_by_striker.get(aid, 0.0),
+                    phase=phase,
+                    team_ball_valid=bool(team_ball[2]),
+                    face_ball_xy=(team_ball[0], team_ball[1]),
                 )
 
                 # If striker committed a pass, register it for hysteresis
@@ -1025,8 +1190,20 @@ def _collect_team_scenario(
                 actions_for_step[aid] = absolute
                 prev_skill_name[aid] = residual.skill_name
 
-            # 4. Execute on each backend, collect next obs
-            obs_by_agent = _step_backends(backends, actions_for_step)
+            # 4. Execute on each backend, collect next obs. A visible SimRobot can
+            # stop producing frames after a WalkingEngine assertion/fall. Treat
+            # that as a bad episode, not as a fatal dataset-run error.
+            try:
+                obs_by_agent = _step_backends(backends, actions_for_step)
+            except RuntimeError as exc:
+                ep_backend_error = True
+                drop_reasons["backend_step_error"] += 1
+                print(
+                    f"[ma-teacher] drop episode scenario={scenario.name} "
+                    f"attempt={attempt} step={step}: backend_step_error: {exc}",
+                    flush=True,
+                )
+                break
 
             # Teammate-collision proxy: agents live in separate sims, so positions can
             # legitimately cross for a frame with no physics involved. Only flag when
@@ -1069,6 +1246,10 @@ def _collect_team_scenario(
                             [round(new_positions[b][0]), round(new_positions[b][1])],
                         ],
                     })
+
+        if ep_backend_error:
+            dropped_episodes += 1
+            continue
 
         # Episode complete — apply v2 sanitizer
         metrics: dict[str, float] = {}  # TODO Wed AM: extract from primary backend per-episode tracker
@@ -1142,15 +1323,12 @@ def main() -> int:
     n_rl_field = _RL_FIELD_AGENTS_BY_STAGE[STAGE_ID]
     active = _active_player_numbers(n_rl_field)
     _setup_pybh_active_players(active)
+    shm_name = _ensure_visible_shm_name()
     print(f"[ma-teacher] stage={STAGE_ID} active_rl_players={active} (GK player {n_rl_field + 1} is BH)")
     parallel_slots = _use_visible_parallel_slots()
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     runtime: VisibleParallelRuntime | None = None
     if parallel_slots:
-        shm_name = os.environ.get("PYBH_RL_SHM_NAME")
-        if not shm_name:
-            shm_name = f"/pybh_rl_ma_teacher_stage{STAGE_ID}_{os.getpid()}"
-            os.environ["PYBH_RL_SHM_NAME"] = shm_name
         print(
             f"[ma-teacher] visible_parallel_slots=on scene={VISIBLE_SCENE_NAME} "
             f"display_base={VISIBLE_DISPLAY_BASE} shm={shm_name}"
@@ -1167,6 +1345,8 @@ def main() -> int:
             },
         )
         runtime.start()
+    elif shm_name:
+        print(f"[ma-teacher] visible_parallel_slots=off shm={shm_name}")
 
     # Spawn backends — player 1 is primary (launches SimRobot).
     backends: dict[int, PyBHBackend] = {}
@@ -1180,7 +1360,16 @@ def main() -> int:
     encoder_env = _make_encoder_env()
 
     # Filter scenarios to those matching STAGE_ID; the rest run in another invocation.
-    scenarios = [s for s in team_production_scenarios(EPISODES_PER_SCENARIO) if s.stage_id == STAGE_ID]
+    scenario_pool = team_defense_scenarios(EPISODES_PER_SCENARIO) if STAGE_ID == 8 else team_production_scenarios(EPISODES_PER_SCENARIO)
+    scenarios = [s for s in scenario_pool if s.stage_id == STAGE_ID]
+    if SCENARIO_FILTER:
+        wanted = set(SCENARIO_FILTER)
+        scenarios = [s for s in scenarios if s.name in wanted]
+        missing = sorted(wanted - {s.name for s in scenarios})
+        if missing:
+            raise ValueError(f"RL_MA_TEACHER_SCENARIOS unknown for stage {STAGE_ID}: {missing}")
+    if not scenarios:
+        raise ValueError(f"No scenarios selected for stage {STAGE_ID}")
     print(f"[ma-teacher] {len(scenarios)} scenarios for stage {STAGE_ID}:")
     for s in scenarios:
         print(f"  - {s.name} ({s.episodes} eps, {s.obstacles})")
@@ -1222,6 +1411,43 @@ def main() -> int:
                 f"[ma-teacher] {scenario.name}: kept={stats['kept_episodes']}/{stats['attempted_episodes']} "
                 f"rows={len(all_obs)} drops={stats['drop_reasons']}"
             )
+            _write_dataset_artifacts(
+                output_dir,
+                active=active,
+                parallel_slots=parallel_slots,
+                all_obs=all_obs,
+                all_actions=all_actions,
+                all_stages=all_stages,
+                all_episode_ids=all_episode_ids,
+                all_step_ids=all_step_ids,
+                all_weights=all_weights,
+                all_role_ids=all_role_ids,
+                all_coords=all_coords,
+                all_label_consistent=all_label_consistent,
+                scenario_summaries=scenario_summaries,
+                total_episodes=next_episode_id,
+                partial=True,
+            )
+    except Exception:
+        if all_obs:
+            _write_dataset_artifacts(
+                output_dir,
+                active=active,
+                parallel_slots=parallel_slots,
+                all_obs=all_obs,
+                all_actions=all_actions,
+                all_stages=all_stages,
+                all_episode_ids=all_episode_ids,
+                all_step_ids=all_step_ids,
+                all_weights=all_weights,
+                all_role_ids=all_role_ids,
+                all_coords=all_coords,
+                all_label_consistent=all_label_consistent,
+                scenario_summaries=scenario_summaries,
+                total_episodes=next_episode_id,
+                partial=True,
+            )
+        raise
     finally:
         encoder_env.close()
         for backend in backends.values():
@@ -1229,57 +1455,23 @@ def main() -> int:
         if runtime is not None:
             runtime.close()
 
-    # Write samples.npz + summary.json
-    samples_path = output_dir / "samples.npz"
-    np.savez_compressed(
-        samples_path,
-        observations=np.asarray(all_obs, dtype=np.float32),
-        actions=np.asarray(all_actions, dtype=np.float32),
-        stages=np.asarray(all_stages, dtype=np.int64),
-        episode_ids=np.asarray(all_episode_ids, dtype=np.int64),
-        step_ids=np.asarray(all_step_ids, dtype=np.int64),
-        weights=np.asarray(all_weights, dtype=np.float32),
-        role_ids=np.asarray(all_role_ids, dtype=np.int8),
-        coordination_target_xy=np.asarray(all_coords, dtype=np.float32),
-        label_consistent=np.asarray(all_label_consistent, dtype=np.int8),
-        skill_order=np.asarray(list(SKILL_ORDER)),
+    _write_dataset_artifacts(
+        output_dir,
+        active=active,
+        parallel_slots=parallel_slots,
+        all_obs=all_obs,
+        all_actions=all_actions,
+        all_stages=all_stages,
+        all_episode_ids=all_episode_ids,
+        all_step_ids=all_step_ids,
+        all_weights=all_weights,
+        all_role_ids=all_role_ids,
+        all_coords=all_coords,
+        all_label_consistent=all_label_consistent,
+        scenario_summaries=scenario_summaries,
+        total_episodes=next_episode_id,
+        partial=False,
     )
-
-    summary = {
-        "stage_id": STAGE_ID,
-        "active_rl_players": list(active),
-        "visible_parallel_slots": bool(parallel_slots),
-        "visible_scene_name": VISIBLE_SCENE_NAME if parallel_slots else None,
-        "pybh_rl_shm_name": os.environ.get("PYBH_RL_SHM_NAME"),
-        "episodes_per_scenario": EPISODES_PER_SCENARIO,
-        "max_steps_per_episode": MAX_STEPS_PER_EPISODE,
-        "obs_size": int(np.asarray(all_obs[0]).shape[-1]) if all_obs else 0,
-        "total_rows": int(len(all_obs)),
-        "total_episodes": int(next_episode_id),
-        "scenarios": scenario_summaries,
-        "positive_weight_gate_label_consistent": True,                 # gate-bucket consistency enforced by Design A
-        "positive_weight_role_mask_consistent": True,                  # role mask is structural per §11.A.4
-        "filters": {
-            "min_open_hold_steps": MIN_KEEP_STEPS_OPEN_SUPPORT,
-            "min_off_ball_hold_steps": MIN_KEEP_STEPS_OFF_BALL_SUPPORT,
-            "open_support_hold_radius_mm": OPEN_SUPPORT_HOLD_RADIUS_MM,
-            "off_ball_hold_radius_mm": OFF_BALL_HOLD_RADIUS_MM,
-            "max_role_swaps_per_episode": MAX_ROLE_SWAPS_PER_EPISODE,
-            "pass_intercepted_drop": PASS_INTERCEPTED_DROP,
-            "collision_radius_mm": COLLISION_RADIUS_MM,
-            "collision_sustain_steps": COLLISION_SUSTAIN_STEPS,
-            "team_state_injection": True,
-        },
-        # Resolved gate thresholds (incl. RL_GATE_* overrides). The gate bits baked
-        # into obs[23:26]/obs[41:43] and the Design-A labels were generated under
-        # exactly these values — BC replay and deployment must reproduce them.
-        "gate_config": asdict(GateConfig.from_env()),
-    }
-    with (output_dir / "summary.json").open("w") as f:
-        json.dump(summary, f, indent=2, sort_keys=True)
-
-    print(f"[ma-teacher] wrote {samples_path} ({len(all_obs)} rows)")
-    print(f"[ma-teacher] wrote {output_dir / 'summary.json'}")
     return 0
 
 

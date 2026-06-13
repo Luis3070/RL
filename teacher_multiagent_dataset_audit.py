@@ -42,6 +42,8 @@ def _role_mask_allows(role_id: int, skill_name: str, obs: np.ndarray) -> bool:
     if role == "off_ball_support":
         if skill_name == "dribble":
             return dribble_armed
+        if skill_name == "block":
+            return dribble_armed
         if skill_name == "observe":
             return observe_armed
         return skill_name in {"stand", "walk"}
@@ -141,6 +143,8 @@ def audit_dataset(
     striker_skill_ids = skill_ids[striker_mask] if rows else np.asarray([], dtype=np.int64)
     dribble_id = SKILL_ORDER.index("dribble")
     shoot_id = SKILL_ORDER.index("shoot")
+    stand_id = SKILL_ORDER.index("stand")
+    block_id = SKILL_ORDER.index("block")
     striker_dribble_frac = float(np.mean(striker_skill_ids == dribble_id)) if striker_rows else 0.0
     striker_shoot_frac = float(np.mean(striker_skill_ids == shoot_id)) if striker_rows else 0.0
 
@@ -163,6 +167,22 @@ def audit_dataset(
             "shoot_armed_rows": int(np.sum(stage_striker & (observations[:, int(ObsIndex.shoot_armed)] >= 0.5))),
             "pass_armed_rows": int(np.sum(stage_striker & (observations[:, int(ObsIndex.pass_armed)] >= 0.5))),
         }
+
+    stage_id = int(summary.get("stage_id", -1))
+    team_ball_valid = observations[:, int(ObsIndex.time_since_team_ball_update)] < 0.5 if rows else np.asarray([], dtype=bool)
+    # global_team_ball_x_rel is robot-relative, not absolute field x. For stage 8
+    # the scenario set itself is defensive, so use the defender role rows as the
+    # defense-phase audit surface instead of inferring phase from a relative obs.
+    team_ball_x = observations[:, int(ObsIndex.global_team_ball_x_rel)] * ACTION.x_range if rows else np.asarray([])
+    defense_mask = off_ball_mask if int(summary.get("stage_id", -1)) == 8 else (team_ball_x < -300.0) if rows else np.asarray([], dtype=bool)
+    defender_defense_mask = off_ball_mask & defense_mask
+    defender_valid_team_ball = defender_defense_mask & team_ball_valid
+    defender_defense_rows = int(np.sum(defender_defense_mask)) if rows else 0
+    defender_block_rows = int(np.sum(defender_defense_mask & (skill_ids == block_id))) if rows else 0
+    defender_stand_valid_rows = int(np.sum(defender_valid_team_ball & (skill_ids == stand_id))) if rows else 0
+    defender_valid_rows = int(np.sum(defender_valid_team_ball)) if rows else 0
+    defender_block_frac = float(defender_block_rows / max(1, defender_defense_rows))
+    defender_stand_valid_frac = float(defender_stand_valid_rows / max(1, defender_valid_rows))
 
     checks = {
         "rows_min": rows >= min_rows,
@@ -188,6 +208,12 @@ def audit_dataset(
         "off_ball_hold_present": (not np.any(off_ball_mask)) or off_ball_hold_steps >= min_off_ball_hold_steps,
         "all_scenarios_kept": all_scenarios_kept,
     }
+    if stage_id == 8:
+        checks.update({
+            "defense_phase_rows_present": defender_defense_rows > 0,
+            "defender_block_frac_positive": defender_block_frac > 0.0,
+            "defender_stand_valid_team_ball_below_0p5": defender_stand_valid_frac < 0.5,
+        })
     passed = all(checks.values())
 
     report = {
@@ -233,6 +259,14 @@ def audit_dataset(
             "open_dist_mean_mm": open_dist_mean,
             "open_dist_p10_mm": open_dist_p10,
             "open_dist_min_mm": open_dist_min,
+        },
+        "defender_quality": {
+            "defender_defense_rows": defender_defense_rows,
+            "defender_block_rows": defender_block_rows,
+            "defender_block_frac": defender_block_frac,
+            "defender_valid_team_ball_rows": defender_valid_rows,
+            "defender_stand_valid_team_ball_rows": defender_stand_valid_rows,
+            "defender_stand_valid_team_ball_frac": defender_stand_valid_frac,
         },
         "consistency": {
             "role_mask_bad_rows": role_mask_bad,
