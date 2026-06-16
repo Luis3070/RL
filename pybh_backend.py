@@ -859,6 +859,12 @@ class PyBHBackend:
             self._validate_bridge_settings()
         elif self._uses_visible_simrobot():
             if self._simrobot_launch:
+                # Same reason as embedded mode: stale shm has a corrupt pthread_mutex
+                # → SimRobot segfaults on first lock. Always remove before launching.
+                try:
+                    _RL_SHM_FILE.unlink()
+                except FileNotFoundError:
+                    pass
                 self._apply_bridge_settings_override()
                 if self._simrobot_bin is None or not self._simrobot_bin.exists():
                     self._restore_obs_mode_override()

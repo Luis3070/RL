@@ -113,13 +113,18 @@ def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
     # Striker: shoot/dribble follow their armed flag; pass requires pass_armed.
     mask[:, _SHOOT_SKILL_IDX] = (shoot_armed & (is_striker | single_agent)).to(mask.dtype)
     mask[:, _PASS_SKILL_IDX] = (pass_armed & is_striker).to(mask.dtype)
-    # Dribble allowed for striker (armed) AND for off-ball-support (armed; escape hatch).
+    # Dribble allowed for striker (armed) AND for off-ball-support (armed; escape hatch for
+    # when the defender wins the ball before the role flips to striker).
     mask[:, _DRIBBLE_SKILL_IDX] = (
         (dribble_armed & is_striker)
         | (dribble_armed & is_off_ball)
         | sa_mask_dribble
     ).to(mask.dtype)
-    mask[:, _BLOCK_SKILL_IDX] = (dribble_armed & (~is_striker) & has_role).to(mask.dtype)
+    # Block available for any non-striker with a role (no dribble_armed requirement).
+    # Teacher always labels block with dribble_armed=1 & is_off_ball, but block is a
+    # valid intercept posture at any proximity — removing dribble_armed expands coverage
+    # from 20% to 70% of defense steps, giving BC+PPO a real signal to train on.
+    mask[:, _BLOCK_SKILL_IDX] = ((~is_striker) & has_role).to(mask.dtype)
 
     # Observe allowed for any non-striker when armed.
     mask[:, _OBSERVE_SKILL_IDX] = (observe_armed & (~is_striker) & has_role).to(mask.dtype)
@@ -245,6 +250,7 @@ def _run_cfg_from_env(base: ScriptRunConfig = IDE_RUN) -> ScriptRunConfig:
         abort_on_wire_fail=_env_bool("RL_ABORT_ON_WIRE_FAIL", cfg.abort_on_wire_fail),
         bc_warm_start=_env_bool("RL_BC_WARM_START", cfg.bc_warm_start),
         bc_replay=_env_bool("RL_BC_REPLAY", cfg.bc_replay),
+        simrobot_launch=_env_bool("RL_SIMROBOT_LAUNCH", cfg.simrobot_launch),
     )
     if bc_checkpoint_path := os.environ.get("RL_BC_CHECKPOINT"):
         cfg = replace(cfg, bc_checkpoint_path=bc_checkpoint_path)
@@ -1058,6 +1064,8 @@ def _aggregate_eval_metrics(episode_results: list[Mapping[str, object]]) -> Dict
         "policy_shoot_rate",
         "policy_pass_rate",
         "policy_block_rate",
+        "pass_armed_rate",
+        "striker_rate",
         "executed_stand_rate",
         "executed_walk_rate",
         "executed_dribble_rate",
@@ -1497,6 +1505,10 @@ class BCReplayRegularizer:
             return (("walk", 0.30), ("dribble", 0.34), ("shoot", 0.36))
         if stage_id == 2:
             return (("walk", 0.30), ("dribble", 0.32), ("shoot", 0.38))
+        if stage_id == 8:
+            # Defense fine-tune: block (60k) and pass (275) must be explicitly sampled.
+            # The default offensive mix never touches these skills, so BC has zero effect on them.
+            return (("block", 0.50), ("walk", 0.30), ("pass", 0.20))
         return (("dribble", 0.36), ("walk", 0.28), ("shoot", 0.36))
 
     def _sample_indices(self, stage_id: int) -> np.ndarray:
@@ -1677,6 +1689,9 @@ def print_eval_summary(
         defender_corridor_distance_mean = float(summary.get("defender_corridor_distance_mean", 0.0))
         executed_block_rate = float(summary.get("executed_block_rate", 0.0))
         executed_pass_rate = float(summary.get("executed_pass_rate", 0.0))
+        policy_pass_rate = float(summary.get("policy_pass_rate", 0.0))
+        pass_armed_rate = float(summary.get("pass_armed_rate", 0.0))
+        striker_rate = float(summary.get("striker_rate", 0.0))
         defense_phase_rate = float(summary.get("defense_phase_rate", 0.0))
         print(
             "[eval] "
@@ -1685,7 +1700,8 @@ def print_eval_summary(
             f"goal_side={defender_goal_side_rate:.3f} cover={defender_cover_corridor_rate:.3f} "
             f"danger_cover={defender_danger_cover_rate:.3f} gk_near={defender_gk_near_rate:.3f} "
             f"corridor_mm={defender_corridor_distance_mean:.0f} defense_phase={defense_phase_rate:.3f} "
-            f"block={executed_block_rate:.3f} pass={executed_pass_rate:.3f} "
+            f"block={executed_block_rate:.3f} pass={executed_pass_rate:.3f} policy_pass={policy_pass_rate:.3f} "
+            f"pass_armed={pass_armed_rate:.3f} striker={striker_rate:.3f} "
             f"collision={collision_rate:.3f} stability={stability_score:.3f} "
             f"policy_incompat={policy_incompatible_takeover_rate:.3f} "
             f"ball_trusted={ball_trusted_rate:.3f} rescued={ball_rescued_rate:.3f} "
@@ -2188,53 +2204,14 @@ def run_training(
             if not should_eval:
                 continue
 
-            eval_summary, episode_results = evaluate_agent(
-                agent,
-                eval_wrapper,
-                device=device,
-                episodes=TRAIN.eval_episodes,
-                stage_id=current_stage,
-                timestep=timestep + 1,
-                timesteps=timesteps,
-                capture_steps=capture_eval_steps,
-                pack_parallel=pack_parallel_eval,
-            )
-            wire_audit = build_wire_audit(eval_summary, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
-            bc_gate_metrics = bc_gate.update(eval_summary)
-            eval_summary.update(bc_gate_metrics)
-            print_eval_summary(current_stage, timestep + 1, eval_summary, agent, wire_audit=wire_audit)
-            if bc_regularizer is not None:
-                bc_regularizer.set_beta(float(bc_gate_metrics["bc_beta"]))
-                print(
-                    f"[bc-gate] step={timestep + 1} competence={bc_gate_metrics['bc_competence']:.3f} "
-                    f"ema={bc_gate_metrics['bc_competence_ema']:.3f} beta={bc_gate_metrics['bc_beta']:.4f}",
-                    flush=True,
-                )
-            if telemetry_paths is not None:
-                eval_row = _build_eval_summary_row(
-                    timestep=timestep + 1,
-                    stage_id=current_stage,
-                    summary=eval_summary,
-                    agent=agent,
-                    wire_audit=wire_audit,
-                )
-                _append_csv_row(telemetry_paths.eval_summary_csv, eval_row)
-                _append_eval_episode_rows(
-                    telemetry_paths,
-                    timestep=timestep + 1,
-                    stage_id=current_stage,
-                    episode_results=episode_results,
-                )
-                if save_plots:
-                    _plot_eval_metrics(telemetry_paths)
-
+            # Save checkpoint before eval so it's never lost to an eval crash.
             if (timestep + 1) % TRAIN.checkpoint_interval == 0 or (timestep + 1) == timesteps:
                 checkpoint_path = save_checkpoint(
                     checkpoint_models,
                     train_cfg=TRAIN,
                     timestep=timestep + 1,
                     stage_id=current_stage,
-                    eval_summary={**dict(eval_summary), **dict(wire_audit)},
+                    eval_summary={},
                 )
                 print(f"[checkpoint] saved={checkpoint_path}", flush=True)
                 _ploss_ckpt = _extract_agent_stat(
@@ -2247,11 +2224,71 @@ def run_training(
                     last_good_checkpoint_path = checkpoint_path
                     _nan_reload_count = 0
 
-            if abort_on_wire_fail and wire_audit["wire_audit_status"] == "FAIL":
+            try:
+                eval_summary, episode_results = evaluate_agent(
+                    agent,
+                    eval_wrapper,
+                    device=device,
+                    episodes=TRAIN.eval_episodes,
+                    stage_id=current_stage,
+                    timestep=timestep + 1,
+                    timesteps=timesteps,
+                    capture_steps=capture_eval_steps,
+                    pack_parallel=pack_parallel_eval,
+                )
+            except Exception as _eval_exc:
+                print(
+                    f"[eval] WARNING: eval crashed at step={timestep + 1}: {_eval_exc}; "
+                    f"skipping eval row, continuing training.",
+                    flush=True,
+                )
+                eval_summary = {}
+                episode_results = []
+                wire_audit = {}
+
+            if eval_summary:
+                wire_audit = build_wire_audit(eval_summary, backend_cfg=backend_cfg, audit_cfg=TRAIN.wire_audit)
+                bc_gate_metrics = bc_gate.update(eval_summary)
+                eval_summary.update(bc_gate_metrics)
+                print_eval_summary(current_stage, timestep + 1, eval_summary, agent, wire_audit=wire_audit)
+                if bc_regularizer is not None:
+                    bc_regularizer.set_beta(float(bc_gate_metrics["bc_beta"]))
+                    print(
+                        f"[bc-gate] step={timestep + 1} competence={bc_gate_metrics['bc_competence']:.3f} "
+                        f"ema={bc_gate_metrics['bc_competence_ema']:.3f} beta={bc_gate_metrics['bc_beta']:.4f}",
+                        flush=True,
+                    )
+                if telemetry_paths is not None and eval_summary:
+                    eval_row = _build_eval_summary_row(
+                        timestep=timestep + 1,
+                        stage_id=current_stage,
+                        summary=eval_summary,
+                        agent=agent,
+                        wire_audit=wire_audit,
+                    )
+                    _append_csv_row(telemetry_paths.eval_summary_csv, eval_row)
+                    _append_eval_episode_rows(
+                        telemetry_paths,
+                        timestep=timestep + 1,
+                        stage_id=current_stage,
+                        episode_results=episode_results,
+                    )
+                    if save_plots:
+                        _plot_eval_metrics(telemetry_paths)
+
+            if abort_on_wire_fail and wire_audit.get("wire_audit_status") == "FAIL":
                 raise RuntimeError(f"Wire audit failed at timestep {timestep + 1}: {wire_audit['wire_audit_failures']}")
 
             if (timestep + 1) < timesteps:
-                observations, infos = wrapped_env.reset()
+                try:
+                    observations, infos = wrapped_env.reset()
+                except Exception as _reset_exc:
+                    print(
+                        f"[training] WARNING: post-eval reset crashed: {_reset_exc}; "
+                        f"checkpoint already saved, stopping training loop cleanly.",
+                        flush=True,
+                    )
+                    break
 
             promotion_metrics = {**dict(eval_summary), **dict(wire_audit)}
             _policy_healthy = not np.isnan(

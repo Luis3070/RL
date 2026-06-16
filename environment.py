@@ -182,6 +182,47 @@ def _teammate_activity_is_engaging(
     return math.hypot(teammate_x - team_ball_x, teammate_y - team_ball_y) < ENGAGING_DISTANCE_MM
 
 
+_STAGE8_TEAMMATE_FRESH_MAX_AGE_MS = 1000.0
+_STAGE8_MIN_PASS_DISTANCE_MM = 400.0
+_STAGE8_MAX_PASS_DISTANCE_MM = 4000.0
+_STAGE8_GK_EXCLUDE_X_MM = -2000.0
+
+
+def _stage8_pass_armed(obs: BackendObservation, has_ball: bool) -> bool:
+    """Single-agent stand-in for the orchestrator's smash_or_pass gate (see
+    multiagent_teacher.smash_or_pass / defensive_clear_pass_target). pass_armed
+    is otherwise always False outside the never-wired `_team_hook` path, which
+    permanently masks out the pass skill (gate requires pass_armed & is_striker).
+    Fires when the striker has the ball and at least one fresh non-GK teammate
+    sits within passing range. Target selection is left to the policy's own
+    pass_target head — this only ungates the skill.
+
+    No lane-clearance precondition: defense_recovery_clear deliberately places
+    the presser 250-600mm away (ball just won off it), which sits inside any
+    sane lane-block threshold and would make this always False in exactly the
+    scenario meant to teach clearance passes. Let PPO reward (not this gate)
+    judge whether passing through pressure was a good idea.
+    """
+    if not has_ball:
+        return False
+    self_x, self_y = float(obs.robot_x), float(obs.robot_y)
+    for idx, pose in enumerate(obs.teammate_poses):
+        age = (
+            float(obs.teammate_ages_ms[idx])
+            if idx < len(obs.teammate_ages_ms)
+            else float("inf")
+        )
+        if age > _STAGE8_TEAMMATE_FRESH_MAX_AGE_MS:
+            continue
+        x_field, y_field = float(pose[0]), float(pose[1])
+        if x_field < _STAGE8_GK_EXCLUDE_X_MM:
+            continue
+        dist = math.hypot(x_field - self_x, y_field - self_y)
+        if _STAGE8_MIN_PASS_DISTANCE_MM <= dist <= _STAGE8_MAX_PASS_DISTANCE_MM:
+            return True
+    return False
+
+
 class RealSimRobotEnv(ParallelEnv):
     metadata = {"name": "real-simrobot-skillrequest-v2"}
 
@@ -313,6 +354,14 @@ class RealSimRobotEnv(ParallelEnv):
         self._gate_decision = self._skill_gate.step(obs)
         if self._team_hook is not None:
             obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
+        elif self._episode_stage_id == 8:
+            has_ball = self._gate_decision.shoot_armed or self._gate_decision.dribble_armed
+            self._gate_decision = replace(
+                self._gate_decision,
+                is_striker=has_ball,
+                is_off_ball_support=not has_ball,
+                pass_armed=_stage8_pass_armed(obs, has_ball),
+            )
         encoded = self._encode_obs(obs)
         self._last_obs = encoded
         self._last_backend_obs = obs
@@ -558,6 +607,14 @@ class RealSimRobotEnv(ParallelEnv):
         self._gate_decision = self._skill_gate.step(obs)
         if self._team_hook is not None:
             obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
+        elif self._episode_stage_id == 8:
+            has_ball = self._gate_decision.shoot_armed or self._gate_decision.dribble_armed
+            self._gate_decision = replace(
+                self._gate_decision,
+                is_striker=has_ball,
+                is_off_ball_support=not has_ball,
+                pass_armed=_stage8_pass_armed(obs, has_ball),
+            )
         encoded = self._encode_obs(obs)
         if _STEP_PROFILE:
             _t3 = time.perf_counter()
@@ -928,6 +985,8 @@ class RealSimRobotEnv(ParallelEnv):
             "skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_counts": {name: 0 for name in ACTION.skill_names},
             "policy_skill_prob_sums": {name: 0.0 for name in ACTION.skill_names},
+            "pass_armed_steps": 0,
+            "striker_steps": 0,
             "policy_skill_entropy_sum": 0.0,
             "policy_param_std_sum": 0.0,
             "skill_projection_count": 0,
@@ -1048,6 +1107,8 @@ class RealSimRobotEnv(ParallelEnv):
 
         tracker["skill_counts"][step_ctx.skill_name] += 1
         tracker["policy_skill_counts"][step_ctx.policy_skill_name] += 1
+        tracker["pass_armed_steps"] += int(bool(self._gate_decision.pass_armed))
+        tracker["striker_steps"] += int(bool(self._gate_decision.is_striker))
         tracker["policy_skill_prob_sums"]["walk"] += float(step_ctx.policy_skill_prob_walk)
         tracker["policy_skill_prob_sums"]["dribble"] += float(step_ctx.policy_skill_prob_dribble)
         tracker["policy_skill_prob_sums"]["shoot"] += float(step_ctx.policy_skill_prob_shoot)
@@ -1287,24 +1348,27 @@ class RealSimRobotEnv(ParallelEnv):
             "defense_cover_corridor": 1.0 if defense_phase and cover_corridor else 0.0,
             "defense_danger_cover": 1.0 if danger and cover_corridor else 0.0,
             "defense_block": 1.0 if danger and step_ctx.skill_name == "block" else 0.0,
-            "defense_pass_clear": 1.0 if defense_phase and step_ctx.skill_name == "pass" and not danger else 0.0,
+            "defense_pass_clear": 1.0 if defense_phase and step_ctx.skill_name == "pass" else 0.0,
             "defense_threat_reduction": threat_reduction if defense_phase else 0.0,
             "defense_abandon": 1.0 if defense_phase and not goal_side else 0.0,
             "defense_far_corridor": float(np.clip(corridor_distance / 1800.0, 0.0, 1.0)) if defense_phase else 0.0,
             "defense_gk_near": 1.0 if defense_phase and gk_near else 0.0,
             "defense_collision": 1.0 if step_ctx.collision else 0.0,
+            # Walk in the danger zone is actively bad: penalise to make block/pass the only rational choice.
+            "defense_walk_in_danger": 1.0 if danger and step_ctx.skill_name == "walk" else 0.0,
         }
         defense_weights = {
             "defense_goal_side": 0.035,
             "defense_cover_corridor": 0.060,
             "defense_danger_cover": 0.050,
-            "defense_block": 0.030,
-            "defense_pass_clear": 0.020,
+            "defense_block": 1.000,
+            "defense_pass_clear": 0.500,
             "defense_threat_reduction": 0.030,
             "defense_abandon": -0.070,
             "defense_far_corridor": -0.035,
             "defense_gk_near": -0.080,
             "defense_collision": -0.120,
+            "defense_walk_in_danger": -0.600,
         }
         for name, value in defense_terms.items():
             terms[name] = float(value)
@@ -1588,6 +1652,8 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_dribble_rate": float(tracker["policy_skill_counts"].get("dribble", 0) / steps),
             "policy_shoot_rate": float(tracker["policy_skill_counts"].get("shoot", 0) / steps),
             "policy_pass_rate": float(tracker["policy_skill_counts"].get("pass", 0) / steps),
+            "pass_armed_rate": float(tracker["pass_armed_steps"] / steps),
+            "striker_rate": float(tracker["striker_steps"] / steps),
             "policy_block_rate": float(tracker["policy_skill_counts"].get("block", 0) / steps),
             "executed_stand_rate": float(tracker["skill_counts"].get("stand", 0) / steps),
             "executed_walk_rate": float(tracker["skill_counts"].get("walk", 0) / steps),
