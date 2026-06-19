@@ -174,14 +174,27 @@ def _load_dataset_summary(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _resolve_repo_path(path_str: str) -> Path:
+    """Resolve a CLI path, treating relative paths as relative to the RL repo root.
+
+    Importing pybh changes the process CWD to SabanaHerons2026/Make/Python, so a
+    relative `runs/...` arg typed from the RL repo would otherwise resolve against
+    the wrong root (FileNotFoundError pointing at SabanaHerons2026/runs/...).
+    """
+    p = Path(path_str).expanduser()
+    if not p.is_absolute():
+        p = ROOT / p
+    return p.resolve()
+
+
 def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
     experiment_name = os.getenv("RL_MA_PROD_EXPERIMENT_NAME", "multiagent_production_v1")
     stage_id = int(args.stage_id)
     checkpoint_arg = args.checkpoint or str(_default_kl_anchor_for_stage(stage_id))
-    checkpoint = Path(checkpoint_arg).expanduser().resolve()
+    checkpoint = _resolve_repo_path(checkpoint_arg)
     if not checkpoint.exists():
         raise FileNotFoundError(checkpoint)
-    dataset = Path(args.dataset).expanduser().resolve()
+    dataset = _resolve_repo_path(args.dataset)
     if not dataset.exists():
         raise FileNotFoundError(
             f"Multi-agent BC dataset not found at {dataset}. "
@@ -277,7 +290,8 @@ def run(args: argparse.Namespace) -> None:
     # RL_PRODUCTION_SCENARIO_SET to pick the iterator; "team" must be wired into
     # the env's scenario factory (small env-side TODO if not yet done).
     os.environ.setdefault("RL_PRODUCTION_SCENARIO_RESETS", "1")
-    if int(args.stage_id) == 8 and os.getenv("RL_SCENE_NAME", "RL1v0_3D_visible") == "RL1v0_3D_visible":
+    if (int(args.stage_id) == 8 and os.getenv("RL_SCENE_NAME", "RL1v0_3D_visible") == "RL1v0_3D_visible"
+            and not _env_bool("RL_MA_PROD_FORCE_PERCEPTION_SCENE", False)):
         os.environ["RL_SCENE_NAME"] = "RLMAStage7_3D"
     os.environ.setdefault(
         "RL_PRODUCTION_SCENARIO_SET",

@@ -361,6 +361,125 @@ def _team_3v0_dynamic_world(rng: np.random.Generator) -> WorldSpec:
     )
 
 
+# ---------------------------------------------------------------------------
+# v3 (doc-35) contrastive A/B worlds. Each pair is identical except one degree of
+# freedom (a teammate's openness / lane coverage) so the teacher demonstrates BOTH
+# branches on near-identical ego-states — the matched data the policy needs to learn
+# the contingency. B-variants carry is_contrast=True (covered → reposition/dribble).
+# ---------------------------------------------------------------------------
+
+def _team_giveandgo_world(rng: np.random.Generator, *, outlet_present: bool) -> WorldSpec:
+    """v3.1 TEAMMATE-varying pass contrast — opponent layout CONSTANT (none) in both.
+
+    A (outlet_present=True):  an open up-field outlet teammate exists → teacher PASSES.
+    B (outlet_present=False): that teammate is pulled DEEP/behind (no up-field outlet) →
+       teacher DRIBBLES/shoots.
+    The ONLY thing that differs is the outlet teammate's position, so the pass↔dribble
+    flip is attributable to the teammate dims (obs[26:31]) — NOT to any opponent (the v3
+    bug, where the contrast varied an opponent the policy reads via its own front cone).
+    """
+    ball_x = float(rng.uniform(800.0, 1600.0))
+    ball_y = _clip_y(float(rng.uniform(-500.0, 500.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    striker = (ball_x - float(rng.uniform(90.0, 200.0)), _clip_y(ball_y + float(rng.uniform(-120.0, 120.0))))
+    deep = (float(rng.uniform(-600.0, 200.0)), _clip_y(-side * float(rng.uniform(900.0, 1400.0))))
+    if outlet_present:
+        # reachable up-field outlet (high goal-proximity, in pass range)
+        outlet = (float(rng.uniform(2400.0, 3000.0)), _clip_y(side * float(rng.uniform(900.0, 1500.0))))
+    else:
+        # same teammate, pulled DEEP behind the ball → low goal-proximity, not an up-field
+        # option → smash_or_pass finds no pass target → dribble. Body count identical.
+        outlet = (float(rng.uniform(-1200.0, -400.0)), _clip_y(side * float(rng.uniform(200.0, 900.0))))
+    gk = WorldPlayerSpec(number=4, x=-4000.0, y=0.0, theta=0.0)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(striker, dtype=np.float32),
+        robot_theta=math.atan2(ball_y - striker[1], ball_x - striker[0]),
+        teammates=(
+            WorldPlayerSpec(number=2, x=outlet[0], y=outlet[1], theta=math.atan2(ball_y - outlet[1], ball_x - outlet[0])),
+            WorldPlayerSpec(number=3, x=deep[0], y=deep[1], theta=math.atan2(ball_y - deep[1], ball_x - deep[0])),
+            gk,
+        ),
+        opponents=(),  # CONSTANT across A/B — the flip must come from the teammate, not an opponent
+    )
+
+
+def _team_support_world(rng: np.random.Generator, *, striker_live: bool) -> WorldSpec:
+    """v3.1 TEAMMATE-varying support contrast — opponent layout CONSTANT (none) in both.
+
+    A (striker_live=True):  the striker (teammate) is ON the ball, controlling → this
+       support is a live outlet → teacher support HOLDS (stand).
+    B (striker_live=False): the ball is loose and the striker is FAR (not controlling) →
+       support REPOSITIONS toward play.
+    Only the striker's (teammate's) position relative to the ball differs, so the support's
+    hold↔reposition is attributable to the teammate dims, not to the support's own opponent.
+    """
+    ball_x = float(rng.uniform(900.0, 1700.0))
+    ball_y = _clip_y(float(rng.uniform(-400.0, 400.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    support = (float(rng.uniform(2000.0, 2600.0)), _clip_y(side * float(rng.uniform(1100.0, 1400.0))))
+    deep = (float(rng.uniform(-600.0, 200.0)), _clip_y(-side * float(rng.uniform(900.0, 1300.0))))
+    if striker_live:
+        striker = (ball_x - float(rng.uniform(90.0, 180.0)), _clip_y(ball_y))            # on the ball
+    else:
+        striker = (ball_x - float(rng.uniform(2000.0, 2800.0)),                          # far → ball loose
+                   _clip_y(ball_y - side * float(rng.uniform(400.0, 900.0))))
+    gk = WorldPlayerSpec(number=4, x=-4000.0, y=0.0, theta=0.0)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(striker, dtype=np.float32),
+        robot_theta=math.atan2(ball_y - striker[1], ball_x - striker[0]),
+        teammates=(
+            WorldPlayerSpec(number=2, x=support[0], y=support[1], theta=math.atan2(ball_y - support[1], ball_x - support[0])),
+            WorldPlayerSpec(number=3, x=deep[0], y=deep[1], theta=math.atan2(ball_y - deep[1], ball_x - deep[0])),
+            gk,
+        ),
+        opponents=(),
+    )
+
+
+def _giveandgo_outlet_present_world(rng): return _team_giveandgo_world(rng, outlet_present=True)
+def _giveandgo_outlet_absent_world(rng):  return _team_giveandgo_world(rng, outlet_present=False)
+def _support_striker_live_world(rng):     return _team_support_world(rng, striker_live=True)
+def _support_striker_far_world(rng):      return _team_support_world(rng, striker_live=False)
+
+
+def _pass_forcing_world(rng: np.random.Generator) -> WorldSpec:
+    """v4-S3 PASS-FORCING — pass is the winning move, dribble/shoot is low value.
+
+    The striker has the ball FAR from goal (low own shot value) with a clear front, and an
+    OPEN teammate is ADVANCED near the opponent goal (high pass value). smash_or_pass then
+    chooses pass (own_value < advanced teammate value), and the completed-pass reward fires
+    when the ball reaches the advanced teammate. Front kept clear so the pass-reachability
+    proxy (striker front-cone) allows the pass; opponents (if any) sit behind, never in the
+    striker→outlet lane. This is the data where PPO can actually learn that passing pays.
+    """
+    ball_x = float(rng.uniform(-400.0, 600.0))                 # far from opponent goal → low own shot value
+    ball_y = _clip_y(float(rng.uniform(-700.0, 700.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    striker = (ball_x - float(rng.uniform(90.0, 200.0)), _clip_y(ball_y + float(rng.uniform(-120.0, 120.0))))
+    # advanced outlet (high goal-proximity) on the ball side, clear lane — kept at a
+    # COMPLETABLE pass distance (~2.2-2.8m ahead) so the completed-pass reward can fire.
+    outlet = (float(rng.uniform(2200.0, 2800.0)), _clip_y(side * float(rng.uniform(700.0, 1200.0))))
+    deep = (float(rng.uniform(-1400.0, -600.0)), _clip_y(-side * float(rng.uniform(700.0, 1200.0))))
+    gk = WorldPlayerSpec(number=4, x=-4000.0, y=0.0, theta=0.0)
+    # optional opponent kept BEHIND the striker (own half), never in the striker→outlet lane,
+    # so it doesn't trip the front-cone pass proxy.
+    opp = WorldPlayerSpec(number=1, x=striker[0] - float(rng.uniform(700.0, 1200.0)),
+                          y=_clip_y(ball_y + side * float(rng.uniform(200.0, 600.0))), theta=0.0)
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(striker, dtype=np.float32),
+        robot_theta=math.atan2(outlet[1] - striker[1], outlet[0] - striker[0]),  # face the outlet
+        teammates=(
+            WorldPlayerSpec(number=2, x=outlet[0], y=outlet[1], theta=math.atan2(ball_y - outlet[1], ball_x - outlet[0])),
+            WorldPlayerSpec(number=3, x=deep[0], y=deep[1], theta=math.atan2(ball_y - deep[1], ball_x - deep[0])),
+            gk,
+        ),
+        opponents=(opp,),
+    )
+
+
 def _team_3v3_full_dynamic_world(rng: np.random.Generator) -> WorldSpec:
     """Monday demo distribution: 1 BH GK + 3 RL field vs full BH (1 GK + 3 field, dynamic).
 
@@ -398,8 +517,8 @@ def _defense_team_world(
         _clip_y(ball_y + side * float(rng.uniform(80.0, 180.0))),
     )
     defender = (
-        float(rng.uniform(-3400.0, -3000.0)),
-        _clip_y(ball_y * 0.45),
+        float(np.clip(ball_x - 700.0, -3400.0, -2600.0)),
+        _clip_y(ball_y - side * 700.0),
     )
     supporter = (
         float(rng.uniform(-1600.0, -1000.0)),
@@ -501,6 +620,58 @@ def _defense_recovery_world(rng: np.random.Generator) -> WorldSpec:
     )
 
 
+def _defense_mark_open_world(rng: np.random.Generator) -> WorldSpec:
+    """Stage 8 mark validation: an attacker isolated ~1.1m in front of the off-ball
+    defender in OPEN space.
+
+    Unlike defense_3v3_full (deep ball + attackers all crammed into our third, no room
+    for a clean mark target), here the ball and the bulk of play sit up-field while a
+    lone attacker lurks deep on our defender. That makes the mark target (a) inside the
+    1.5m mark gate band, (b) directly in the off-ball defender's gaze cone (it faces the
+    ball, the target sits between it and the ball), and (c) a big, isolated blob for the
+    vision NN (close range, nothing else nearby) — so mark can fire from REAL perception,
+    which is what the Stage-3 no-sim2real-gap check needs. Not used in the locked training
+    pool; validation/collection only.
+    """
+    ball_x = float(rng.uniform(-1200.0, -400.0))
+    ball_y = _clip_y(float(rng.uniform(-700.0, 700.0)))
+    side = 1.0 if ball_y >= 0.0 else -1.0
+    # On-ball presser (becomes striker) contests the ball up-field.
+    presser = (ball_x - float(rng.uniform(150.0, 350.0)), _clip_y(ball_y + side * float(rng.uniform(60.0, 160.0))))
+    # Off-ball defender deep, with space ahead of it (toward the ball/up-field).
+    defender = (float(rng.uniform(-3300.0, -2900.0)), _clip_y(float(rng.uniform(-900.0, 900.0))))
+    # Mark target: lone attacker in front of the defender along its defender->ball
+    # sightline, ~1.1m away BUT capped to stay >=800mm short of the ball so it never
+    # stacks onto the play (the failure mode that broke the cramped defense_3v3_full
+    # attempt). Floored at 700mm so it stays clear of the defender's own body.
+    ddx, ddy = ball_x - defender[0], ball_y - defender[1]
+    dn = math.hypot(ddx, ddy) or 1.0
+    mark_dist = float(np.clip(min(1100.0, dn - 800.0), 700.0, 1100.0))
+    mark_x = float(np.clip(defender[0] + (ddx / dn) * mark_dist, -4300.0, 4300.0))
+    mark_y = _clip_y(defender[1] + (ddy / dn) * mark_dist)
+    # Open-support teammate up-field on the far side.
+    supporter = (float(rng.uniform(-1400.0, -200.0)), _clip_y(-side * float(rng.uniform(700.0, 1300.0))))
+    gk = WorldPlayerSpec(number=4, x=-4300.0, y=0.0, theta=0.0)
+    opponents = (
+        WorldPlayerSpec(number=1, x=mark_x, y=mark_y,
+                        theta=math.atan2(defender[1] - mark_y, defender[0] - mark_x)),
+        WorldPlayerSpec(number=2, x=float(np.clip(ball_x + 350.0, -4300.0, 4300.0)), y=ball_y, theta=math.pi),
+    )
+    return build_world_spec(
+        ball_pos=np.asarray([ball_x, ball_y], dtype=np.float32),
+        robot_pos=np.asarray(presser, dtype=np.float32),
+        robot_theta=math.atan2(ball_y - presser[1], ball_x - presser[0]),
+        teammates=(
+            WorldPlayerSpec(number=2, x=defender[0], y=defender[1],
+                            theta=math.atan2(ball_y - defender[1], ball_x - defender[0])),
+            WorldPlayerSpec(number=3, x=supporter[0], y=supporter[1],
+                            theta=math.atan2(ball_y - supporter[1], ball_x - supporter[0])),
+            gk,
+        ),
+        opponents=opponents,
+    )
+
+
 def team_defense_scenarios(episodes: int) -> list[ProductionScenario]:
     e = max(1, int(episodes))
     return [
@@ -528,6 +699,12 @@ def team_defense_scenarios(episodes: int) -> list[ProductionScenario]:
             name="defense_recovery_clear", stage_id=8,
             description="Stage 8 recovery: our player wins the ball deep and clears/passes out (D2/D3).",
             world_fn=_defense_recovery_world, episodes=e * 2, obstacles="dynamic",
+        ),
+        ProductionScenario(
+            name="defense_mark_open", stage_id=8,
+            description="Stage 8 mark validation: lone attacker isolated ~1.1m in front of the "
+                        "off-ball defender in open space (clean mark target for gate + vision NN).",
+            world_fn=_defense_mark_open_world, episodes=e * 2, obstacles="static",
         ),
     ]
 
@@ -582,6 +759,34 @@ def team_production_scenarios(episodes: int) -> list[ProductionScenario]:
                 "Highest weight — the only scenario with the exact perceptual conditions of the demo."
             ),
             world_fn=_team_3v3_full_dynamic_world, episodes=e * 3, obstacles="dynamic",
+        ),
+        # v3 (doc-35) contrastive pairs — matched A/B for teammate-contingent learning.
+        # v3.1 TEAMMATE-varying contrast (opponent layout constant) — the flip must come
+        # from the teammate dims, not an opponent the policy reads via its own front cone.
+        ProductionScenario(
+            name="giveandgo_outlet_present", stage_id=7,
+            description="v3.1 A: open up-field outlet teammate present → striker PASSES.",
+            world_fn=_giveandgo_outlet_present_world, episodes=e * 2, obstacles="none",
+        ),
+        ProductionScenario(
+            name="giveandgo_outlet_absent", stage_id=7,
+            description="v3.1 B: outlet teammate pulled deep (no up-field option) → striker DRIBBLES.",
+            world_fn=_giveandgo_outlet_absent_world, episodes=e * 2, obstacles="none", is_contrast=True,
+        ),
+        ProductionScenario(
+            name="support_striker_live", stage_id=7,
+            description="v3.1 A: striker on the ball → support is a live outlet → HOLDS.",
+            world_fn=_support_striker_live_world, episodes=e * 2, obstacles="none",
+        ),
+        ProductionScenario(
+            name="support_striker_far", stage_id=7,
+            description="v3.1 B: ball loose, striker far → support REPOSITIONS.",
+            world_fn=_support_striker_far_world, episodes=e * 2, obstacles="none", is_contrast=True,
+        ),
+        ProductionScenario(
+            name="pass_forcing", stage_id=7,
+            description="v4-S3: striker far from goal + advanced open outlet → pass is the winning move.",
+            world_fn=_pass_forcing_world, episodes=e * 3, obstacles="static",
         ),
     ]
 
