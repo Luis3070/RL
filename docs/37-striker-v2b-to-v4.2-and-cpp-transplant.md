@@ -46,7 +46,13 @@ still runs, just wrong).
 - `param_mean` = **residual** action `[res_x, res_y, res_theta, pass_target]` in `[-1,1]`, NOT absolute targets.
 
 ### B.1 Observation (47 floats) — doc 29 is the spec
-Build the 47-vector exactly per `_encode_obs`. Normalization constants (identical to Python):
+**`obs[0:26]` already exist** in the deployed obs26 encoder (Rafael's `hsl2026-ppo-naov6-integration`,
+doc 28) — robot pose 0-2, ball 3-12, **scoring 13-16** (`can_score_now`, `shot_quality_no_obstacles`,
+`shot_opening_with_obstacles`, `pass_options_count` — these drive the shoot/pass gate, already computed
+in C++), proximity 17-22, gate bits 23-25. **This guide does NOT re-derive 0-25** — reuse the existing
+encoder. **`obs[26:46]`** (teammate block, team ball, engagement, goal vector, pass/observe arm bits,
+role one-hot) is the new 21-dim extension — **doc 29 is its exact C++ spec**. Build the full 47-vector
+per `_encode_obs`. Normalization constants (identical to Python):
 `X_RANGE=4500, Y_RANGE=3000, BALL_VEL_NORM=3000, TIME_NORM_MS=5000`. Indices: see `observation.py::ObsIndex`
 (robot pose 0-2, ball 3-12, scoring 13-16, proximity 17-22, **gate bits 23-25**, multi-agent block
 26-40, **pass/observe arm bits 41-43**, **role one-hot 44-46**). Doc 29 covers 26→47 plumbing.
