@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Dict, Mapping
 
 import numpy as np
@@ -23,12 +24,33 @@ def expected_obs_mode_code(obs_mode: str) -> int:
 def build_wire_audit(metrics: Mapping[str, object], *, backend_cfg: BackendConfig, audit_cfg: WireAuditConfig) -> Dict[str, object]:
     failures: list[str] = []
     warnings: list[str] = []
+
+    # Multi-agent team eval: support roles legitimately do NOT face the ball — they
+    # track lanes/teammates and act on the injected team-ball estimate (obs[32:34]).
+    # So the team-AGGREGATE ball_visible / obs-corrected rates are structurally
+    # ~0.33-0.75, not the ~1.0 of a single ball-focused striker (verified: the same
+    # checkpoint scores ball_visible=1.0 single-agent, ~0.5 with 2/3 supports). The
+    # single-agent thresholds (0.90/0.99) therefore FALSE-FAIL every team eval. In
+    # team mode we relax ONLY these two ball-visibility FAILURE thresholds to a floor;
+    # every other check (synthetic, collapse, pose alignment, estimated-mode) is
+    # unchanged. Single-agent runs never set the flag → bit-identical behaviour.
+    team_mode = os.getenv("RL_WIRE_AUDIT_TEAM_MODE", "0") not in ("0", "false", "False", "")
+    team_visibility_floor = float(os.getenv("RL_WIRE_AUDIT_TEAM_VISIBILITY_FLOOR", "0.30"))
+    eff_min_expected_obs_mode_rate = (
+        min(audit_cfg.min_expected_obs_mode_rate, team_visibility_floor)
+        if team_mode else audit_cfg.min_expected_obs_mode_rate
+    )
+    eff_min_visible_ball_visible_rate = (
+        min(audit_cfg.min_visible_ball_visible_rate, team_visibility_floor)
+        if team_mode else audit_cfg.min_visible_ball_visible_rate
+    )
+
     expected_mode_rate_key = f"obs_mode_{backend_cfg.obs_mode}_rate"
     expected_mode_rate = _coerce_rate(metrics, expected_mode_rate_key)
 
-    if expected_mode_rate < audit_cfg.min_expected_obs_mode_rate:
+    if expected_mode_rate < eff_min_expected_obs_mode_rate:
         failures.append(
-            f"{expected_mode_rate_key}={expected_mode_rate:.3f} < {audit_cfg.min_expected_obs_mode_rate:.3f}"
+            f"{expected_mode_rate_key}={expected_mode_rate:.3f} < {eff_min_expected_obs_mode_rate:.3f}"
         )
 
     threshold_checks = (
@@ -64,9 +86,9 @@ def build_wire_audit(metrics: Mapping[str, object], *, backend_cfg: BackendConfi
         misleading_seen_synthetic_rate = _coerce_rate(metrics, "misleading_seen_synthetic_rate")
         ball_confidence_score_mean = _coerce_rate(metrics, "ball_confidence_score_mean")
 
-        if ball_visible_rate < audit_cfg.min_visible_ball_visible_rate:
+        if ball_visible_rate < eff_min_visible_ball_visible_rate:
             failures.append(
-                f"ball_visible_rate={ball_visible_rate:.3f} < {audit_cfg.min_visible_ball_visible_rate:.3f}"
+                f"ball_visible_rate={ball_visible_rate:.3f} < {eff_min_visible_ball_visible_rate:.3f}"
             )
         if ball_rescued_rate > audit_cfg.max_visible_ball_rescued_rate:
             failures.append(

@@ -42,12 +42,15 @@ from multiagent_teacher import (
     build_team_gate_decision,
     defender_cover_target,
     defense_support_target,
+    GK_EXCLUDE_X_MM,
     compute_open_lane_target,
     compute_triangle_target,
     smash_or_pass,
+    support_is_live_pass_option,
     teammate_slots_from_obs,
     update_team_phase,
 )
+from multiagent_teacher import CONTINGENT_HOLD as TEACHER_CONTINGENT_HOLD
 from parallel_environment import ParallelSlotSimRobotEnv
 from pybh_backend import BackendObservation, build_world_spec
 
@@ -74,8 +77,41 @@ SUPPORT_OPEN_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_OPEN_HOLD_BONUS", "0.07
 SUPPORT_TRIANGLE_HOLD_BONUS = float(os.getenv("RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS", "0.06"))
 SUPPORT_HOLD_REQUIRE_STAND = os.getenv("RL_MA_SUPPORT_HOLD_REQUIRE_STAND", "1") not in ("0", "false", "False")
 SUPPORT_DRIFT_PENALTY = float(os.getenv("RL_MA_SUPPORT_DRIFT_PENALTY", "0.04"))
-PASS_ATTEMPT_CREDIT = float(os.getenv("RL_MA_PASS_ATTEMPT_CREDIT", "1.0"))
+# v3b: the v3a drift penalty fired on leaving the radius after mere proximity, which
+# taught a walk-biased support to AVOID the radius (triangle_hold collapsed to 0.0).
+# Reworked to fire only after the support actually SETTLED — stood inside the radius
+# for >= DRIFT_HOLD_MIN_STEPS consecutive steps — so it penalises abandoning a held
+# slot, not passing through one.
+DRIFT_HOLD_MIN_STEPS = int(os.getenv("RL_MA_DRIFT_HOLD_MIN_STEPS", "5"))
+# v4-S1: reward COMPLETED passes, not merely executed ones. v3/v3.1 showed a flat
+# executed-pass credit doesn't make the policy pass (pass collapsed to 0). The reward
+# now fires only when, after a pass, the ball actually reaches a (non-GK) teammate's
+# position within PASS_COMPLETION_WINDOW steps — i.e. an accurate pass to the open
+# teammate. A small attempt credit is kept so attempting isn't punished, but the bulk
+# of the reward is on completion. (Old PASS_ATTEMPT_CREDIT default was 1.0 on execute.)
+PASS_ATTEMPT_CREDIT = float(os.getenv("RL_MA_PASS_ATTEMPT_CREDIT", "0.1"))
+PASS_COMPLETED_REWARD = float(os.getenv("RL_MA_PASS_COMPLETED_REWARD", "1.5"))
+PASS_COMPLETION_RADIUS_MM = float(os.getenv("RL_MA_PASS_COMPLETION_RADIUS_MM", "600.0"))
+PASS_COMPLETION_WINDOW = int(os.getenv("RL_MA_PASS_COMPLETION_WINDOW", "60"))
+# Stage-3 RECEIVER-LEAD (env-gated, default OFF). Diagnostic (2026-06-17): supports hold
+# their static slots (~2.3m from the ball) and passes fire, but the ball undershoots and
+# the receiver never closes the last ~1.2m (pass_min_dist_to_target_mm 1238, completions 0).
+# When a pass is in flight, lead the support nearest the ball's predicted END position
+# toward that arrival point (instead of holding its slot) so it can actually receive.
+# Inference-only override of the coordination target; layered on v4.2 with no retrain.
+RECEIVER_LEAD = os.getenv("RL_MA_RECEIVER_LEAD", "0").lower() in ("1", "true", "yes")
 HOLD_RADIUS_MM = float(os.getenv("RL_MA_HOLD_RADIUS_MM", "600.0"))
+# v4.4: DENSE navigate-to-slot shaping. The hold bonus above is BINARY (pays nothing
+# until the support is already inside HOLD_RADIUS_MM and standing), so PPO gets no
+# gradient to WALK to the slot — and BC is open-loop, so it clones the `stand` marginal
+# but not the closed-loop positioning. Diagnosis (corpus, 2026-06-16): the teacher
+# off_ball_support sits a median 300mm from triangle_ema and every standing frame is
+# within 600mm, so the target is reachable; the trained policy just never gets there.
+# This term adds a continuous reward that rises linearly as the support nears its EMA
+# slot (open_lane / triangle), giving PPO the missing navigation gradient. Env-gated:
+# default 0.0 => OFF, so single-agent and all prior validated runs are unaffected.
+SUPPORT_APPROACH_BONUS = float(os.getenv("RL_MA_SUPPORT_APPROACH_BONUS", "0.0"))
+SUPPORT_APPROACH_RANGE_MM = float(os.getenv("RL_MA_SUPPORT_APPROACH_RANGE_MM", "2500.0"))
 # v3a (§Part1): conversion was borderline (shoot_finish ~0.17-0.25) because the only
 # finishing signal was the sparse one-shot goal bonus; the striker dribbles a lot and
 # rarely commits a shot. A small DENSE reward for taking a QUALITY shot (in the validated
@@ -173,8 +209,19 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_defense_steps = 0
         self._ep_defender_cover_hold_steps = 0
         self._ep_defender_gk_collision_steps = 0
-        # v3a drift penalty (P2): per-agent "was within hold radius last step" latch.
-        self._was_holding: dict[int, bool] = {pn: False for pn in self.player_numbers}
+        # v3b drift penalty (P2): per-agent consecutive "stood inside hold radius"
+        # streak. Drift penalty fires only when a streak >= DRIFT_HOLD_MIN_STEPS ends
+        # by leaving the radius (settled-then-abandoned), not on mere proximity.
+        self._hold_streak: dict[int, int] = {pn: 0 for pn in self.player_numbers}
+        # v4-S1 completed-pass tracking: {passer_pn: {"targets":[(x,y)..], "steps_left":int}}
+        self._pending_pass: dict[int, dict] = {}
+        # Stage-3 pass-completion metric: team-wide per-episode counts. A pass is
+        # ATTEMPTED when a `pass` skill registers a pending pass; it COMPLETES when the
+        # ball reaches a (non-GK) teammate target within the window. Surfaced as
+        # pass_attempts / pass_completions / pass_completion_rate (see _team_metrics).
+        self._ep_pass_attempts = 0
+        self._ep_pass_completions = 0
+        self._ep_pass_min_dists: list[float] = []
 
         # Install the per-slot hooks.
         for agent, player_number in zip(self.possible_agents, self.player_numbers, strict=True):
@@ -221,6 +268,27 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                 coord = team_state.triangle_ema
             if coord is None and snapshot is not None:
                 coord = snapshot["ball"]
+            # Stage-3 receiver-lead: while a pass is in flight, lead the support that is the
+            # actual receiver (its slot nearest the ball's predicted END) toward that arrival
+            # point so it closes the undershoot gap; the other support keeps its slot to hold
+            # spacing. Predicted end is robot-relative -> rotate into field frame (inverse of
+            # _field_to_robot: field = robot + R(theta)·rel).
+            if (RECEIVER_LEAD and coord is not None and self._pending_pass
+                    and role in ("open_support", "off_ball_support")):
+                rth = float(obs.robot_theta)
+                c, s = math.cos(rth), math.sin(rth)
+                end_x = float(obs.robot_x) + c * float(obs.ball_end_rel_x) - s * float(obs.ball_end_rel_y)
+                end_y = float(obs.robot_y) + s * float(obs.ball_end_rel_x) + c * float(obs.ball_end_rel_y)
+                open_ema = team_state.open_lane_ema
+                tri_ema = team_state.triangle_ema
+                d_open = math.hypot(open_ema[0] - end_x, open_ema[1] - end_y) if open_ema else float("inf")
+                d_tri = math.hypot(tri_ema[0] - end_x, tri_ema[1] - end_y) if tri_ema else float("inf")
+                is_receiver = (
+                    (role == "open_support" and d_open <= d_tri)
+                    or (role == "off_ball_support" and d_tri < d_open)
+                )
+                if is_receiver:
+                    coord = (end_x, end_y)
             env._team_role = role
             env._team_coordination_target = coord
             return injected, decision
@@ -429,6 +497,24 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
             "defender_gk_collision_rate": float(self._ep_defender_gk_collision_steps) / defense_steps,
             "defense_phase_step_frac": float(self._ep_defense_steps) / total,
             "role_thrash_rate": float(self._ep_role_swaps) / total,
+            # Stage-3 pass-completion. pass_attempts/pass_completions are per-episode
+            # COUNTS (averaged across eval episodes -> mean attempts/completions per
+            # episode); the unbiased aggregate completion rate is mean(pass_completions)
+            # / mean(pass_attempts). pass_completion_rate is the per-episode ratio
+            # (0.0 when no pass was attempted) for a quick read.
+            "pass_attempts": float(self._ep_pass_attempts),
+            "pass_completions": float(self._ep_pass_completions),
+            "pass_completion_rate": (
+                float(self._ep_pass_completions) / float(self._ep_pass_attempts)
+                if self._ep_pass_attempts > 0 else 0.0
+            ),
+            # Diag: mean closest-approach (mm) of the ball to a pass target across
+            # resolved passes. ~radius => near-miss (widen radius / lead the receiver);
+            # large => ball never travels to a teammate (pass_target/decode issue).
+            "pass_min_dist_to_target_mm": (
+                float(sum(self._ep_pass_min_dists)) / len(self._ep_pass_min_dists)
+                if self._ep_pass_min_dists else 0.0
+            ),
         }
 
     def _own_gk_from_positions(self, positions: dict[int, tuple[float, float]]) -> tuple[float, float] | None:
@@ -486,7 +572,11 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
         self._ep_defense_steps = 0
         self._ep_defender_cover_hold_steps = 0
         self._ep_defender_gk_collision_steps = 0
-        self._was_holding = {pn: False for pn in self.player_numbers}
+        self._hold_streak = {pn: 0 for pn in self.player_numbers}
+        self._pending_pass = {}
+        self._ep_pass_attempts = 0
+        self._ep_pass_completions = 0
+        self._ep_pass_min_dists = []
         self._prev_skill = {pn: None for pn in self.player_numbers}
         poses = {pn: _world_player_pose(world, pn) for pn in self.player_numbers}
         self._spawn_side = {pn: (1.0 if poses[pn][1] >= 0.0 else -1.0) for pn in poses}
@@ -586,26 +676,45 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                 )
                 if target is not None:
                     dist = math.hypot(float(raw.robot_x) - target[0], float(raw.robot_y) - target[1])
+                    # v4.4: dense navigation gradient toward the slot (any skill), so PPO
+                    # is pulled to WALK to the EMA target before the binary hold bonus can
+                    # ever pay. Linear ramp: full at dist=0, zero at >= SUPPORT_APPROACH_RANGE_MM.
+                    if SUPPORT_APPROACH_BONUS > 0.0:
+                        bonus += SUPPORT_APPROACH_BONUS * max(0.0, 1.0 - dist / SUPPORT_APPROACH_RANGE_MM)
                     in_radius = dist < HOLD_RADIUS_MM
                     # P1: pay the hold bonus only when the support is actually holding
                     # position (executed stand), not merely passing through the radius.
                     is_standing = (not SUPPORT_HOLD_REQUIRE_STAND) or executed_skill == "stand"
-                    if in_radius and is_standing:
+                    # v3 (doc-35 §3): contingent hold — only reward holding when the
+                    # support is a LIVE PASS OPTION (striker controls + lane open), so
+                    # the reward matches the contingent teacher and stops paying for
+                    # holding in the void. Attack phase only — in defense the off_ball/
+                    # open roles are defender/defense-supporter (cover, not pass outlets),
+                    # so they keep the geometric hold bonus.
+                    contingent = TEACHER_CONTINGENT_HOLD and self._team_state.phase != "defense"
+                    live_option = (not contingent) or support_is_live_pass_option(raw)
+                    held = in_radius and is_standing and live_option
+                    if held:
                         bonus += (
                             SUPPORT_OPEN_HOLD_BONUS if role == "open_support"
                             else SUPPORT_TRIANGLE_HOLD_BONUS
                         )
-                    # P2: penalise drifting back out of a held slot (was inside last
-                    # step, now outside) when the ball hasn't arrived — discourages the
-                    # walk-away that left triangle_hold at ~0.003.
-                    was_holding = self._was_holding.get(int(player_number), False)
-                    if was_holding and not in_radius:
-                        bonus -= SUPPORT_DRIFT_PENALTY
-                    self._was_holding[int(player_number)] = in_radius
+                    # P2 (v3b): drift penalty only after the support SETTLED — stood in
+                    # the radius for >= DRIFT_HOLD_MIN_STEPS — then left. Penalising mere
+                    # proximity (v3a) taught avoidance; this penalises abandoning a held
+                    # slot. Walking through (in radius but not standing) just resets.
+                    pn = int(player_number)
+                    prev_streak = self._hold_streak.get(pn, 0)
+                    if held:
+                        self._hold_streak[pn] = prev_streak + 1
+                    else:
+                        self._hold_streak[pn] = 0
+                        if (not in_radius) and prev_streak >= DRIFT_HOLD_MIN_STEPS:
+                            bonus -= SUPPORT_DRIFT_PENALTY
                 else:
-                    self._was_holding[int(player_number)] = False
+                    self._hold_streak[int(player_number)] = 0
             else:
-                self._was_holding[int(player_number)] = False
+                self._hold_streak[int(player_number)] = 0
             # P6: dense finishing reward for the striker taking a quality shot in band.
             if role == "striker" and executed_skill == "shoot" and raw is not None:
                 shot_open = float(getattr(raw, "shot_opening_with_obstacles", 0.0))
@@ -615,8 +724,37 @@ class TeamSlotSimRobotEnv(ParallelSlotSimRobotEnv):
                     and FINISH_BAND_MIN_MM <= ball_to_goal <= FINISH_BAND_MAX_MM
                 ):
                     bonus += FINISH_QUALITY_BONUS
+            # v4-S1: completed-pass reward. A pending pass completes if the ball reaches
+            # within PASS_COMPLETION_RADIUS of any (non-GK) teammate position it was aimed
+            # at, within PASS_COMPLETION_WINDOW steps; otherwise it expires (no reward).
+            pn = int(player_number)
+            if pn in self._pending_pass and raw is not None:
+                p = self._pending_pass[pn]
+                ball = (float(raw.ball_x), float(raw.ball_y))
+                cur_min = min(math.hypot(ball[0] - tx, ball[1] - ty) for (tx, ty) in p["targets"])
+                # Diag: closest approach of the ball to any pass target over the pass's life.
+                # Distinguishes "near-miss (>radius)" from "ball never travels to a teammate".
+                p["min_dist"] = min(p.get("min_dist", float("inf")), cur_min)
+                reached = cur_min < PASS_COMPLETION_RADIUS_MM
+                if reached:
+                    bonus += PASS_COMPLETED_REWARD
+                    self._ep_pass_completions += 1
+                    self._ep_pass_min_dists.append(p["min_dist"])
+                    del self._pending_pass[pn]
+                else:
+                    p["steps_left"] -= 1
+                    if p["steps_left"] <= 0:
+                        self._ep_pass_min_dists.append(p["min_dist"])
+                        del self._pending_pass[pn]
             if executed_skill == "pass":
-                bonus += PASS_ATTEMPT_CREDIT
+                bonus += PASS_ATTEMPT_CREDIT  # small attempt shaping; bulk reward is on completion
+                if raw is not None and pn not in self._pending_pass:
+                    targets = [(float(t[0]), float(t[1])) for t in getattr(raw, "teammate_poses", ())
+                               if float(t[0]) >= GK_EXCLUDE_X_MM]  # non-GK injected teammate positions
+                    if targets:
+                        self._pending_pass[pn] = {"targets": targets, "steps_left": PASS_COMPLETION_WINDOW,
+                                                  "min_dist": float("inf")}
+                        self._ep_pass_attempts += 1
             if team_goal:
                 bonus += TEAM_GOAL_BONUS
             if goal_conceded:

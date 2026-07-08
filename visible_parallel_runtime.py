@@ -92,7 +92,14 @@ class VisibleParallelRuntime:
         if self.xvfb_bin is None:
             self.xvfb_bin = self._find_xvfb()
         if self.temp_root is None:
-            self.temp_root = Path(tempfile.mkdtemp(prefix="pybh_visible_parallel_"))
+            configured_root = os.getenv("RL_VISIBLE_RUNTIME_ROOT")
+            if configured_root:
+                self.temp_root = Path(configured_root)
+                if self.temp_root.exists():
+                    shutil.rmtree(self.temp_root, ignore_errors=True)
+                self.temp_root.mkdir(parents=True, exist_ok=True)
+            else:
+                self.temp_root = Path(tempfile.mkdtemp(prefix="pybh_visible_parallel_"))
         self._xvfb_processes: list[subprocess.Popen[bytes]] = []
         self._simrobot_processes: list[subprocess.Popen[bytes]] = []
         self._cpu_affinity_map: dict[int, str] | None = None
@@ -161,7 +168,11 @@ class VisibleParallelRuntime:
             self._terminate(process)
         self._simrobot_processes.clear()
         self._xvfb_processes.clear()
-        if self.temp_root and self.temp_root.exists():
+        if (
+            self.temp_root
+            and self.temp_root.exists()
+            and os.getenv("RL_VISIBLE_KEEP_RUNTIME_ROOT", "0") not in {"1", "true", "True", "yes", "on"}
+        ):
             shutil.rmtree(self.temp_root, ignore_errors=True)
 
     def __enter__(self) -> "VisibleParallelRuntime":

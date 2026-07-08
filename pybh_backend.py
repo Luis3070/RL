@@ -302,6 +302,8 @@ class BackendObservation:
     provider_target_y: float = 0.0
     provider_target_theta: float = 0.0
     skill_behavior_motion_request: int = -1
+    skill_behavior_should_intercept_ball: bool = False
+    skill_behavior_dive_request: int = -1
     skill_behavior_call_count: int = 0
     skill_behavior_walk_target_x: float = 0.0
     skill_behavior_walk_target_y: float = 0.0
@@ -345,6 +347,10 @@ class BackendObservation:
     libwalk_disable_obstacle_avoidance: bool = False
     motion_engine_ground_contact: bool = False
     motion_engine_fall_state: int = -1
+    motion_engine_input_request: int = -1
+    motion_engine_effective_request: int = -1
+    motion_engine_should_intercept_ball: bool = False
+    motion_engine_dive_request: int = -1
     motion_speed_x: float = 0.0
     motion_speed_y: float = 0.0
     motion_speed_rot: float = 0.0
@@ -414,6 +420,8 @@ class BackendObservation:
             provider_target_y=float(payload.get("provider_target_y", 0.0)),
             provider_target_theta=float(payload.get("provider_target_theta", 0.0)),
             skill_behavior_motion_request=int(payload.get("skill_behavior_motion_request", -1)),
+            skill_behavior_should_intercept_ball=bool(payload.get("skill_behavior_should_intercept_ball", False)),
+            skill_behavior_dive_request=int(payload.get("skill_behavior_dive_request", -1)),
             skill_behavior_call_count=int(payload.get("skill_behavior_call_count", 0)),
             skill_behavior_walk_target_x=float(payload.get("skill_behavior_walk_target_x", 0.0)),
             skill_behavior_walk_target_y=float(payload.get("skill_behavior_walk_target_y", 0.0)),
@@ -457,6 +465,10 @@ class BackendObservation:
             libwalk_disable_obstacle_avoidance=bool(payload.get("libwalk_disable_obstacle_avoidance", False)),
             motion_engine_ground_contact=bool(payload.get("motion_engine_ground_contact", False)),
             motion_engine_fall_state=int(payload.get("motion_engine_fall_state", -1)),
+            motion_engine_input_request=int(payload.get("motion_engine_input_request", -1)),
+            motion_engine_effective_request=int(payload.get("motion_engine_effective_request", -1)),
+            motion_engine_should_intercept_ball=bool(payload.get("motion_engine_should_intercept_ball", False)),
+            motion_engine_dive_request=int(payload.get("motion_engine_dive_request", -1)),
             motion_speed_x=float(payload.get("motion_speed_x", 0.0)),
             motion_speed_y=float(payload.get("motion_speed_y", 0.0)),
             motion_speed_rot=float(payload.get("motion_speed_rot", 0.0)),

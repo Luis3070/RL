@@ -29,6 +29,7 @@ at the multi-agent dataset / KL anchor checkpoint.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
@@ -130,6 +131,24 @@ class MultiAgentBCReplayRegularizer(BCReplayRegularizer):
                         self.indices_by_stage_role_skill[(int(stage_id), int(role_id), int(skill_id))] = idx
         self._has_role_axis = True
         self._available_role_stages = sorted({(stage_id, role_id) for stage_id, role_id, _ in self.indices_by_stage_role_skill})
+        # v4-S2: decision-window filter. A "decision window" row is one where the gate has
+        # armed a real choice (shoot/dribble/pass). When RL_MA_BC_DECISION_WINDOW_ONLY=1,
+        # walk/stand candidates are restricted to decision-window rows — so BC trains on the
+        # moments that matter instead of the ~80% idle walk. Armed skills are unaffected.
+        self._decision_window_only = os.getenv("RL_MA_BC_DECISION_WINDOW_ONLY", "0") not in ("0", "false", "False", "")
+        obs_np = data["observations"]
+        try:
+            from observation import ObsIndex as _OI
+            armed = (
+                (obs_np[:, int(_OI.shoot_armed)] >= 0.5)
+                | (obs_np[:, int(_OI.dribble_armed)] >= 0.5)
+                | (obs_np[:, int(_OI.pass_armed)] >= 0.5)
+            )
+        except Exception:
+            armed = np.ones(len(obs_np), dtype=bool)
+        self._decision_window_set = set(np.flatnonzero(armed).tolist())
+        self._WALK_ID = SKILL_ORDER.index("walk")
+        self._STAND_ID = SKILL_ORDER.index("stand")
 
     @staticmethod
     def _role_skill_mix(stage_id: int) -> tuple[tuple[str, str, float], ...]:
@@ -149,21 +168,30 @@ class MultiAgentBCReplayRegularizer(BCReplayRegularizer):
         # teacher-pass contexts) but eval rollouts under-visit those contexts —
         # heavier BC sampling keeps the skill sharp while team rewards create the
         # contexts.
-        # v3a P7 (conversion): striker shoot 0.20→0.24, dribble 0.18→0.15 — the
-        # closed-loop striker over-dribbles and under-shoots (dist walk .70/dribble
-        # .15/shoot .029); pulling BC toward shoot lifts finishing.
-        # v3a P4 (support hold): supports collapsed to walk (.86 vs teacher .66 stand),
+        # P7 (conversion): striker shoot up, dribble down vs the original 0.20/0.18 —
+        # the closed-loop striker over-dribbles and under-shoots. v3a cut dribble too
+        # hard (0.15): conversion stabilised at 0.25 but the dynamic_full_field floor
+        # scenario regressed (drive too weak to finish under pressure, 4/5→3/5). v3b
+        # softens the cut to 0.22/0.17 — keep the conversion gain, restore the drive.
+        # P4 (support hold): supports collapsed to walk (.86 vs teacher .66 stand),
         # so flip the walk/stand mix — open walk 0.16→0.10 / stand 0.08→0.13,
         # off_ball walk 0.14→0.08 / stand 0.06→0.12 — so BC pulls supports to hold.
+        # (Sums to 1.00; off_ball dribble 0.02 keeps the unexpected-possession hatch.)
+        # v4-S2: striker pass 0.10→0.30. v3/v3.1 collapsed pass→0 because pass is only ~3%
+        # of the corpus and the 0.10 mix was too weak to keep it alive through PPO. Heavy
+        # oversampling (with replacement) of the rare pass rows is the point. Finishing
+        # (shoot/dribble) trimmed accordingly; the completed-pass + finishing PPO rewards
+        # rebalance at training time. Env-tunable via RL_MA_BC_STRIKER_PASS_FRAC.
+        pass_frac = float(os.getenv("RL_MA_BC_STRIKER_PASS_FRAC", "0.30"))
         return (
-            ("striker", "shoot", 0.24),
-            ("striker", "dribble", 0.15),
-            ("striker", "walk", 0.06),
-            ("striker", "pass", 0.10),
-            ("open_support", "walk", 0.10),
-            ("open_support", "stand", 0.13),
-            ("off_ball_support", "walk", 0.08),
-            ("off_ball_support", "stand", 0.12),
+            ("striker", "shoot", 0.18),
+            ("striker", "dribble", 0.12),
+            ("striker", "walk", 0.04),
+            ("striker", "pass", pass_frac),
+            ("open_support", "walk", 0.08),
+            ("open_support", "stand", 0.12),
+            ("off_ball_support", "walk", 0.06),
+            ("off_ball_support", "stand", 0.08),
             ("off_ball_support", "dribble", 0.02),
         )
 
@@ -196,6 +224,13 @@ class MultiAgentBCReplayRegularizer(BCReplayRegularizer):
             candidates = self.indices_by_stage_role_skill.get((stage_id, role_id, skill_id))
             if candidates is None or candidates.size == 0:
                 continue
+            # v4-S2: in decision-window mode, restrict idle walk/stand to rows where a
+            # gate decision was actually live (drop the ~80% idle filler). Armed skills
+            # (shoot/dribble/pass) are decision windows by definition → left as-is.
+            if self._decision_window_only and skill_id in (self._WALK_ID, self._STAND_ID):
+                filtered = np.array([i for i in candidates.tolist() if i in self._decision_window_set], dtype=candidates.dtype)
+                if filtered.size:
+                    candidates = filtered
             count = max(1, int(round(self.batch_size * fraction)))
             count = min(count, remaining) if remaining > 0 else count
             probs = self.weights[candidates].detach().cpu().numpy().astype(np.float64)
@@ -299,6 +334,12 @@ def _install_multiagent_components() -> tuple:
     train.py source.
     """
     from team_parallel_environment import TeamSlotSimRobotEnv
+
+    # Tell the wire audit this is a multi-agent team run, so it relaxes the two
+    # ball-visibility failure thresholds (support roles don't face the ball — the
+    # single-agent 0.90/0.99 thresholds false-fail every team eval). setdefault so
+    # an explicit override is respected.
+    os.environ.setdefault("RL_WIRE_AUDIT_TEAM_MODE", "1")
 
     orig_replay = train.BCReplayRegularizer
     orig_gate = train.BCCompetenceGate

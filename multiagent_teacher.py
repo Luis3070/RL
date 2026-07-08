@@ -122,6 +122,11 @@ DEFENDER_BLOCK_COVER_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_COVER_DIST_MM", 
 # D2/D3: a striker deep in our own third prefers a safe up-field pass, else a
 # clearance kick (shoot up-field, away from our goal), else drives the ball out.
 BALL_CONTROL_RADIUS_MM = float(os.getenv("RL_MA_BALL_CONTROL_RADIUS_MM", "350.0"))
+# Fix for the "disconnected defender": if the ball is LOOSE (no teammate controls it)
+# and this agent is the closest field player within this radius, promote it to striker
+# immediately (bypass the 7-frame hysteresis) so a defender contests winnable loose
+# balls in its zone instead of holding cover. 0 disables.
+RECOVERY_ENGAGE_RADIUS_MM = float(os.getenv("RL_MA_RECOVERY_ENGAGE_RADIUS_MM", "1100.0"))
 DEFENSIVE_CLEAR_X_MM = float(os.getenv("RL_MA_DEF_CLEAR_X_MM", "-1500.0"))
 CLEAR_PASS_MIN_UPFIELD_MM = float(os.getenv("RL_MA_DEF_CLEAR_MIN_UPFIELD_MM", "600.0"))
 CLEAR_ESCAPE_TARGET_X_MM = float(os.getenv("RL_MA_DEF_CLEAR_ESCAPE_X_MM", "0.0"))
@@ -286,12 +291,26 @@ def assign_roles(
         and float(agent_obs[candidate].time_since_ball_seen) <= TEAMMATE_FRESH_MAX_AGE_MS
     )
 
+    # Loose-ball recovery: nobody controls the ball, and the closest agent (which may
+    # be a deep defender) is within reach → promote it now, bypassing hysteresis, so it
+    # engages the loose ball instead of holding cover. This closes the "dead zone".
+    ball_loose = all(
+        math.hypot(float(agent_obs[aid].ball_rel_x), float(agent_obs[aid].ball_rel_y)) >= BALL_CONTROL_RADIUS_MM
+        for aid in agent_ids
+    )
+    candidate_should_recover = (
+        RECOVERY_ENGAGE_RADIUS_MM > 0.0
+        and ball_loose
+        and distances[candidate] <= RECOVERY_ENGAGE_RADIUS_MM
+    )
+
     committed_striker = candidate
     if (
         prev_striker is not None
         and prev_striker in agent_ids
         and prev_striker != candidate
         and not candidate_has_ball
+        and not candidate_should_recover
     ):
         gap = distances[prev_striker] - distances[candidate]
         if gap < ROLE_MIN_DISTANCE_GAP_MM:
