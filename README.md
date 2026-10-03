@@ -136,6 +136,8 @@ These commands could not be executed during documentation work (the authors' `py
 | [docs/README.md](docs/README.md) | Index of all documentation |
 | [docs/BRANCHES.md](docs/BRANCHES.md) | Branch registry and consolidation record |
 | [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md) | Paper claims mapped to repository evidence |
+| [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and integration rules |
+| [CLAUDE.md](CLAUDE.md) | Project instructions for Claude Code sessions |
 
 ## Known gaps
 
