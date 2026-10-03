@@ -25,7 +25,7 @@ export RL_MA_TEACHER_MAX_STEPS="${RL_MA_TEACHER_MAX_STEPS:-400}"
 # canonical dataset root (creates dataset_stage8_<timestamp>)
 unset RL_MA_TEACHER_OUTPUT_ROOT
 
-"$PY" teacher_multiagent_dataset.py
+"$PY" -m rlfootball.datasets.teacher_multiagent_dataset
 RC=$?
 pkill -x SimRobot 2>/dev/null || true
 

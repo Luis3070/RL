@@ -39,7 +39,7 @@ case "${1:-}" in
     RL_MA_TEACHER_STAGE=6 RL_MA_TEACHER_MAX_STEPS=600 RL_MA_TEACHER_EPISODES=3 \
     RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=10 RL_MA_TEACHER_SEED_BASE=990000 \
     RL_MA_TEACHER_SCENARIOS=team_2v0_clean_band RL_MA_TEACHER_OUTPUT_ROOT="$PROBE" \
-    PYBH_RL_SHM_NAME=/pybh_rl_v3_probe "$PY" teacher_multiagent_dataset.py
+    PYBH_RL_SHM_NAME=/pybh_rl_v3_probe "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
     pkill -f SimRobot 2>/dev/null; pkill -f Xvfb 2>/dev/null
     PROBE_GLOB="dataset_stage6_*"
     "$PY" - "$PROBE" <<'PYEOF'
@@ -88,7 +88,7 @@ PYEOF
       echo "[v3] === stage 6 chunk $i ==="
       RL_MA_TEACHER_STAGE=6 RL_MA_TEACHER_MAX_STEPS=600 RL_MA_TEACHER_EPISODES=4 \
       RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=6 RL_MA_TEACHER_SEED_BASE=$((600000 + i*10000)) \
-      PYBH_RL_SHM_NAME=/pybh_rl_v3_s6_${i} "$PY" teacher_multiagent_dataset.py
+      PYBH_RL_SHM_NAME=/pybh_rl_v3_s6_${i} "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
       pkill -f SimRobot 2>/dev/null; pkill -f Xvfb 2>/dev/null; sleep 5
     done
 
@@ -98,7 +98,7 @@ PYEOF
       RL_MA_TEACHER_STAGE=7 RL_MA_TEACHER_MAX_STEPS=800 RL_MA_TEACHER_EPISODES=4 \
       RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=8 RL_MA_TEACHER_SEED_BASE=$((720000 + i*10000)) \
       RL_MA_TEACHER_SCENARIOS="$S7CONTRAST" \
-      PYBH_RL_SHM_NAME=/pybh_rl_v3_s7c_${i} "$PY" teacher_multiagent_dataset.py
+      PYBH_RL_SHM_NAME=/pybh_rl_v3_s7c_${i} "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
       pkill -f SimRobot 2>/dev/null; pkill -f Xvfb 2>/dev/null; sleep 5
     done
 
@@ -108,27 +108,27 @@ PYEOF
       RL_MA_TEACHER_STAGE=7 RL_MA_TEACHER_MAX_STEPS=800 RL_MA_TEACHER_EPISODES=4 \
       RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=6 RL_MA_TEACHER_SEED_BASE=$((700000 + i*10000)) \
       RL_MA_TEACHER_SCENARIOS="$S7MAIN" \
-      PYBH_RL_SHM_NAME=/pybh_rl_v3_s7m_${i} "$PY" teacher_multiagent_dataset.py
+      PYBH_RL_SHM_NAME=/pybh_rl_v3_s7m_${i} "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
       pkill -f SimRobot 2>/dev/null; pkill -f Xvfb 2>/dev/null; sleep 5
     done
     echo "[v3] regen done. Chunks under $CHUNKS"
     ;;
   merge)
-    "$PY" merge_multiagent_teacher_datasets.py "$CHUNKS"/* --output-dir "$CORPUS"
-    "$PY" teacher_multiagent_dataset_audit.py "$CORPUS" --write
+    "$PY" -m rlfootball.datasets.merge_multiagent_teacher_datasets "$CHUNKS"/* --output-dir "$CORPUS"
+    "$PY" -m rlfootball.datasets.teacher_multiagent_dataset_audit "$CORPUS" --write
     ;;
   train)
     RL_MA_PROD_TRAIN_STEPS="${RL_MA_PROD_TRAIN_STEPS:-10000}" \
     RL_MA_PROD_MAX_EPISODE_STEPS=800 RL_MA_PROD_EVAL_INTERVAL=2500 \
     RL_MA_PROD_CHECKPOINT_INTERVAL=2500 RL_MA_PROD_SCENARIO_SET=team \
     RL_MA_PROD_EXPERIMENT_NAME="${RL_MA_PROD_EXPERIMENT_NAME:-multiagent_v3}" \
-    "$PY" train_multiagent_production.py --stage-id 7 \
+    "$PY" -m rlfootball.training.train_multiagent_production --stage-id 7 \
       --checkpoint runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
       --dataset "$CORPUS/samples.npz"
     ;;
   validate)
     CKPT="${2:?usage: validate <checkpoint.pt>}"
-    "$PY" behavioral_evaluator.py --checkpoint "$CKPT" --episodes 6
+    "$PY" -m rlfootball.evaluation.behavioral_evaluator --checkpoint "$CKPT" --episodes 6
     ;;
   *)
     echo "usage: bash tools/run/run_v3_attack.sh {dryrun|regen|merge|train|validate <ckpt>}"; exit 2;;

@@ -32,27 +32,27 @@ case "${1:-}" in
       RL_MA_TEACHER_STAGE=7 RL_MA_TEACHER_MAX_STEPS=800 RL_MA_TEACHER_EPISODES=4 \
       RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=8 RL_MA_TEACHER_SEED_BASE=$((810000 + i*10000)) \
       RL_MA_TEACHER_SCENARIOS="$CONTRAST" PYBH_RL_SHM_NAME=/pybh_rl_v31_${i} \
-      "$PY" teacher_multiagent_dataset.py
+      "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
       pkill -f SimRobot 2>/dev/null; pkill -f Xvfb 2>/dev/null; sleep 5
     done
-    "$PY" merge_multiagent_teacher_datasets.py "$OVERLAY_ROOT"/* --output-dir "$OVERLAY"
-    "$PY" teacher_multiagent_dataset_audit.py "$OVERLAY" --min-striker-shoot-frac 0 --min-striker-pass-armed 0 --write || true
+    "$PY" -m rlfootball.datasets.merge_multiagent_teacher_datasets "$OVERLAY_ROOT"/* --output-dir "$OVERLAY"
+    "$PY" -m rlfootball.datasets.teacher_multiagent_dataset_audit "$OVERLAY" --min-striker-shoot-frac 0 --min-striker-pass-armed 0 --write || true
     echo "[v31] overlay done -> $OVERLAY"
     ;;
   merge)
     N=$("$PY" -c "import numpy as np;print(len(np.load('$OVERLAY/samples.npz',allow_pickle=True)['weights']))")
     SUB=$(( N * 3 ))   # overlay ~25% of the final corpus; v2b backbone ~75% (preserves floor/3v3/stand%)
     echo "[v31] overlay rows=$N → v2b subsample target=$SUB"
-    "$PY" subsample_multiagent_attack_dataset.py "$V2B" --output-dir "$V2B_SUB" --target-rows "$SUB"
-    "$PY" merge_multiagent_teacher_datasets.py "$V2B_SUB" "$OVERLAY" --output-dir "$FINAL"
-    "$PY" teacher_multiagent_dataset_audit.py "$FINAL" --write || true
+    "$PY" -m rlfootball.datasets.subsample_multiagent_attack_dataset "$V2B" --output-dir "$V2B_SUB" --target-rows "$SUB"
+    "$PY" -m rlfootball.datasets.merge_multiagent_teacher_datasets "$V2B_SUB" "$OVERLAY" --output-dir "$FINAL"
+    "$PY" -m rlfootball.datasets.teacher_multiagent_dataset_audit "$FINAL" --write || true
     "$PY" tools/dataset/v31_corpus_gate.py "$FINAL"   # reqs 3,4,5,6 — exits nonzero if corpus fails
     ;;
   train)
     RL_MA_PROD_TRAIN_STEPS=10000 RL_MA_PROD_MAX_EPISODE_STEPS=800 \
     RL_MA_PROD_EVAL_INTERVAL=2500 RL_MA_PROD_CHECKPOINT_INTERVAL=2500 \
     RL_MA_PROD_SCENARIO_SET=team RL_MA_PROD_EXPERIMENT_NAME=multiagent_v31 \
-    "$PY" train_multiagent_production.py --stage-id 7 \
+    "$PY" -m rlfootball.training.train_multiagent_production --stage-id 7 \
       --checkpoint runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
       --dataset "$FINAL/samples.npz" ;;
   *) echo "usage: bash tools/run/run_v31.sh {gate|overlay|merge|train}"; exit 2;;

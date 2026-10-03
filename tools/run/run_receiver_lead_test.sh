@@ -27,6 +27,6 @@ RL_MA_PROD_EVAL_INTERVAL=256 RL_MA_PROD_CHECKPOINT_INTERVAL=100000 \
 RL_MA_PROD_EVAL_EPISODES=8 \
 RL_MA_PROD_EXPERIMENT_NAME=receiver_lead_test \
 RL_MA_PROD_BC_BETA_MAX=0.0 RL_MA_PROD_BC_BETA_MIN=0.0 \
-"$PY" train_multiagent_production.py --stage-id 7 \
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id 7 \
   --checkpoint runs/multiagent_v4_2/checkpoint_stage7_step12000.pt \
   --dataset "$FINAL/samples.npz"

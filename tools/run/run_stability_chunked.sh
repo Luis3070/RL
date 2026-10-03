@@ -22,7 +22,7 @@ echo "[chunked-probe] checkpoint=$CKPT seeds=${SEEDS[*]} out=$OUT_ROOT"
 for seed in "${SEEDS[@]}"; do
   export PYBH_RL_SHM_NAME="/pybh_rl_probe_${STAMP}_${seed}"
   echo "[chunked-probe] === seed $seed ==="
-  python behavioral_stability_probe.py \
+  python -m rlfootball.evaluation.behavioral_stability_probe \
     --checkpoint "$CKPT" \
     --seed-list "$seed" \
     --output-dir "$OUT_ROOT/seed_${seed}" \

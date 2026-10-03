@@ -34,7 +34,7 @@ export RL_VISIBLE_RESET_UPRIGHT_STREAK=2
 OUT="$REPO/runs/tmp_match_eval"; rm -rf "$OUT"; mkdir -p "$OUT"
 export RL_MA_TEACHER_OUTPUT_ROOT="$OUT"
 
-"$PY" teacher_multiagent_dataset.py
+"$PY" -m rlfootball.datasets.teacher_multiagent_dataset
 RC=$?
 pkill -x SimRobot 2>/dev/null || true
 echo "=================================================================="

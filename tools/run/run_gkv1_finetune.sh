@@ -23,7 +23,7 @@ RL_GK_BC_REPLAY_WEIGHT=0.12 \
 RL_GK_BC_SKILL_LOSS_SCALE=0.50 \
 RL_GK_BC_PARAM_LOSS_SCALE=0.50 \
 RL_GK_EXPERIMENT_NAME=goalkeeper_gkv1 \
-  "$PY" train_goalkeeper.py \
+  "$PY" -m rlfootball.training.train_goalkeeper \
   --checkpoint /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/defender_47_v2/checkpoint_stage8_step2500.pt
 rc=$?
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3

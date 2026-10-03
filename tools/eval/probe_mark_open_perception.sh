@@ -37,7 +37,7 @@ RL_MA_PROD_EVAL_INTERVAL=256 RL_MA_PROD_CHECKPOINT_INTERVAL=100000 \
 RL_MA_PROD_EVAL_EPISODES=4 \
 RL_MA_PROD_EXPERIMENT_NAME="probe_mark_open_perc" \
 RL_MA_PROD_BC_BETA_MAX=0.0 RL_MA_PROD_BC_BETA_MIN=0.0 \
-"$PY" train_multiagent_production.py --stage-id 8 \
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id 8 \
   --checkpoint "$DEFENDER" --dataset "$DATASET"
 RC=$?
 pkill -x SimRobot 2>/dev/null || true

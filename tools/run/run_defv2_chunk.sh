@@ -19,7 +19,7 @@ RL_MA_TEACHER_MAX_STEPS=600 \
 RL_MA_TEACHER_EPISODES=8 \
 RL_MA_TEACHER_MAX_ATTEMPT_MULTIPLIER=6 \
 RL_MA_TEACHER_SEED_BASE=$((970000 + i*10000)) \
-  "$PY" teacher_multiagent_dataset.py
+  "$PY" -m rlfootball.datasets.teacher_multiagent_dataset
 rc=$?
 
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3

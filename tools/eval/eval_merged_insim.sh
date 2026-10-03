@@ -29,7 +29,7 @@ export RL_MA_PROD_BC_BETA_MAX=0.0 RL_MA_PROD_BC_BETA_MIN=0.0
 export RL_MA_PROD_EXPERIMENT_NAME="$NAME"
 CKPT="$REPO/runs/merge_v5_attack_defense/checkpoint_stage8_step10000.pt"
 DATASET="$REPO/runs/teacher_multiagent_dataset/dataset_merged_v5_20260618/samples.npz"
-"$PY" train_multiagent_production.py --stage-id "$STAGE" --checkpoint "$CKPT" --dataset "$DATASET"
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id "$STAGE" --checkpoint "$CKPT" --dataset "$DATASET"
 RC=$?
 pkill -x SimRobot 2>/dev/null || true
 echo "=================================================================="

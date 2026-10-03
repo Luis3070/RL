@@ -54,7 +54,7 @@ cat <<EOF
 Validation environment ready.
 
 Use it through:
-  ${ROOT_DIR}/scripts/run_with_validation_env.sh python3 diag_n6_slots.py
+  ${ROOT_DIR}/scripts/run_with_validation_env.sh python3 -m rlfootball.diagnostics.diag_n6_slots
 
 Current assumptions:
   Venv:      ${VENV_DIR}

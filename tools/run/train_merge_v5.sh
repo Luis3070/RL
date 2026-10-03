@@ -41,7 +41,7 @@ export RL_MA_PROD_EXPERIMENT_NAME="merge_v5_attack_defense"
 WARM="$REPO/runs/multiagent_v4_2/checkpoint_stage7_step12000.pt"   # warm-start + KL anchor
 DATASET="$REPO/runs/teacher_multiagent_dataset/dataset_merged_v5_20260618/samples.npz"
 
-"$PY" train_multiagent_production.py --stage-id 8 --checkpoint "$WARM" --dataset "$DATASET"
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id 8 --checkpoint "$WARM" --dataset "$DATASET"
 RC=$?
 pkill -x SimRobot 2>/dev/null || true
 

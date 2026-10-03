@@ -12,7 +12,7 @@ RL_MA_TEAM_GOAL_BONUS=2.5 RL_MA_TEAM_GOAL_CONCEDED_PENALTY=2.5 \
 RL_MA_PROD_TRAIN_STEPS=10000 RL_MA_PROD_MAX_EPISODE_STEPS=600 \
 RL_MA_PROD_EVAL_INTERVAL=2500 RL_MA_PROD_CHECKPOINT_INTERVAL=2500 \
 RL_MA_PROD_SCENARIO_SET=defense RL_MA_PROD_EXPERIMENT_NAME=defender_47_v2 \
-  "$PY" train_multiagent_production.py --stage-id 8 \
+  "$PY" -m rlfootball.training.train_multiagent_production --stage-id 8 \
   --checkpoint /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
   --dataset /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/teacher_multiagent_dataset/dataset_defense_plus_attack_v2/samples.npz
 rc=$?

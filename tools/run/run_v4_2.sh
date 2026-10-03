@@ -37,6 +37,6 @@ RL_MA_PROD_SCENARIO_SET=team RL_MA_PROD_EXPERIMENT_NAME=multiagent_v4_2 \
 RL_MA_PROD_BC_BETA_MAX=0.30 RL_MA_PROD_BC_BETA_MIN=0.05 \
 RL_MA_PROD_BC_HALF_LIFE_EVALS=3 RL_MA_PROD_BC_REPLAY_UPDATES=4 \
 RL_MA_BC_DECISION_WINDOW_ONLY=1 RL_MA_BC_STRIKER_PASS_FRAC=0.30 \
-"$PY" train_multiagent_production.py --stage-id 7 \
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id 7 \
   --checkpoint runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
   --dataset "$FINAL/samples.npz"

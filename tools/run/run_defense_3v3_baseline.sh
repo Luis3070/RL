@@ -33,7 +33,7 @@ run_one () {
   RL_MA_PROD_EVAL_EPISODES=12 \
   RL_MA_PROD_EXPERIMENT_NAME="$name" \
   RL_MA_PROD_BC_BETA_MAX=0.0 RL_MA_PROD_BC_BETA_MIN=0.0 \
-  "$PY" train_multiagent_production.py --stage-id 8 \
+  "$PY" -m rlfootball.training.train_multiagent_production --stage-id 8 \
     --checkpoint "$ckpt" --dataset "$DATASET"
   # hard teardown so the next run owns the single sim session
   pkill -x SimRobot 2>/dev/null || true
