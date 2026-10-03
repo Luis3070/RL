@@ -121,7 +121,7 @@ OFFBALL_COORD_EXIT_MM = float(os.getenv("RL_MA_OFFBALL_COORD_EXIT_MM", "450.0"))
 # nearest_opponent_front_dist) are populated from the env's GROUND-TRUTH opponent
 # positions instead of the perceived ObstacleModel. This unblocks block/mark learning
 # where in-sim off-ball perception is ~0 (gaze/detector-range limited — see
-# CODEX_OFFBALL_PERCEPTION_HANDOFF.md). Deployment ALWAYS runs with this OFF and fills
+# docs/notes/CODEX_OFFBALL_PERCEPTION_HANDOFF.md). Deployment ALWAYS runs with this OFF and fills
 # obs[21] from real vision; the obs CONTRACT is identical, only the training-time SOURCE
 # differs. The staged plan validates that GT-trained mark also fires on real perception
 # (GT off, roomy scene) so there is no sim2real gap. `opponent_seen_rate` deliberately

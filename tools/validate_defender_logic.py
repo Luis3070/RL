@@ -210,5 +210,5 @@ if _failures:
     print(f"RESULT: {len(_failures)} FAILED -> {_failures}")
     sys.exit(1)
 print("RESULT: ALL CHECKS GREEN -- defender D1-D5 teacher logic is sound on synthetic inputs")
-print("(closed-loop sim metrics still require Luis's Linux box -- see HANDOFF)")
+print("(closed-loop sim metrics still require Luis's Linux box -- see docs/notes/HANDOFF.md)")
 sys.exit(0)

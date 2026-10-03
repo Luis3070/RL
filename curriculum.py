@@ -19,7 +19,7 @@ MASKED_SKILLS = ("pass", "mark", "block", "observe")
 
 # Multi-agent skill set: striker may emit pass when smashOrPass fires AND pass_armed.
 # mark/block/observe stay masked off this sprint (need opponents in obs and a
-# defensive teacher branch). See .docs/10 §14.4 and §14.26 for the deferred work.
+# defensive teacher branch). See docs/notes/10-graph-coordination-post-production-roadmap.md §14.4 and §14.26 for the deferred work.
 ACTIVE_SKILLS_MA = ("stand", "walk", "dribble", "shoot", "pass")
 ACTIVE_SKILLS_MA_DEFENDER = ("stand", "walk", "dribble", "shoot", "pass", "block")
 

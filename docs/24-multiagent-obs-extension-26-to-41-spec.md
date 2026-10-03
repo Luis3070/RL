@@ -622,7 +622,7 @@ With the substrate in place, a multi-agent BC dataset can be collected (each age
 
 - BC dataset re-collection at 41-dim obs.
 - Multi-agent curriculum design (separate doc).
-- KL anchor strategy (anchor to current production checkpoint via zero-pad, lower `bc_beta_max`, longer `bc_competence_half_life_evals` — already documented for the graph-coordination plan in `.docs/10`).
+- KL anchor strategy (anchor to current production checkpoint via zero-pad, lower `bc_beta_max`, longer `bc_competence_half_life_evals` — already documented for the graph-coordination plan in `docs/notes/10-graph-coordination-post-production-roadmap.md`).
 
 ### § 11.3 What is still NOT enabled by this substrate
 

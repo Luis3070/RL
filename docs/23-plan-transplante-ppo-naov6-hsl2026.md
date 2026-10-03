@@ -79,7 +79,7 @@ El contrato actual del PPO esta en:
 - `environment.py`: decode de accion, repair de target y stepping contra B-Human/SimRobot.
 - `reward.py`: anchors de walk/dribble/shoot y condiciones de shoot-zone.
 - `FOR_TRAIN_PRODUCTION.md` [removed from this branch; available on rl-v4.2-multiagent-gk]: contexto historico del primer intento productivo.
-- `cambios_para_produccion.md`: resumen historico del salto original a 4/5; ya no debe leerse como baseline vigente.
+- `docs/notes/cambios_para_produccion.md`: resumen historico del salto original a 4/5; ya no debe leerse como baseline vigente.
 - `docs/25-guia-transplante-ppo-bhuman.md`: referencia exacta del pipeline de inferencia que se debe replicar en robot.
 
 Punto critico actualizado:
@@ -1247,8 +1247,8 @@ Locales:
 - `docs/15-guia-escenas-y-escenarios-rl.md`
 - `docs/20-validacion-n6-2026-05-15.md`
 - `docs/22-handoff-optimizacion-training-32cores.md`
-- `.docs/09-production-selfplay-and-multiagent-handoff.md`
-- `.docs/10-graph-coordination-post-production-roadmap.md`
+- `docs/notes/09-production-selfplay-and-multiagent-handoff.md`
+- `docs/notes/10-graph-coordination-post-production-roadmap.md`
 - `../SabanaHerons2026/HSL2026_Migration_Checklist.md`
 - `../SabanaHerons2026/BHuman2023_Architecture_Review.md`
 - `../Rules-HSL-2026.pdf`

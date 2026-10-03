@@ -4,13 +4,13 @@ Mirrors train.py's surface (ScriptRunConfig, run_smoke, run_training, main) but
 swaps in two role-aware BC components without touching train.py:
 
   * `MultiAgentBCReplayRegularizer`  — role-stratified sampling on (stage, role, skill)
-                                       per §11.A.5 of .docs/10. Adds the role_id column
+                                       per §11.A.5 of docs/notes/10-graph-coordination-post-production-roadmap.md. Adds the role_id column
                                        missing from the legacy `(stage, skill)` keying so
                                        striker-shoot rows are not diluted by support-walk
                                        rows.
 
   * `MultiAgentBCCompetenceGate`     — competence = min(striker, open_support, off_ball_support)
-                                       per §11.B.5.2 of .docs/10. The legacy gate decays β
+                                       per §11.B.5.2 of docs/notes/10-graph-coordination-post-production-roadmap.md. The legacy gate decays β
                                        on striker progress alone; with three roles, that
                                        would shut BC off while supports were still
                                        incompetent. Min ensures BC stays alive until every

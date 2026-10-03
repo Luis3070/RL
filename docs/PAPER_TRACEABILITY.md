@@ -34,7 +34,7 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 | 20 | Action space | 8 skills (+ 4 parameters) | `action.py` (`SkillType` has 8 members; `ACTION_PARAM_MASKS` has 4 entries per skill) | traced | |
 | 21 | Positive-label share in final corpus | walk+stand 85.94%; pass+shoot+mark 3.76% | none | not in repository | Derived from the final corpus, which is not tracked. |
 | 22 | Reward decomposition at 200k steps | good_walk about 96, walk_persistence about 63, good_dribble about 31, good_shoot 0, goal 0 (about 30x ratio) | none | not in repository | Run output not tracked. |
-| 23 | Teacher heuristic constants | ball control below 350 mm; 7-frame hysteresis; 200 mm gap; pass overrides at 0.15 margin with 1.5 s penalty; sigma 800 mm | none | not in repository | These live in the C++ repository (`Behavior.cpp`, `PlayBall.cpp`), which is not part of this one; to be confirmed by the authors. `.docs/10-graph-coordination-post-production-roadmap.md` lists some similar constants for a Python port; it was not checked against the paper values. |
+| 23 | Teacher heuristic constants | ball control below 350 mm; 7-frame hysteresis; 200 mm gap; pass overrides at 0.15 margin with 1.5 s penalty; sigma 800 mm | none | not in repository | These live in the C++ repository (`Behavior.cpp`, `PlayBall.cpp`), which is not part of this one; to be confirmed by the authors. `docs/notes/10-graph-coordination-post-production-roadmap.md` lists some similar constants for a Python port; it was not checked against the paper values. |
 
 ## Missing assets
 
@@ -42,7 +42,7 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 |---|---|
 | Figures (`production_stress_metrics.png`, `teacherstability.png`, others) | Not in the repository |
 | `references.bib` | Not in the repository |
-| `tools/run_defv2_*.sh` (cited by working notes such as `HANDOFF.md`) | Found: `run_defv2_chunk.sh`, `run_defv2_finetune.sh`, `run_defv2_floor.sh`, `run_defv2_stability.sh`, `run_defv2_stability_seed67.sh` (checked with `fd 'run_defv2' tools`) |
+| `tools/run_defv2_*.sh` (cited by working notes such as `docs/notes/HANDOFF.md`) | Found: `run_defv2_chunk.sh`, `run_defv2_finetune.sh`, `run_defv2_floor.sh`, `run_defv2_stability.sh`, `run_defv2_stability_seed67.sh` (checked with `fd 'run_defv2' tools`) |
 | Datasets, run logs, training checkpoints | Under `runs/` (gitignored); not available from this repository |
 | Corpus-generation results behind rows 1-7 | Produced outside this repository; to be confirmed by the authors |
 

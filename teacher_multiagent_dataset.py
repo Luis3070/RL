@@ -1,6 +1,6 @@
 """Multi-agent BC dataset collection over the team production scenarios.
 
-Pattern A multi-backend orchestrator (per .docs/10 §14.21 + §14 sketch):
+Pattern A multi-backend orchestrator (per docs/notes/10-graph-coordination-post-production-roadmap.md §14.21 + §14 sketch):
   * Spawn N PyBHBackend instances (one per RL field player; GK stays BHuman C++).
   * Each backend reads its own player's BackendObservation from the shared-memory
     bridge; only the primary backend launches SimRobot and triggers world resets.

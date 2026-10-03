@@ -24,7 +24,7 @@ Required `SabanaHerons2026` branches:
 
 | Purpose | Branch |
 |---|---|
-| Multi-agent training in this repo | `rl-simrobot3d` (bridge version 30, multi-agent fields; as stated in `HANDOFF.md`) |
+| Multi-agent training in this repo | `rl-simrobot3d` (bridge version 30, multi-agent fields; as stated in `docs/notes/HANDOFF.md`) |
 | Deploying the ONNX policies | `hsl2026-ppo-team-v4` (striker v4.2: [docs/37](docs/37-striker-v2b-to-v4.2-and-cpp-transplant.md); merged brain v5: [docs/38](docs/38-merged-striker-defender-and-naov6-transplant.md)) |
 
 ## Repository map
@@ -45,8 +45,8 @@ Required `SabanaHerons2026` branches:
 | `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
 | `models/` | Tracked policy deliverables and manifests (see below) |
 | `models/defender/checkpoints/` | Tracked defender PyTorch checkpoints |
-| `docs/`, `.docs/` | Documentation (index: [docs/README.md](docs/README.md)) |
-| `HANDOFF.md`, `CODEX_OFFBALL_PERCEPTION_HANDOFF.md`, `cambios_para_produccion.md` | Historical working notes (Spanish) |
+| `docs/` | Documentation (index: [docs/README.md](docs/README.md)) |
+| `docs/notes/` | Historical working notes (`HANDOFF.md`, `CODEX_OFFBALL_PERCEPTION_HANDOFF.md`, `cambios_para_produccion.md`, `bhuman-logic/`) (mostly Spanish) |
 | `environment.yml` | Conda environment (outdated, see below) |
 
 ## Environment setup

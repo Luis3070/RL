@@ -1,6 +1,6 @@
 # Documentation index
 
-Index of every file under `docs/` and `.docs/`. Most documents are working logs written during development; many are in Spanish (column `Lang`).
+Index of every file under `docs/` (working notes live in `docs/notes/`). Most documents are working logs written during development; many are in Spanish (column `Lang`).
 Descriptions are derived from each file's title and opening lines.
 Related: [root README](../README.md), [branch registry](BRANCHES.md), [paper traceability](PAPER_TRACEABILITY.md).
 
@@ -58,18 +58,18 @@ Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `de
 
 Numbering notes: document 08 is absent; two files share number 25 and two share number 35.
 
-## .docs/
+## docs/notes/
 
 | File | Description | Topic | Lang |
 |---|---|---|---|
-| [09-production-selfplay-and-multiagent-handoff.md](../.docs/09-production-selfplay-and-multiagent-handoff.md) | Handoff: production self-play, multi-agent observation space and 4v4 wrapper-coordinated deployment | multiagent | EN |
-| [10-graph-coordination-post-production-roadmap.md](../.docs/10-graph-coordination-post-production-roadmap.md) | Graph coordination: one-week post-production sprint plan | multiagent | EN |
-| [Bhuman Logic/Bhuman-deterministic-agent-map.md](../.docs/Bhuman%20Logic/Bhuman-deterministic-agent-map.md) | Map of the B-Human deterministic agent code used as the base for the teacher policy | audit | ES |
+| [notes/09-production-selfplay-and-multiagent-handoff.md](notes/09-production-selfplay-and-multiagent-handoff.md) | Handoff: production self-play, multi-agent observation space and 4v4 wrapper-coordinated deployment | multiagent | EN |
+| [notes/10-graph-coordination-post-production-roadmap.md](notes/10-graph-coordination-post-production-roadmap.md) | Graph coordination: one-week post-production sprint plan | multiagent | EN |
+| [notes/bhuman-logic/Bhuman-deterministic-agent-map.md](notes/bhuman-logic/Bhuman-deterministic-agent-map.md) | Map of the B-Human deterministic agent code used as the base for the teacher policy | audit | ES |
 
-## Other working notes at the repository root
+## Other working notes (formerly at the repository root)
 
 | File | Description | Lang |
 |---|---|---|
-| [HANDOFF.md](../HANDOFF.md) | Defender v2 (doc 34) validation in SimRobot/Linux, 2026-06-15 | ES |
-| [CODEX_OFFBALL_PERCEPTION_HANDOFF.md](../CODEX_OFFBALL_PERCEPTION_HANDOFF.md) | Task note: fix off-ball defender opponent perception (head/gaze) in the multi-agent scene | EN |
-| [cambios_para_produccion.md](../cambios_para_produccion.md) | Historical note: changes to reach 4/5 evaluation criteria for the production PPO | ES |
+| [notes/HANDOFF.md](notes/HANDOFF.md) | Defender v2 (doc 34) validation in SimRobot/Linux, 2026-06-15 | ES |
+| [notes/CODEX_OFFBALL_PERCEPTION_HANDOFF.md](notes/CODEX_OFFBALL_PERCEPTION_HANDOFF.md) | Task note: fix off-ball defender opponent perception (head/gaze) in the multi-agent scene | EN |
+| [notes/cambios_para_produccion.md](notes/cambios_para_produccion.md) | Historical note: changes to reach 4/5 evaluation criteria for the production PPO | ES |

@@ -47,7 +47,7 @@ If you have not worked on this codebase before, read this section before anythin
 - **Curriculum / stage** — `curriculum.py`. Training stages 0-4. Irrelevant here; we are post-training.
 - **Scenario / world** — `production_curriculum.py`. Named situations with deterministic placement. Used by `behavioral_evaluator.py` to grade a checkpoint.
 - **Behavioral evaluator** — `behavioral_evaluator.py`. The production gate. Returns exit code 0 iff all scenarios pass their pass_fn.
-- **MultiAgentCoordinator** — the Python wrapper introduced by the 4v4 sprint (`.docs/09`). Assigns roles (striker = closest to ball, supports = others), applies per-role skill masks and residual overrides on top of policy outputs. **This is where Version B's graph logic lives.**
+- **MultiAgentCoordinator** — the Python wrapper introduced by the 4v4 sprint (`docs/notes/09-production-selfplay-and-multiagent-handoff.md`). Assigns roles (striker = closest to ball, supports = others), applies per-role skill masks and residual overrides on top of policy outputs. **This is where Version B's graph logic lives.**
 - **Production band** — 2.5-3.0 m from goal where shoot can credibly score. Hard field constraint.
 - **The production checkpoint** — the single-agent striker that just passed `behavioral_evaluator.py`. This is our starting checkpoint. We do not modify it.
 
@@ -146,7 +146,7 @@ The minimum coherent Version A is: gate extension (1 week) → teacher rewrite (
 
 Three files get edits:
 
-- **`MultiAgentCoordinator`** (introduced by the 4v4 sprint, `.docs/09`). The graph computation and the hard-mask logic land here.
+- **`MultiAgentCoordinator`** (introduced by the 4v4 sprint, `docs/notes/09-production-selfplay-and-multiagent-handoff.md`). The graph computation and the hard-mask logic land here.
 - **`behavioral_evaluator.py`**. Three new pass functions for team coordination metrics. Three new scenario entries.
 - **`production_curriculum.py`**. Three new team scenarios (3 RL agents spawned, opponents placed to favor coordination).
 
@@ -179,7 +179,7 @@ Per step, inside `MultiAgentCoordinator.step(observations_per_agent)`:
 3. **Apply the hard mask.** For each agent:
    - If `is_striker`: pass the policy's action through unchanged (striker uses the trained behavior).
    - If `not is_striker` (i.e. support) and an edge `has_ball_to_open_lane` points *to* this agent: force `skill = walk`, residual = open-lane anchor.
-   - If `not is_striker` and no edge points to this agent: fall back to the 4v4 wrapper's default support behavior (the hand-coded support position from `.docs/09`).
+   - If `not is_striker` and no edge points to this agent: fall back to the 4v4 wrapper's default support behavior (the hand-coded support position from `docs/notes/09-production-selfplay-and-multiagent-handoff.md`).
 
 4. **Emit the action.** Return `{agent_id: payload}` exactly as the wrapper already does.
 
@@ -215,7 +215,7 @@ Conservative because we err on the side of *not* firing the override. If `shot_o
 If any of these is false, the 7-day plan does not start.
 
 - **Production single-agent checkpoint exists and passes `behavioral_evaluator.py`.** This is the policy we use for inference. We do not have a Version B without a working single-agent policy.
-- **4v4 wrapper baseline (`.docs/09`) is built and runnable.** `MultiAgentCoordinator` exists, role assignment works, hard-coded support positions exist. We're adding the graph layer on top.
+- **4v4 wrapper baseline (`docs/notes/09-production-selfplay-and-multiagent-handoff.md`) is built and runnable.** `MultiAgentCoordinator` exists, role assignment works, hard-coded support positions exist. We're adding the graph layer on top.
 - **One visible-SimRobot host is available for evaluation.** ~30 min per behavioral_evaluator run; we need 4-5 runs across the week.
 - **The user owns the production push.** We don't push without authorization.
 
@@ -1103,7 +1103,7 @@ Mechanisms that produce *production robustness*:
 For when you're debugging and want to know "where is X."
 
 ### Wrapper (where Version B lives)
-- `MultiAgentCoordinator` (location TBD from `.docs/09` — the 4v4 sprint introduces this).
+- `MultiAgentCoordinator` (location TBD from `docs/notes/09-production-selfplay-and-multiagent-handoff.md` — the 4v4 sprint introduces this).
 - The graph logic goes into either the coordinator or a sibling `team_graph.py`.
 
 ### Evaluator (extended in Days 3-4)
