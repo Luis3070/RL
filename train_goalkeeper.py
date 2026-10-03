@@ -18,7 +18,7 @@ Run (single slot — requires SimRobot with RLMAStage7_3D.ros2):
     source .venv_env.sh
     RL_GATE_GK_MODE=1 python train_goalkeeper.py
 
-Or use tools/run_gkv1_finetune.sh for the full chunk launcher.
+Or use tools/run/run_gkv1_finetune.sh for the full chunk launcher.
 """
 from __future__ import annotations
 

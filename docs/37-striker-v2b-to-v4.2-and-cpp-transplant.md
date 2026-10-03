@@ -27,8 +27,8 @@ Key levers that mattered: (1) the **corrected gate** (without it pass is invisib
 **pass-rich contrastive overlay** unioned with a v2b backbone (don't train pass from scratch),
 (3) **strong BC (0.30) + KL anchor to v2b** so attack imitation stays alive while PPO explores.
 
-Reproduce: `bash tools/run_v4.sh` (build the dataset) then `bash tools/run_v4_2.sh` (train + the
-export is `tools/export_ppo_policy_team.py --specialization team`).
+Reproduce: `bash tools/run/run_v4.sh` (build the dataset) then `bash tools/run/run_v4_2.sh` (train + the
+export is `tools/export/export_ppo_policy_team.py --specialization team`).
 
 ---
 

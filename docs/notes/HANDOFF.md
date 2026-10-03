@@ -71,13 +71,13 @@ el `collision_rate=0.000` en las 6 seeds.
 **Modificados:**
 - `train.py` — `evaluate_agent` tolerante a fallos de reset (reintenta+salta episodio si el
   getup tropieza por software-render flaky, en vez de tumbar el run).
-- `tools/run_stability_chunked.sh` — `pkill -x` (exacto) en vez de `pkill -f` (peligroso).
+- `tools/run/run_stability_chunked.sh` — `pkill -x` (exacto) en vez de `pkill -f` (peligroso).
 
 **Nuevos:**
-- `tools/run_defv2_finetune.sh` — launcher del Paso 4.
-- `tools/run_defv2_floor.sh` — Paso 6 (`behavioral_evaluator` sobre step2500).
-- `tools/run_defv2_stability.sh` / `run_defv2_stability_seed67.sh` — Paso 7 multi-seed.
-- `tools/run_defv2_chunk.sh` — helper de chunking del dataset.
+- `tools/run/run_defv2_finetune.sh` — launcher del Paso 4.
+- `tools/run/run_defv2_floor.sh` — Paso 6 (`behavioral_evaluator` sobre step2500).
+- `tools/run/run_defv2_stability.sh` / `run_defv2_stability_seed67.sh` — Paso 7 multi-seed.
+- `tools/run/run_defv2_chunk.sh` — helper de chunking del dataset.
 - `models/defender/ppo_defender_hsl2026.onnx` + `.json` — artefacto de deploy (obs 47 / 8 skill logits / 4 params).
 - `runs/defender_47_v2/VERDICT_defv2.md` — veredicto detallado.
 - `.venv_env.sh` — setup de entorno local (paths máquina; **no commitear si es local-only**).
@@ -85,9 +85,9 @@ el `collision_rate=0.000` en las 6 seeds.
 ## Reproducir en esta máquina
 ```bash
 source .venv_env.sh                         # PYTHONPATH, LD_LIBRARY_PATH, gate thresholds
-bash tools/run_defv2_finetune.sh            # Paso 4 (10k steps)
-bash tools/run_defv2_floor.sh               # Paso 6
-bash tools/run_defv2_stability.sh runs/defender_47_v2/checkpoint_stage8_step2500.pt
+bash tools/run/run_defv2_finetune.sh            # Paso 4 (10k steps)
+bash tools/run/run_defv2_floor.sh               # Paso 6
+bash tools/run/run_defv2_stability.sh runs/defender_47_v2/checkpoint_stage8_step2500.pt
 ```
 Notas runtime: `RL_VISIBLE_RESET_MAX_ATTEMPTS=12`, `RL_VISIBLE_STEP_OBS_TIMEOUT_MS=2500`.
 Seed 67 del probe crasheó una vez por freeze de SimRobot (infra, no policy) y se re-corrió

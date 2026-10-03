@@ -581,7 +581,7 @@ La prioridad del transplante es esta:
 Crear:
 
 ```text
-tools/export_ppo_policy.py
+tools/export/export_ppo_policy.py
 ```
 
 Responsabilidades:

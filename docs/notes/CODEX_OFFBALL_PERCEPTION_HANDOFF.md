@@ -28,7 +28,7 @@ Instrument and log, for the OFF-BALL defender agent during a trío run:
 - head yaw/pitch over time,
 - number of opponents currently in the camera FoV (from GroundTruthWorldState vs FoV),
 - `obstacle_opponent_count` / `nearest_opponent_dist` per step.
-Run: `RL_MA_PROD_PLAYERS=1,2,3 bash tools/test_rlmastage7_trio.sh` (defender is the off-ball
+Run: `RL_MA_PROD_PLAYERS=1,2,3 bash tools/eval/test_rlmastage7_trio.sh` (defender is the off-ball
 slot). Confirm the hypothesis: head points at the ball; opponents are outside FoV.
 
 ## STEP 2 — FIX (smallest change that works)
@@ -51,7 +51,7 @@ rebuild, also see `CODEX_SESSION_LESSONS_20260618.md` [removed from this branch;
 ## ALLOWED TO CHANGE
 - Head/gaze behavior for the off-ball/defender role (C++ behavior or a Python head hook).
 - Temporary diagnostic logging (env-gated, default off).
-- `tools/test_rlmastage7_trio.sh` env knobs only.
+- `tools/eval/test_rlmastage7_trio.sh` env knobs only.
 
 ## FORBIDDEN — DO NOT TOUCH
 - `observation.py` (`OBS_SIZE=47`, `ObsIndex`), `action.py` (`SKILL_ORDER`).
@@ -63,7 +63,7 @@ rebuild, also see `CODEX_SESSION_LESSONS_20260618.md` [removed from this branch;
 - No retrain, no ONNX export, no commit.
 
 ## ACCEPTANCE
-1. Trío run (`RL_MA_PROD_PLAYERS=1,2,3 bash tools/test_rlmastage7_trio.sh`) reaches `[eval]`.
+1. Trío run (`RL_MA_PROD_PLAYERS=1,2,3 bash tools/eval/test_rlmastage7_trio.sh`) reaches `[eval]`.
 2. `opponent_seen_rate > 0.30` (up from ~0.0) — the off-ball defender now sees opponents.
 3. `natural_ball_seen_rate` for on-ball agents NOT regressed (striker still perceives ball).
 4. Report `executed_mark_rate` / `executed_block_rate` / `opponent_seen_rate` / `defender_score`.

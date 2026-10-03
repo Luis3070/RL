@@ -493,7 +493,7 @@ Antes de exportar:
 Export esperado:
 
 ```bash
-python tools/export_ppo_policy_team.py \
+python tools/export/export_ppo_policy_team.py \
   --checkpoint runs/<stage8_run>/checkpoint_*.pt \
   --output models/team/ppo_team_defender_stage8.onnx \
   --specialization defender

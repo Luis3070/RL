@@ -6,7 +6,7 @@ of coming off the line for a corner-bound dribble, and gives no symmetry signal 
 stable L/R asymmetry survives and the fast/off-center/round-keeper dribbles stay low.
 
 This trainer rolls out the *same* analytical attack episodes used by the closed-loop
-benchmark (`tools/benchmark_goalkeeper_closed_loop_shots.py`), with the policy SAMPLING
+benchmark (`tools/eval/benchmark_goalkeeper_closed_loop_shots.py`), with the policy SAMPLING
 actions, and rewards the terminal outcome (save vs goal) plus light positioning shaping.
 A symmetry loss ties each obs to its mirror so left/right are learned together.
 
@@ -50,7 +50,7 @@ RUNS_DIR = ROOT_DIR / "runs"
 DT = B.DT_S
 MAX_STEPS = B.MAX_STEPS
 
-# Mirror contract (must match tools/mirror_augment_gk_dataset.py).
+# Mirror contract (must match tools/dataset/mirror_augment_gk_dataset.py).
 NEG_OBS = [1, 2, 4, 6, 8, 14, 15, 17, 18, 21, 30]
 SWAP_OBS = (22, 23)
 SKILL_SWAP = {5: 6, 6: 5, 7: 8, 8: 7}

@@ -1153,7 +1153,7 @@ Eight commits materially changed the picture; the §11 Phase 1 work is partly do
 - `91f3885` (Rafael) — PPO stability repair: fallen-stuck early termination (stage ≥ 3, 24 consecutive frames in `_update_fallen_stuck_counter`) + 3-frame upright reset streak in pybh_backend. New `behavioral_stability_probe.py` with named seed set `11,23,37,51,67,83`. Docs 26 (transplant implementation, 890 lines) + 27 (stability evaluator rationale).
 - `9a97634` (Rafael) — Four production-stabilized checkpoints in `runs/production_stability_repair_v1/`. The 5000-step one is the operative baseline.
 - `a733c39` (Rafael) — MAPPO observation wire probes + tests. `live_multiagent_obs_probe.py` [removed from this branch; available on rl-v4.2-multiagent-gk] (470 LOC), `test_mappo_observation_space.py` (175 LOC), `test_obs_migration_contract.py` (zero-pad bit-identity for policy + value). Engagement-bit logic implemented: D = kicking ∨ dribbling ∨ (goingToBall ∧ within 700mm of team ball). Doc 25 (MAPPO wire findings — read it for Block C age-proxy and Block E noise modes).
-- `b2f62ae` (Laura) — ONNX exported from `checkpoint_stage4_step5000.pt`. `tools/export_ppo_policy.py` infrastructure.
+- `b2f62ae` (Laura) — ONNX exported from `checkpoint_stage4_step5000.pt`. `tools/export/export_ppo_policy.py` infrastructure.
 - BHuman side (`SkillBehaviorControl.cpp:61-85`) — adds `encodeTeammateActivity()` proxy and `RLTeammateActivity` enum (idle=0 / goingToBall=1 / dribbling=2 / kicking=3). This is the derived proxy doc 25 § 1 explains BHuman has no native `BehaviorStatus.activity` for.
 
 Mapping to §11 phases:
@@ -1290,7 +1290,7 @@ Post-Monday natural follow-ups: §11.A.6 Steps 2-3, full §11 Phase 7 fine-tune 
 
 - `runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt` — KL anchor for stage-5+ fine-tunes. The 4/5 stabilized single-agent baseline. Immutable this sprint.
 - `ppo_striker_hsl2026.onnx` + `.onnx.data` — ONNX export of the above. Real-NAO deployment artifact.
-- `tools/export_ppo_policy.py` — ONNX export infrastructure (re-export after sprint).
+- `tools/export/export_ppo_policy.py` — ONNX export infrastructure (re-export after sprint).
 - `test_obs_migration_contract.py` — extend with 26→47 assertion. Behavior-preservation contract.
 - `test_mappo_observation_space.py` — extend with role-mask assertions and 47-dim shape.
 - `behavioral_stability_probe.py` — sibling `behavioral_stability_multiagent_probe.py` for team metrics.
@@ -2316,7 +2316,7 @@ This is the honest first-pass bar. The "beat BH" target is §14.26.
 | `pass_completed_bonus` never fires | Detection logic in §14.20 is too strict. Loosen the 1.5 s receiver-claim window or the pass_target slot match. |
 | Single-agent regresses mid-PPO | `per_eval_auto_rollback` is doing its job — investigate which reward term dominates and lower its weight. |
 | Team-goal-rate stays 0 despite supports holding position | Striker is dribbling past the support without dropping ball. Check `decision_penalty` is being applied; lower `SHOOT_THRESHOLD` to 0.45 to bias toward pass. |
-| ONNX export fails at 47 dims | `tools/export_ppo_policy.py` was hard-coded to 41. Update its obs_size argument. |
+| ONNX export fails at 47 dims | `tools/export/export_ppo_policy.py` was hard-coded to 41. Update its obs_size argument. |
 
 ### 14.25 Glossary of new symbols introduced by this sprint
 

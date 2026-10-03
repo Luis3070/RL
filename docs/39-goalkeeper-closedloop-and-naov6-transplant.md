@@ -52,7 +52,7 @@ All synthetic (no SimRobot needed for training/eval; the closed-loop benchmark i
    dribble scenarios were **broadened** so each episode is randomly *slow-central / fast (1000–1500 mm/s)
    / off-center (wide lane) / round-the-keeper (carry straight then late cut)* — labelled come-out
    (walk to a smother point) + clear when in reach.
-3. **Mirror augmentation** `tools/mirror_augment_gk_dataset.py` — reflect every sample L↔R (negate the
+3. **Mirror augmentation** `tools/dataset/mirror_augment_gk_dataset.py` — reflect every sample L↔R (negate the
    y-signed obs dims, swap near-left/right and the low/jump-left/right skills) so the corpus is exactly
    symmetric.
 4. **Behavioral cloning** `train_goalkeeper_bc.py` — supervised warm-start of skill + param heads.
@@ -69,7 +69,7 @@ All synthetic (no SimRobot needed for training/eval; the closed-loop benchmark i
      `outside_goal_corridor` keeps those at 100 %.
    Final recipe: `--updates 200 --envs 320 --dribble-frac 0.38 --anchor-coef 0.5 --sym-coef 0.5
    --lr 5e-5` warm-started from a from-scratch BC on the mirror dataset.
-6. **Head-free export** `tools/export_goalkeeper_policy.py --no-head` (with `RL_GK_DISABLE_HEAD=1`).
+6. **Head-free export** `tools/export/export_goalkeeper_policy.py --no-head` (with `RL_GK_DISABLE_HEAD=1`).
 
 > **Deprecated:** an earlier candidate (`*_dribblefix_elite`) used a *scripted slow-corner head* baked
 > into the graph to patch slow-central dribbles. It is **coupled to the old weights** (it regresses
@@ -220,7 +220,7 @@ For intercepts, the **side and reach** are already implied by the chosen skill (
 the skill whose reach band matches the predicted crossing `y`); the `target_y` param is the fine aim.
 
 **T.5 — Parity gate before trusting the port.** Feed ≥256 identical obs vectors through the C++ ONNX
-path and the Python reference (`tools/export_goalkeeper_policy.py` already verifies torch↔onnx at
+path and the Python reference (`tools/export/export_goalkeeper_policy.py` already verifies torch↔onnx at
 3e-5). Require: argmax identical on every vector, max\|logit\| diff < 1e-4, all outputs finite, **zero**
 cases where argmax picks a masked-illegal skill.
 
@@ -250,19 +250,19 @@ PY=~/anaconda3/envs/RLNAO/bin/python
 
 # dataset (broadened dribble modes) -> mirror -> BC -> closed-loop PPO
 $PY teacher_goalkeeper_dataset.py --synthetic --episodes 80 --steps 80 --output-dir <abs>/ds
-$PY tools/mirror_augment_gk_dataset.py --dataset <abs>/ds/samples.npz --output-dir <abs>/ds_mirror
+$PY tools/dataset/mirror_augment_gk_dataset.py --dataset <abs>/ds/samples.npz --output-dir <abs>/ds_mirror
 $PY train_goalkeeper_bc.py --dataset <abs>/ds_mirror/samples.npz --epochs 32 --device cuda:0
 $PY train_goalkeeper_ppo_closedloop.py --bc-checkpoint <bc.pt> \
    --anchor-dataset <abs>/ds_mirror/samples.npz --anchor-coef 0.5 \
    --updates 200 --envs 320 --dribble-frac 0.38 --sym-coef 0.5 --lr 5e-5 --device cuda:0
 
 # export head-free + benchmark head-free
-RL_GK_DISABLE_HEAD=1 $PY tools/export_goalkeeper_policy.py --checkpoint <ckpt.pt> --no-head \
+RL_GK_DISABLE_HEAD=1 $PY tools/export/export_goalkeeper_policy.py --checkpoint <ckpt.pt> --no-head \
    --output models/goalkeeper/ppo_goalkeeper_hsl2026_gk_closedloop_elite.onnx
-RL_GK_DISABLE_HEAD=1 $PY tools/benchmark_goalkeeper_closed_loop_shots.py --policy ppo \
+RL_GK_DISABLE_HEAD=1 $PY tools/eval/benchmark_goalkeeper_closed_loop_shots.py --policy ppo \
    --checkpoint <ckpt.pt> --episodes 3600 --seed 742619 --device cpu
 # production sanity (clean+noisy skill acc, mask violations, finite, diversity)
-$PY tools/validate_goalkeeper_policy_production.py --checkpoint <ckpt.pt> --dataset <ds_mirror>/samples.npz
+$PY tools/eval/validate_goalkeeper_policy_production.py --checkpoint <ckpt.pt> --dataset <ds_mirror>/samples.npz
 ```
 
 ---
@@ -274,14 +274,14 @@ $PY tools/validate_goalkeeper_policy_production.py --checkpoint <ckpt.pt> --data
 - `goalkeeper_teacher.py` — obs contract (`encode_goalkeeper_obs`, 64-dim), cognition
   (`build_gk_cognition` + geometry), legal mask (`goalkeeper_skill_mask_np/torch`), heuristic teacher.
 - `teacher_goalkeeper_dataset.py` — synthetic dataset gen incl. broadened dribble modes.
-- `tools/mirror_augment_gk_dataset.py` — L/R symmetric augmentation.
+- `tools/dataset/mirror_augment_gk_dataset.py` — L/R symmetric augmentation.
 - `train_goalkeeper_bc.py` — behavioral cloning.
 - `train_goalkeeper_ppo.py` — offline imitation PPO + `_apply_slow_corner_dribble_head`
   (deprecated; `RL_GK_DISABLE_HEAD=1` switch).
 - `train_goalkeeper_ppo_closedloop.py` — **the closed-loop goal-prevention PPO** (reward + symmetry + anchor).
-- `tools/export_goalkeeper_policy.py` — ONNX export (`--no-head`) + parity manifest.
-- `tools/benchmark_goalkeeper_closed_loop_shots.py` — analytical save benchmark (shots + dribble + stress).
-- `tools/validate_goalkeeper_policy_production.py` — sanity/diversity/robustness gate.
+- `tools/export/export_goalkeeper_policy.py` — ONNX export (`--no-head`) + parity manifest.
+- `tools/eval/benchmark_goalkeeper_closed_loop_shots.py` — analytical save benchmark (shots + dribble + stress).
+- `tools/eval/validate_goalkeeper_policy_production.py` — sanity/diversity/robustness gate.
 - `docs/39-goalkeeper-closedloop-and-naov6-transplant.md` — this document.
 
 ---

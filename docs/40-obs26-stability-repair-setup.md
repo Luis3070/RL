@@ -97,7 +97,7 @@ runs/production_readiness_v2/checkpoint_stage4_step10000.pt
 Luego `checkpoint_stage4_step5000.pt` fue exportado a ONNX con:
 
 ```text
-tools/export_ppo_policy.py
+tools/export/export_ppo_policy.py
 ```
 
 ## Entorno local
@@ -177,7 +177,7 @@ sin tocar el obs space y sin cambiar Sabana:
 cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
 .venv/bin/python train_stand_repair.py
 PYTHONPATH=/home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base \
-.venv/bin/python tools/export_ppo_policy.py \
+.venv/bin/python tools/export/export_ppo_policy.py \
   --checkpoint runs/production_stand_repair_v1/checkpoint_stage4_stand_repair.pt \
   --output runs/production_stand_repair_v1/ppo_striker_hsl2026_stand_repair.onnx
 ```

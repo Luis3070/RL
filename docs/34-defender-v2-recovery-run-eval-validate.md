@@ -144,14 +144,14 @@ python behavioral_evaluator.py \
 ## Paso 7 — Estabilidad multi-seed (sim, chunked)
 
 ```bash
-tools/run_stability_chunked.sh \
+tools/run/run_stability_chunked.sh \
   runs/defender_47_v2/checkpoint_stage8_step<MEJOR>.pt 11 23 37 51 67 83
 ```
 
 ## Paso 8 — Exportar ONNX del defender (familia per-role)
 
 ```bash
-python tools/export_ppo_policy_team.py \
+python tools/export/export_ppo_policy_team.py \
   --checkpoint runs/defender_47_v2/checkpoint_stage8_step<MEJOR>.pt \
   --output models/defender/ppo_defender_hsl2026.onnx \
   --active-skills stand,walk,dribble,shoot,pass,block

@@ -41,7 +41,7 @@ Required `SabanaHerons2026` branches:
 | `behavioral_evaluator.py`, `model_evaluator.py`, `teacher_evaluator.py`, `behavioral_stability*.py` | Evaluation and stability checks |
 | `test_*.py`, `smoke_test_skill_requests.py` | Contract tests and the bridge smoke test |
 | `gui_visible_*.py`, `live_simrobot_probe*.py`, `visualize_simrobot_skills.py`, `run_rl_vs_bhuman_3v3.py` | Visible-SimRobot checks and RL vs B-Human runs |
-| `tools/` | Run scripts (`run_*.sh`), ONNX export (`export_*.py`), offline evaluation, dataset audits |
+| `tools/` | Grouped by purpose: `run/` (launchers, `run_*.sh`), `export/` (ONNX export), `eval/` (evaluation, validation, probes), `dataset/` (dataset generation and audits), `misc/` |
 | `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
 | `models/` | Tracked policy deliverables and manifests (see below) |
 | `models/defender/checkpoints/` | Tracked defender PyTorch checkpoints |
@@ -89,12 +89,12 @@ Other verified entry points (argparse):
 | Command | Flags seen in the source |
 |---|---|
 | `python smoke_test_skill_requests.py` | `--backend {simrobot,simrobot_visible}`, `--simrobot-profile {2d,3d}`, `--launch-simrobot`, `--simrobot-bin` |
-| `python train_multiagent_production.py` | `--stage-id`; the `tools/*.sh` scripts also pass `--checkpoint` and `--dataset` |
+| `python train_multiagent_production.py` | `--stage-id`; the `tools/run/*.sh` scripts also pass `--checkpoint` and `--dataset` |
 | `python train_production.py` | `--dataset`, `--output-dataset`, `--checkpoint`, `--prepare-only` |
 | `python train_defender_bc.py` | `--dataset`, `--steps`, `--batch-size`, `--lr`, `--init-checkpoint`, `--reference-checkpoint`, `--distill-weight`, `--output-dir`, ... |
 | `pytest test_*.py` | Contract tests; some may need `pybh` |
 
-The `tools/run_*.sh` scripts record the exact recipes used for each policy version (for example `tools/run_v4_2.sh`, `tools/train_merge_v5.sh`).
+The `tools/run/*.sh` scripts record the exact recipes used for each policy version (for example `tools/run/run_v4_2.sh`, `tools/run/train_merge_v5.sh`).
 These commands could not be executed during documentation work (the authors' `pybh` build was not usable in the documentation environment); flags are quoted from the source, not from `--help` output.
 
 ## Data and runs policy

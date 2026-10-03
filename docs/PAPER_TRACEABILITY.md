@@ -20,7 +20,7 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 | 6 | Cooperation/striker corpus | 434,639 rows; pass 16,914; shoot 5,702 | none | not in repository | Results produced outside this repository; paper values stand. |
 | 7 | Defender corpus | 33,999 rows; 29 kept episodes; mark 673; block 2,817 | `docs/38`, section 2, step 2 (text: "33 999 rows, mark 673 / block 2817") | not in repository | Results produced outside this repository; paper values stand. Kept-episode count not found. |
 | 8 | Single-agent 26-dim dataset | 17,815 rows; shoot positives 4,212 | `docs/40-obs26-stability-repair-setup.md` line 144 ("positive=16402/17815") | partial | Row count appears for a production replay dataset; that it is the same dataset, and the 4,212 figure, are to be confirmed by the authors. |
-| 9 | Skill agreement with pre-merge policy | 96.7% | `docs/38` section 3; computing script `tools/eval_merged_offline.py` | traced | Quoted in the document; raw evaluation output not tracked. |
+| 9 | Skill agreement with pre-merge policy | 96.7% | `docs/38` section 3; computing script `tools/eval/eval_merged_offline.py` | traced | Quoted in the document; raw evaluation output not tracked. |
 | 10 | Pass / shoot / dribble recall | 100.0% / 99.9% / 96.4% | `docs/38` section 3 | traced | Same note as row 9. |
 | 11 | Mark recall | 93.2% | `docs/38` section 3 | traced | Same note as row 9. |
 | 12 | Defender score | about 0.76 | `docs/38` section 3 ("in-sim defender_score 0.76") | traced | Metric computed in `environment.py` / `train.py`; raw run output not tracked. |
@@ -29,7 +29,7 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 | 15 | Role flip effect | `mark` in about 61% of cases | `docs/38` section 1 ("mark 61%") | traced | Quoted in the document only. |
 | 16 | Multi-agent run | 22 episodes | `docs/38` section 3 ("22 ep") | traced | The document also reports other metrics from that run; raw output not tracked. |
 | 17 | Production stress robustness | 28 SimRobot episodes (figure) | none | not in repository | Figure and underlying run output not in the repository. Production scenarios are defined in `production_curriculum.py`. |
-| 18 | BC replay coefficient schedule | beta_BC from 0.08 to 0.02 | `docs/38` section 2, step 4; `tools/train_merge_v5.sh` line 7 | traced | |
+| 18 | BC replay coefficient schedule | beta_BC from 0.08 to 0.02 | `docs/38` section 2, step 4; `tools/run/train_merge_v5.sh` line 7 | traced | |
 | 19 | Observation size and role block | 47 dimensions; role one-hot at indices 44-46 | `observation.py` (`OBS_SIZE` evaluates to 47; role block at indices 44-46) | traced | |
 | 20 | Action space | 8 skills (+ 4 parameters) | `action.py` (`SkillType` has 8 members; `ACTION_PARAM_MASKS` has 4 entries per skill) | traced | |
 | 21 | Positive-label share in final corpus | walk+stand 85.94%; pass+shoot+mark 3.76% | none | not in repository | Derived from the final corpus, which is not tracked. |
@@ -42,7 +42,7 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 |---|---|
 | Figures (`production_stress_metrics.png`, `teacherstability.png`, others) | Not in the repository |
 | `references.bib` | Not in the repository |
-| `tools/run_defv2_*.sh` (cited by working notes such as `docs/notes/HANDOFF.md`) | Found: `run_defv2_chunk.sh`, `run_defv2_finetune.sh`, `run_defv2_floor.sh`, `run_defv2_stability.sh`, `run_defv2_stability_seed67.sh` (checked with `fd 'run_defv2' tools`) |
+| `tools/run/run_defv2_*.sh` (cited by working notes such as `docs/notes/HANDOFF.md`) | Found: `run_defv2_chunk.sh`, `run_defv2_finetune.sh`, `run_defv2_floor.sh`, `run_defv2_stability.sh`, `run_defv2_stability_seed67.sh` (checked with `fd 'run_defv2' tools/run`) |
 | Datasets, run logs, training checkpoints | Under `runs/` (gitignored); not available from this repository |
 | Corpus-generation results behind rows 1-7 | Produced outside this repository; to be confirmed by the authors |
 
