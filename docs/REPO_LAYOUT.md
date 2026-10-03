@@ -240,6 +240,6 @@ Differences between the design above and what was implemented:
 - Repo-root lookups use `Path(__file__).resolve().parents[2]` directly (not `ROOT_DIR` from `config`), to keep each file self-contained. `diag_n6_slots` now climbs three levels to reach the sibling `SabanaHerons2026`.
 - Stale imports left over from the `tools/` regrouping were corrected (`tools.export_ppo_policy` -> `tools.export.export_ppo_policy`, and similar in `run_goalkeeper_production`, `train_stand_repair`, `train_param_repair`, `train_goalkeeper_ppo_closedloop`), plus the `tools/verify_goalkeeper_action_space_truth.py` path in `run_goalkeeper_production`.
 - `probe_protocol_experiment` re-runs itself with `python -m rlfootball.diagnostics.probe_protocol_experiment` instead of the file path.
-- Inline Python in four `.sh` heredocs now imports `rlfootball.core.*`.
+- Inline Python in three `.sh` heredocs (`tools/dataset/collect_defense_gt.sh`, `tools/eval/gt_label_check.sh`, `tools/run/run_v3_attack.sh`) now imports `rlfootball.core.*`. They run after `cd "$REPO"` with `PYTHONPATH` starting at the repository root.
 - Smoke test: `python -m tests.smoke_test_skill_requests` (run from the repo root).
 - `train_goalkeeper` imports `evaluate_step_gk` from `reward`, which does not define it. This predates the refactor and was left unchanged.
