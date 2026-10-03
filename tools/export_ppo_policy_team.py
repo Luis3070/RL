@@ -8,7 +8,7 @@ de hard-codearlo, así sirve para 26, 41 o 47.
 Uso:
     python tools/export_ppo_policy_team.py \
         --checkpoint runs/multiagent_stage7_v1/checkpoint_stage7_step15000.pt \
-        --output ppo_team_hsl2026.onnx
+        --output models/team/ppo_team_hsl2026.onnx
 """
 import argparse, hashlib, json, torch
 from pathlib import Path
@@ -121,7 +121,7 @@ def export(checkpoint_path: str, output_path: str, active_skills: list[str], spe
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--output", default="ppo_team_hsl2026.onnx")
+    p.add_argument("--output", default="models/team/ppo_team_hsl2026.onnx")
     p.add_argument(
         "--active-skills",
         default="stand,walk,dribble,shoot,pass",

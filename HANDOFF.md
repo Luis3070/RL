@@ -20,7 +20,7 @@ El commit `5fc3581` ("Defender v2 doc-34 D1–D5") solo validó la **lógica off
 | 5 | Eval stage-8 por checkpoint | **step2500 mejor** |
 | 6 | Floor ofensivo (`behavioral_evaluator`, gate 0.30/0.20) | **4/5 PASS**, collision=0.000 en los 5 |
 | 7 | Estabilidad multi-seed (6 seeds: 11 23 37 51 67 83) | 6/6 defensivo · 3/6 estricto (ver nota h) |
-| 8 | Export ONNX per-role | `ppo_defender_hsl2026.onnx` (+ `.json`) |
+| 8 | Export ONNX per-role | `models/defender/ppo_defender_hsl2026.onnx` (+ `.json`) |
 | 9 | Semáforo offline (`offline_team_eval`) | STABILITY 🟢 / ROBUSTNESS 🟢 / DIVERSITY 🟡 |
 
 ### Cómo fue el fine-tune (Paso 4)
@@ -33,7 +33,7 @@ No es entrenamiento desde cero, es **afinado de un modelo ya competente**:
 
 ## Candidato
 
-**`runs/defender_47_v2/checkpoint_stage8_step2500.pt`** → exportado a `ppo_defender_hsl2026.onnx`.
+**`runs/defender_47_v2/checkpoint_stage8_step2500.pt`** → exportado a `models/defender/ppo_defender_hsl2026.onnx`.
 
 step2500 es el único bajo el ideal de colisión <0.15, con mejor cover/score. Confirma la
 lección v2b ("el bueno es el intermedio"): los de 5000/7500 ya degradan (collision 0.50).
@@ -78,7 +78,7 @@ el `collision_rate=0.000` en las 6 seeds.
 - `tools/run_defv2_floor.sh` — Paso 6 (`behavioral_evaluator` sobre step2500).
 - `tools/run_defv2_stability.sh` / `run_defv2_stability_seed67.sh` — Paso 7 multi-seed.
 - `tools/run_defv2_chunk.sh` — helper de chunking del dataset.
-- `ppo_defender_hsl2026.onnx` + `.json` — artefacto de deploy (obs 47 / 8 skill logits / 4 params).
+- `models/defender/ppo_defender_hsl2026.onnx` + `.json` — artefacto de deploy (obs 47 / 8 skill logits / 4 params).
 - `runs/defender_47_v2/VERDICT_defv2.md` — veredicto detallado.
 - `.venv_env.sh` — setup de entorno local (paths máquina; **no commitear si es local-only**).
 

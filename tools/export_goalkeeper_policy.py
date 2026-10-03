@@ -107,7 +107,7 @@ def export(checkpoint: str, output: str, no_head: bool = False) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--output", default="ppo_goalkeeper_hsl2026.onnx")
+    parser.add_argument("--output", default="models/goalkeeper/ppo_goalkeeper_hsl2026.onnx")
     parser.add_argument("--no-head", action="store_true", help="export head-free (for closed-loop-trained policies)")
     args = parser.parse_args()
     export(args.checkpoint, args.output, no_head=args.no_head)

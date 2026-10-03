@@ -43,8 +43,8 @@ Required `SabanaHerons2026` branches:
 | `gui_visible_*.py`, `live_simrobot_probe*.py`, `visualize_simrobot_skills.py`, `run_rl_vs_bhuman_3v3.py` | Visible-SimRobot checks and RL vs B-Human runs |
 | `tools/` | Run scripts (`run_*.sh`), ONNX export (`export_*.py`), offline evaluation, dataset audits |
 | `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
-| `ppo_*.onnx`, `ppo_*.json` | Tracked policy deliverables and manifests (see below) |
-| `pt_defender_47/` | Tracked defender PyTorch checkpoints |
+| `models/` | Tracked policy deliverables and manifests (see below) |
+| `models/defender/checkpoints/` | Tracked defender PyTorch checkpoints |
 | `docs/`, `.docs/` | Documentation (index: [docs/README.md](docs/README.md)) |
 | `HANDOFF.md`, `CODEX_OFFBALL_PERCEPTION_HANDOFF.md`, `cambios_para_produccion.md` | Historical working notes (Spanish) |
 | `environment.yml` | Conda environment (outdated, see below) |
@@ -100,15 +100,15 @@ These commands could not be executed during documentation work (the authors' `py
 ## Data and runs policy
 
 - `runs/` is gitignored: datasets (`*.npz`), logs, telemetry and training checkpoints are not versioned.
-- Tracked deliverables: root `ppo_*.onnx` weights with their `ppo_*.json` manifests, and `pt_defender_47/checkpoint_stage8_step2500.pt` and `checkpoint_stage8_step10000.pt`.
+- Tracked deliverables: `ppo_*.onnx` weights with their `ppo_*.json` manifests under `models/<role>/`, and `models/defender/checkpoints/checkpoint_stage8_step2500.pt` and `checkpoint_stage8_step10000.pt`.
 
 | Policy | Files |
 |---|---|
-| Striker | `ppo_striker_hsl2026.{onnx,json}` (+ `.onnx.data`) |
-| Defender | `ppo_defender_hsl2026.{onnx,json}` |
-| Team (striker v4.1, v4.2) | `ppo_team_hsl2026.*`, `ppo_team_hsl2026_v4_1.*`, `ppo_team_hsl2026_v4_2.*` |
-| Merged brain v5 | `ppo_team_hsl2026_v5_merged.{onnx,json}` |
-| Goalkeeper | `ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
+| Striker | `models/striker/ppo_striker_hsl2026.{onnx,json}` (+ `.onnx.data`) |
+| Defender | `models/defender/ppo_defender_hsl2026.{onnx,json}` |
+| Team (striker v4.1, v4.2) | `models/team/ppo_team_hsl2026.*`, `ppo_team_hsl2026_v4_1.*`, `ppo_team_hsl2026_v4_2.*` |
+| Merged brain v5 | `models/team/ppo_team_hsl2026_v5_merged.{onnx,json}` |
+| Goalkeeper | `models/goalkeeper/ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
 
 ## Project documents
 

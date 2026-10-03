@@ -431,7 +431,7 @@ python train_multiagent_production.py --stage-id 8 \
 | e | Block engagement: ventanas defensivas con `dribble_armed=1` en rol off_ball donde ejecuta block | ≥ 50% |
 | f | Goles encajados en `defense_3v3_full` vs baseline (trío v2b@7500 SIN fine-tune defensivo, mismos seeds) | estrictamente menor |
 | g | Estabilidad multi-seed DEFENSIVA: eval `defense_3v3_full` chunked en los 6 stable seeds (11,23,37,51,67,83 — patrón de `tools/run_stability_chunked.sh`: shm fresco + pkill por seed); reportar goles encajados y cover por seed | (f) se sostiene en ≥ 4/6 seeds |
-| h | Export: `tools/export_ppo_policy_team.py --output ppo_defender_hsl2026.onnx` → ONNX propio + manifest (gate_config + role indices + `"specialization": "defender"`) | sha documentado |
+| h | Export: `tools/export_ppo_policy_team.py --output models/defender/ppo_defender_hsl2026.onnx` → ONNX propio + manifest (gate_config + role indices + `"specialization": "defender"`) | sha documentado |
 
 El probe de ataque (`run_stability_chunked.sh` sobre los 5 escenarios
 single-agent) ya NO es gate para el defender — correrlo una vez como

@@ -44,7 +44,7 @@ escape); off_ball_support/defender = walk/block/mark(+dribble escape). `stand`/`
    dataset = merged_v5, BC β 0.08→0.02, **single slot** (stage-8 default = stable; 3-slot starves),
    PPO scenario weights exclude `defense_3v3_full`, 10 000 steps → `checkpoint_stage8_step10000.pt`.
 5. **Export:** `tools/export_ppo_policy_team.py --active-skills stand,walk,dribble,shoot,pass,block,mark
-   --specialization merged --output ppo_team_hsl2026_v5_merged.onnx`.
+   --specialization merged --output models/team/ppo_team_hsl2026_v5_merged.onnx`.
 
 ## 3. Results (how it was validated — the visible 3-slot eval is unusable, so OFFLINE + single-slot)
 

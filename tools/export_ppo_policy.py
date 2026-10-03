@@ -3,7 +3,7 @@ Exporta el actor PPO a ONNX para inferencia en robot.
 Uso:
     python tools/export_ppo_policy.py \
         --checkpoint runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt \
-        --output ppo_striker_hsl2026.onnx
+        --output models/striker/ppo_striker_hsl2026.onnx
 """
 import argparse, hashlib, json, torch
 from pathlib import Path
@@ -81,6 +81,6 @@ def export(checkpoint_path: str, output_path: str):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--output", default="ppo_striker_hsl2026.onnx")
+    p.add_argument("--output", default="models/striker/ppo_striker_hsl2026.onnx")
     args = p.parse_args()
     export(args.checkpoint, args.output)

@@ -258,7 +258,7 @@ $PY train_goalkeeper_ppo_closedloop.py --bc-checkpoint <bc.pt> \
 
 # export head-free + benchmark head-free
 RL_GK_DISABLE_HEAD=1 $PY tools/export_goalkeeper_policy.py --checkpoint <ckpt.pt> --no-head \
-   --output ppo_goalkeeper_hsl2026_gk_closedloop_elite.onnx
+   --output models/goalkeeper/ppo_goalkeeper_hsl2026_gk_closedloop_elite.onnx
 RL_GK_DISABLE_HEAD=1 $PY tools/benchmark_goalkeeper_closed_loop_shots.py --policy ppo \
    --checkpoint <ckpt.pt> --episodes 3600 --seed 742619 --device cpu
 # production sanity (clean+noisy skill acc, mask violations, finite, diversity)

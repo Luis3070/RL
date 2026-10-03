@@ -67,7 +67,7 @@ def export(checkpoint: Path, output: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export obs26 defender BC checkpoint to ONNX.")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--output", default="ppo_defender_hsl2026_param_repair.onnx")
+    parser.add_argument("--output", default="models/defender/ppo_defender_hsl2026_param_repair.onnx")
     return parser.parse_args()
 
 

@@ -18,7 +18,7 @@ export RL_MA_PROD_SCENARIO_SET="defense"
 export RL_MA_PROD_SCENARIO_WEIGHTS="defense_2v3_dynamic:1,defense_1v3_static_entry:0,defense_3v3_full:0,transition_midfield:0,defense_recovery_clear:0"
 
 DATASET="$REPO/runs/teacher_multiagent_dataset/dataset_stage7_20260610_202948/samples.npz"
-DEFENDER="$REPO/pt_defender_47/checkpoint_stage8_step2500.pt"
+DEFENDER="$REPO/models/defender/checkpoints/checkpoint_stage8_step2500.pt"
 BASELINE="$REPO/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt"
 
 run_one () {

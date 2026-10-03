@@ -30,7 +30,7 @@ export RL_MA_PROD_SCENARIO_SET="defense"
 export RL_MA_PROD_SCENARIO_WEIGHTS="defense_mark_open:1,defense_3v3_full:0,defense_1v3_static_entry:0,defense_2v3_dynamic:0,transition_midfield:0,defense_recovery_clear:0"
 
 DATASET="$REPO/runs/teacher_multiagent_dataset/dataset_stage7_20260610_202948/samples.npz"
-DEFENDER="$REPO/pt_defender_47/checkpoint_stage8_step2500.pt"
+DEFENDER="$REPO/models/defender/checkpoints/checkpoint_stage8_step2500.pt"
 
 RL_MA_PROD_TRAIN_STEPS=256 RL_MA_PROD_MAX_EPISODE_STEPS=800 \
 RL_MA_PROD_EVAL_INTERVAL=256 RL_MA_PROD_CHECKPOINT_INTERVAL=100000 \

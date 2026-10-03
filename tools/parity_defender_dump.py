@@ -33,7 +33,7 @@ from observation import ObsIndex, OBS_SIZE  # noqa: E402
 from action import SKILL_ORDER  # noqa: E402
 from train import gate_skill_mask_from_obs  # noqa: E402
 
-MODEL_PATH = REPO_ROOT / "ppo_defender_hsl2026.onnx"
+MODEL_PATH = REPO_ROOT / "models" / "defender" / "ppo_defender_hsl2026.onnx"
 
 # Production stage-8 active skills (from the manifest): mark and observe are never active.
 STAGE_ACTIVE = {"stand", "walk", "shoot", "pass", "dribble", "block"}

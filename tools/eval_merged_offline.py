@@ -4,7 +4,7 @@
 Gate-aware, deterministic, no SimRobot (the visible 3-slot trio is an unusable
 instrument). Covers: sanity, per-role skill distribution, diversity/entropy,
 input-noise robustness, role-conditioning, and baseline agreement vs v4.2 (attack
-ref), pt_defender_47 (defense ref) and v2b@7500 (pre-merge base).
+ref), models/defender/checkpoints (defense ref) and v2b@7500 (pre-merge base).
 
 Run: PYTHONPATH=/home/luis/GitHub/RL:.../Make/Python python tools/eval_merged_offline.py
 """
@@ -40,7 +40,7 @@ def load(p): return Pol(torch.load(R + p, map_location="cpu")["policy_state_dict
 NETS = {
     "merged": "runs/merge_v5_attack_defense/checkpoint_stage8_step10000.pt",
     "v4.2":   "runs/multiagent_v4_2/checkpoint_stage7_step12000.pt",
-    "pt_def47": "pt_defender_47/checkpoint_stage8_step2500.pt",
+    "pt_def47": "models/defender/checkpoints/checkpoint_stage8_step2500.pt",
     "v2b":    "runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt",
 }
 nets = {k: load(v) for k, v in NETS.items()}

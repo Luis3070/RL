@@ -21,7 +21,7 @@ goal conversion, pass-completion in motion. Those are flagged for the live run.
 
 Usage:
     .venv/Scripts/python.exe tools/offline_team_eval.py
-    .venv/Scripts/python.exe tools/offline_team_eval.py --onnx ppo_team_hsl2026.onnx \
+    .venv/Scripts/python.exe tools/offline_team_eval.py --onnx models/team/ppo_team_hsl2026.onnx \
         --corpus runs/teacher_multiagent_dataset/dataset_multiagent_train_20260611_full_v1/samples.npz
 """
 from __future__ import annotations
@@ -152,7 +152,7 @@ def worst(lights) -> str:
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--onnx", default=str(ROOT / "ppo_team_hsl2026.onnx"))
+    ap.add_argument("--onnx", default=str(ROOT / "models" / "team" / "ppo_team_hsl2026.onnx"))
     ap.add_argument(
         "--corpus",
         default=str(
