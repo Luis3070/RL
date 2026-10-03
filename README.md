@@ -1,744 +1,128 @@
-# RL × B-Human con `pybh`
-
-> Estado actual: la documentacion mantenida de la integracion natural RL/B-Human esta en
-> [docs/README.md](./docs/README.md).
-
-Guia operativa nueva para escenas y escenarios RL:
-
-- [docs/15-guia-escenas-y-escenarios-rl.md](./docs/15-guia-escenas-y-escenarios-rl.md)
-
-Este repo quedó en un punto bastante más serio que el `pybh-clean` inicial.
-Ya no estamos sólo en “tengo un script heurístico que llama a B-Human”, sino en
-una base donde:
-
-- Python manda acciones RL directo a B-Human dentro del mismo proceso.
-- el bridge ya entiende todas las variantes públicas de `SkillRequest`.
-- los backends soportados son SimRobot real:
-  - `simrobot` embebido
-  - `simrobot_visible` con instancia visible
-  - ambos con perfil `2d` o `3d`
-- `train.py` ya levanta un agente `MAPPO` real con `skrl`
-- el smoke y el train corto ya corren sobre SimRobot real
-
-No está terminado el stack final de entrenamiento completo, pero sí quedó
-cerrada esta fase: bridge, backend real y loop RL mínimo funcional.
-
-## Qué problema resolvimos
-
-La rama `pybh-clean` estaba muy reducida. Al empezar, en `RL/` prácticamente
-sólo existían:
-
-- `heuristic_agent_experiment.py`
-- `README.md`
-- `environment.yml`
-- un CSV de resultados
-
-No estaban los módulos grandes heredados de `main`:
-
-- `train.py`
-- `environment.py`
-- `wrapper.py`
-- `reward.py`
-- `config.py`
-
-Además, el bridge C++ sólo entendía una parte de `SkillRequest`. En la práctica,
-el camino RL -> B-Human estaba limitado a:
-
-- `stand`
-- `walkTo`
-- `shoot`
-- `dribble`
-
-Y aunque ya existía el host embebido de SimRobot, el path real de `simrobot`
-había quedado roto: Python podía cargar la escena, mover pelota/robot y llamar
-`rl_set_action()`, pero no salía `obs_ready` por `rl_get_obs()`.
-
-## Qué se hizo en esta fase
-
-Se hicieron dos grupos grandes de cambios:
-
-1. cambios en este repo `RL/`
-2. cambios en el repo hermano `SabanaHerons2026/`
-
-La idea fue alinear ambos lados:
-
-- del lado Python: una API RL coherente
-- del lado C++: un bridge que de verdad consuma esa API
-
-## Cambios en `RL/`
-
-### Archivos creados
-
-Se agregaron estos archivos:
-
-- [action.py](/home/rafael/Documentos/Robocup2026/RL/action.py)
-- [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py)
-- [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py)
-- [environment.py](/home/rafael/Documentos/Robocup2026/RL/environment.py)
-- [reward.py](/home/rafael/Documentos/Robocup2026/RL/reward.py)
-- [wrapper.py](/home/rafael/Documentos/Robocup2026/RL/wrapper.py)
-- [train.py](/home/rafael/Documentos/Robocup2026/RL/train.py)
-- [smoke_test_skill_requests.py](/home/rafael/Documentos/Robocup2026/RL/smoke_test_skill_requests.py)
-
-### Archivos modificados
-
-Se tocaron estos archivos existentes:
-
-- [heuristic_agent_experiment.py](/home/rafael/Documentos/Robocup2026/RL/heuristic_agent_experiment.py)
-- [heuristic_experiment_results.csv](/home/rafael/Documentos/Robocup2026/RL/heuristic_experiment_results.csv)
-
-### 1. Acción canónica RL
-
-En [action.py](/home/rafael/Documentos/Robocup2026/RL/action.py) quedó definida
-la acción estructurada común para todo el stack:
-
-- `skill_type`
-- `target_x`
-- `target_y`
-- `target_theta`
-- `pass_target`
-
-Orden de skills:
-
-1. `stand`
-2. `walk`
-3. `shoot`
-4. `pass`
-5. `dribble`
-6. `block`
-7. `mark`
-8. `observe`
-
-Detalles prácticos:
-
-- internamente existe `SkillType.pass_` porque `pass` es keyword en Python
-- hacia afuera siempre se expone como `"pass"`
-- hay helpers para:
-  - convertir dict -> acción
-  - convertir `np.ndarray` -> acción
-  - convertir acción -> `np.ndarray`
-  - clamplear rangos
-  - construir máscara de skills activas
-
-### 2. Configuración mínima del stack
-
-En [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py) quedó la
-config central para esta fase:
-
-- rutas a `SabanaHerons2026`
-- escena de SimRobot
-- robot name
-- tamaños y rangos de acción
-- skills activas por defecto para entrenar:
-  - `stand`
-  - `walk`
-  - `shoot`
-  - `pass`
-  - `dribble`
-- configuración del backend
-- configuración mínima de train/smoke
-
-No es todavía el `config.py` grande de `main`. Es un config minimalista para
-esta base nueva.
-
-### 3. Backend Python sobre `pybh`
-
-En [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py)
-se encapsuló el acceso a `pybh`.
-
-Tiene dos modos soportados:
-
-- `simrobot`
-- `simrobot_visible`
-
-Qué hace:
-
-- `start()`: carga o conecta una escena SimRobot
-- `reset()`: reinicia pelota/robot según el backend
-- `step()`: manda acción RL y avanza uno o más frames
-- `read_obs()`: consume `pybh.rl_get_obs(...)`
-- `close()`: descarga la escena o cierra la instancia visible
-
-Detalles importantes:
-
-- traduce `walk` a `"walkTo"` sólo en la frontera con `pybh`
-- manda `pass_target` si la firma de `pybh.rl_set_action(...)` lo soporta
-- usa `BackendObservation` para parsear respuesta del bridge
-- también recoge:
-  - `requested_skill`
-  - `requested_pass_target`
-  Eso sirve para verificar qué quedó realmente latcheado en el bridge.
-
-### 4. Entorno RL
-
-En [environment.py](/home/rafael/Documentos/Robocup2026/RL/environment.py) se
-construyó un `ParallelEnv` minimalista.
-
-Importante: sigue siendo un entorno chico y monoagente. No pretende todavía ser
-el reemplazo final del entorno grande de `main`.
-
-Qué tiene:
-
-- agente único: `player_1`
-- `observation_space`: vector de 9 floats
-- `action_space`: `Box(5,)`
-- `state_space`: igual al estado global mínimo
-- método `state()` para que `skrl` pueda consumirlo
-
-Por qué el `action_space` es plano y no `Dict`:
-
-- `skrl`/`PettingZooWrapper` trabaja mucho más simple con `Box`
-- la semántica estructurada se conserva igual, sólo que la decodificación queda
-  dentro del env
-
-Observación actual:
-
-- delta robot-pelota
-- pose robot
-- pose pelota
-- frame del bridge
-
-Todavía falta:
-
-- multiagente real
-- CTDE real
-- observación rica
-- curriculum
-- métricas B-Human-aware completas
-
-### 5. Reward
-
-[reward.py](/home/rafael/Documentos/Robocup2026/RL/reward.py) tiene un reward
-muy simple para esta fase:
-
-- progreso hacia la pelota
-- bonus por gol
-- penalización por step
-
-Esto no pretende sustituir el shaping sofisticado del `reward.py` de `main`.
-Sirve para tener el loop vivo y comprobable.
-
-### 6. Wrapper
-
-[wrapper.py](/home/rafael/Documentos/Robocup2026/RL/wrapper.py) hace una capa
-ligera para trabajar con acciones estructuradas o tensores planos, y expone
-`collect_episode(...)`.
-
-De nuevo: es una versión chica, no el wrapper completo heredado de `main`.
-
-### 7. `heuristic_agent_experiment.py`
-
-Se migró [heuristic_agent_experiment.py](/home/rafael/Documentos/Robocup2026/RL/heuristic_agent_experiment.py)
-para que use la misma acción canónica.
-
-Antes tenía su propio contrato informal.
-Ahora:
-
-- `_heuristic_action(...)` devuelve `StructuredSkillAction`
-- el `walkTo` del bridge se obtiene vía traducción `walk -> walkTo`
-- ya no hay dos APIs RL distintas dentro del repo
-
-### 8. `train.py`
-
-El `train.py` actual ya no es un stub. Tampoco es todavía el `train.py` final
-de `main`, pero ya usa `MAPPO` real con `skrl`.
-
-Qué hace hoy:
-
-- crea un `PolicyNetwork` con `GaussianMixin`
-- crea un `ValueNetwork` con `DeterministicMixin`
-- monta `RandomMemory`
-- monta `MAPPO`
-- ejecuta:
-  - `mode=smoke`
-  - `mode=train`
-
-Qué NO hace todavía:
-
-- no recupera el logger grande de `main`
-- no recupera curriculum
-- no tiene critic CTDE real multiagente
-- no tiene la capa completa de métricas B-Human-aware
-
-Importante:
-
-- se probó `SequentialTrainer`, pero en esta versión de `skrl` el camino de
-  “un solo `MultiAgent`” cae por el código single-agent y rompe con el retorno
-  tipo dict de `PettingZoo`
-- por eso se dejó un loop corto propio en `train.py`
-- el agente sí es `MAPPO` real; lo que no usamos es el trainer de librería
-
-### 9. `smoke_test_skill_requests.py`
-
-Este archivo existe para validar el bridge sin meter todavía toda la pila de
-entrenamiento.
-
-Qué hace:
-
-- resetea la escena por cada skill
-- manda una variante por vez
-- imprime:
-  - `obs_ready`
-  - `frame`
-  - `requested_skill`
-  - `requested_pass_target`
-  - pose robot
-  - pose pelota
-
-Eso sirve para separar muy rápido:
-
-- “el bridge no acepta la acción”
-- “la acción sí llegó, pero la semántica no hizo nada”
-- “el runtime real de SimRobot está roto”
-
-## Cambios en `SabanaHerons2026/`
-
-La otra mitad del trabajo se hizo en el repo hermano:
-
-- `/home/rafael/Documentos/Robocup2026/SabanaHerons2026`
-
-### Archivos tocados
-
-- [Module.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/Module.cpp)
-- [RLSharedState.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.h)
-- [RLSharedState.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.cpp)
-- [RLSkillProvider.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/Infrastructure/RLSkillProvider/RLSkillProvider.cpp)
-
-### 1. Shared state RL
-
-En `RLSharedState` se agregó:
-
-- `passTarget`
-
-Y se versionó la shared memory:
-
-- nombre: `"/pybh_rl_shared_state_v2"`
-- versión: `3`
-
-Esto fue importante porque el layout compartido ya no era compatible con el
-viejo.
-
-### 2. Python binding `rl_set_action`
-
-En `Module.cpp` se extendió la firma:
-
-de:
-
-- `rl_set_action(player, skill, x, y, theta)`
-
-a:
-
-- `rl_set_action(player, skill, x, y, theta, pass_target)`
-
-También `rl_get_obs()` ahora expone:
-
-- `requested_skill`
-- `requested_pass_target`
-
-Eso es oro para debug, porque deja ver si Python realmente escribió lo que uno
-cree que escribió.
-
-### 3. `RLSkillProvider`
-
-Acá estuvo la parte semántica importante.
-
-Antes el bridge sólo manejaba una parte chica de `SkillRequest`.
-Ahora se soportan las 8 variantes públicas:
-
-- `stand`
-- `walk`
-- `shoot`
-- `pass`
-- `dribble`
-- `block`
-- `mark`
-- `observe`
-
-Mapeos principales:
-
-- `walk` / `walkTo` -> `SkillRequest::Builder::walkTo(...)`
-- `shoot` -> `SkillRequest::Builder::shoot()`
-- `pass` -> `SkillRequest::Builder::passTo(passTarget)`
-- `dribble` -> `SkillRequest::Builder::dribbleTo(theta)`
-- `block` -> `SkillRequest::Builder::block(Vector2f(x, y))`
-- `mark` -> `SkillRequest::Builder::mark(Vector2f(x, y))`
-- `observe` -> `SkillRequest::Builder::observe(Vector2f(x, y))`
-
-También hay un fallback de `MotionRequest`:
-
-- `block` / `mark` / `observe` se degradan a `walkToPose`
-- `pass` y `shoot` se degradan a `walkToBallAndKick`
-
-Ojo con esto:
-
-- ese fallback no es la “idea final del diseño”
-- la interfaz canónica sigue siendo `SkillRequest`
-- el fallback existe para no dejar muerto el otro camino de la representación
-
-### 4. Estado actual del bridge
-
-La superficie soportada hoy para RL queda en:
-
-- `simrobot`
-- `simrobot_visible`
-- perfiles `2d` y `3d`
-
-- `pass`
-
-se trata como un kick simplificado
-
-Eso no es semántica final. Es una implementación mínima para smoke y test de
-transporte del bridge.
-
-## El bug más feo que apareció
-
-El bug más tramposo de esta fase fue el de `simrobot` real.
-
-Síntoma:
-
-- `simrobot_load_scene(...)` cargaba bien
-- se podía mover pelota y robot desde Python
-- `rl_set_action(...)` cambiaba `requested_skill`
-- pero `rl_get_obs(...)` nunca devolvía `obs_ready=True`
-- el robot de la escena tampoco reaccionaba a la acción RL
-
-La causa:
-
-- `pybh.controller` sí se recompiló con el `RLSharedState` nuevo
-- `libSimulatedNao.so` seguía viejo
-- resultado: Python escribía una versión de shared memory y SimRobot leía otra
-
-En castellano: parecía un bug de lógica, pero era un desalineamiento binario.
-
-## Cómo compilar TODO
-
-Acá van los pasos completos, ya aterrizados a esta máquina.
-
-### 1. Rebuild de `pybh`
-
-Directorio:
+# RL for role-conditioned football in humanoid robots (Python side)
+
+Python reinforcement-learning code for the paper
+**"A Teacher-Guided RL Pipeline for Role-Conditioned Football Cognition in Humanoid Robots"**
+(NAO V6 in SimRobot, SabanaHerons / B-Human stack): a 47-dimensional observation,
+a behavioral-cloning (BC) warm start, PPO with a KL anchor, and a role-conditioned
+merged policy (striker, defender, goalkeeper).
+
+Many documents under `docs/` are written in Spanish and are historical work logs.
+See [docs/README.md](docs/README.md) for the index.
+
+## Two-repository architecture
+
+| Repository | Language | Role |
+|---|---|---|
+| This repository | Python | Environments, teachers, dataset generation, BC/PPO training, evaluation, ONNX export |
+| `SabanaHerons2026` (B-Human fork; URL to be confirmed by the authors) | C++ | SimRobot, the `pybh` Python binding, `RLSharedState` bridge, native ONNX inference |
+
+Python talks to B-Human in-process through `pybh` (see `pybh_backend.py`).
+`config.py` expects `SabanaHerons2026` as a sibling directory of this repository.
+The old `bridge/` subprocess stack was removed in commit `a1da9e9` ("pybh-clean: drop legacy subprocess stack").
+
+Required `SabanaHerons2026` branches:
+
+| Purpose | Branch |
+|---|---|
+| Multi-agent training in this repo | `rl-simrobot3d` (bridge version 30, multi-agent fields; as stated in `HANDOFF.md`) |
+| Deploying the ONNX policies | `hsl2026-ppo-team-v4` (striker v4.2: [docs/37](docs/37-striker-v2b-to-v4.2-and-cpp-transplant.md); merged brain v5: [docs/38](docs/38-merged-striker-defender-and-naov6-transplant.md)) |
+
+## Repository map
+
+| Path | Purpose |
+|---|---|
+| `train.py`, `train_multiagent.py` | Main PPO entry points (single-agent, multi-agent) |
+| `train_production.py`, `train_multiagent_production.py` | Production wrappers with BC warm start and curriculum stages |
+| `train_bc.py`, `train_defender_bc.py`, `train_goalkeeper*.py`, `train_*_repair.py` | BC and fine-tuning/repair trainers |
+| `environment.py`, `parallel_environment.py`, `team_parallel_environment.py`, `wrapper.py` | Environments and wrappers |
+| `pybh_backend.py`, `config.py` | `pybh` backend (SimRobot embedded/visible) and central configuration |
+| `observation.py`, `action.py`, `goalkeeper_action.py`, `reward.py`, `gate.py` | Observation (47-dim), action space, reward, skill gating |
+| `teacher_*.py`, `multiagent_teacher.py`, `goalkeeper_teacher.py`, `generate_defender_dataset.py`, `merge_*.py` | Rule-based teachers and dataset generation/merging |
+| `behavioral_evaluator.py`, `model_evaluator.py`, `teacher_evaluator.py`, `behavioral_stability*.py` | Evaluation and stability checks |
+| `test_*.py`, `smoke_test_skill_requests.py` | Contract tests and the bridge smoke test |
+| `gui_visible_*.py`, `live_simrobot_probe*.py`, `visualize_simrobot_skills.py`, `run_rl_vs_bhuman_3v3.py` | Visible-SimRobot checks and RL vs B-Human runs |
+| `tools/` | Run scripts (`run_*.sh`), ONNX export (`export_*.py`), offline evaluation, dataset audits |
+| `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
+| `ppo_*.onnx`, `ppo_*.json` | Tracked policy deliverables and manifests (see below) |
+| `pt_defender_47/` | Tracked defender PyTorch checkpoints |
+| `docs/`, `.docs/` | Documentation (index: [docs/README.md](docs/README.md)) |
+| `HANDOFF.md`, `CODEX_OFFBALL_PERCEPTION_HANDOFF.md`, `cambios_para_produccion.md` | Historical working notes (Spanish) |
+| `environment.yml` | Conda environment (outdated, see below) |
+
+## Environment setup
+
+`environment.yml` pins `python=3.10`, `pytorch-cuda=11.8` and installs `skrl`, `pettingzoo`, `gymnasium`.
+
+Mismatches found:
+
+| Item | Finding |
+|---|---|
+| Python version | `environment.yml` says 3.10; `scripts/setup_validation_env.sh` uses a `python3` venv at `.venv`, and the previous README referenced `cpython-312` `pybh` modules. Use the Python version your `pybh` build targets. |
+| Extra packages | The code also needs `onnx` and `onnxruntime`, and `pytest` for tests; they are not listed in `environment.yml`. |
+| `pettingzoo[all]` | Can fail to build (box2d needs swig); plain `pettingzoo` is enough. |
+
+Minimal setup, following `scripts/setup_validation_env.sh`:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python
+scripts/setup_validation_env.sh                      # creates .venv, installs torch, skrl, pettingzoo, ...
+scripts/run_with_validation_env.sh python3 diag_n6_slots.py   # sets PYTHONPATH to ../SabanaHerons2026/Make/Python
 ```
 
-Comando:
+`pybh` must be built from `SabanaHerons2026` (`Make/Python`, `python3 setup.py build_ext --inplace`),
+and `SimulatedNao` must be rebuilt after any change to `RLSharedState`; otherwise Python and SimRobot read different shared-memory layouts.
+The `RLSharedState` segment name used by this repo is `/pybh_rl_shared_state_v3`.
+
+## Running
+
+`train.py` and `train_multiagent.py` have no command-line flags. They read a `ScriptRunConfig` and override it with `RL_*` environment variables (`_run_cfg_from_env` in `train.py`).
 
 ```bash
-python3 setup.py build_ext --inplace
+RL_RUN_MODE=smoke RL_SMOKE_STEPS=4 python train.py
+RL_RUN_MODE=train RL_TRAIN_STEPS=800000 python train_multiagent.py
 ```
 
-Importante:
-
-- ahora `setup.py` sí termina bien y copia los módulos compilados al paquete
-  fuente `pybh/`
-- los artefactos principales quedan disponibles tanto en `build/lib...` como en
-  `Make/Python/pybh/`
-- los módulos que interesan son:
-
-```bash
-/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
-/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python/pybh/logs.cpython-312-x86_64-linux-gnu.so
-```
-
-Error real que apareció varias veces:
-
-- `cmake --build ... --target PythonController SimulatedNao B-Human` podía decir
-  `ninja: no work to do`
-- pero Python seguía importando un `controller...so` viejo desde
-  `Make/Python/pybh/`
-- en ese caso el problema no era el `PYTHONPATH` en sí, sino que el artefacto
-  cargado por ese `PYTHONPATH` estaba desalineado con `Build/Linux/...`
-
-Chequeo rápido:
-
-```bash
-ls -lh \
-  /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Build/Linux/Python/Develop/controller.cpython-312-x86_64-linux-gnu.so \
-  /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
-```
-
-Si `Build/Linux/...` tiene timestamp nuevo y `Make/Python/pybh/...` quedó viejo,
-hay que correr otra vez:
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python
-python3 setup.py build_ext --inplace
-```
-
-Eso simplifica bastante el uso: ya no hace falta apuntar el `PYTHONPATH` al
-subdirectorio `build/lib...`; basta con apuntarlo a `Make/Python`.
-
-### 2. Rebuild de `SimulatedNao`
-
-Este paso es obligatorio si cambiaste algo en:
-
-- `RLSharedState`
-- `RLSkillProvider`
-- o cualquier cosa del camino RL dentro de SimRobot
-
-Comando:
-
-```bash
-cmake --build /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Build/Linux/CMake/Develop --target SimulatedNao
-```
-
-Si no haces esto, te puede pasar lo que pasó acá:
-
-- Python ve una estructura de shared memory
-- `libSimulatedNao.so` ve otra
-- y entonces `simrobot` parece “muerto”
-
-### 3. Crear el entorno Python local
-
-En este repo:
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-python3 -m venv .venv
-```
-
-### 4. Instalar dependencias Python
-
-```bash
-.venv/bin/pip install torch skrl pettingzoo
-```
-
-Notas:
-
-- se usó `venv` porque el Python del sistema estaba protegido por PEP 668
-- `torch` que bajó acá fue `2.11.0+cu130`
-- `skrl` quedó en `2.0.0`
-
-### 5. Usar `PYTHONPATH` correcto
-
-Mientras no instales `pybh` en `site-packages`, corre así:
-
-```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python
-```
-
-Eso hace que Python vea `pybh.controller` y `pybh.logs` recién compilados.
-
-## Cómo hacerlo funcionar TODO
-
-Acá van los flujos útiles, de menor a mayor complejidad.
-
-### 1. Smoke del bridge en `simrobot`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 smoke_test_skill_requests.py --backend simrobot
-```
-
-Qué valida:
-
-- que la escena real carga
-- que `obs_ready` vuelve a salir
-- que el bridge y `SimulatedNao` ya están recompilados y alineados
-
-Importante:
-
-- este modo necesita ejecutarse fuera de entornos muy restringidos si el
-  plugin intenta abrir sockets UDP
-
-### 2. Smoke del bridge en `simrobot_visible`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 smoke_test_skill_requests.py --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
-```
-
-Útil para:
-
-- validar el bridge con una instancia visible
-- verificar reseteos y requests directamente en la UI
-
-### 3. Experimento heurístico en `simrobot`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 10 --no-plot --backend simrobot --simrobot-profile 2d
-```
-
-Útil para:
-
-- validar el path embebido real completo
-- confirmar que ya sale observación RL
-
-### 4. Experimento heurístico en `simrobot_visible`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 heuristic_agent_experiment.py --episodes 3 --no-plot --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
-```
-
-Útil para:
-
-- validar el mismo loop heurístico sobre SimRobot visible
-
-### 5. Smoke RL con `MAPPO` sobre `simrobot`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend simrobot --mode smoke --smoke-steps 4
-```
-
-Qué valida:
-
-- `act`
-- `record_transition`
-- `post_interaction`
-- integración mínima del agente sobre SimRobot real
-
-### 6. Train corto con `MAPPO` sobre `simrobot`
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python .venv/bin/python train.py --backend simrobot --mode train --train-steps 8
-```
-
-Este es el smoke más importante de esta fase, porque junta:
-
-- agente `MAPPO`
-- bridge real
-- SimRobot embebido real
-
-## Visualización en vivo en SimRobot
-
-Estado actual:
-
-- el backend `simrobot` embebido de [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py) corre en modo headless
-- eso significa que la escena real `.ros2d` sí avanza, pero no aparece una ventana
-- en este repo no encontré escenas `.ros`; hoy el path listo es 2D, no 3D
-- la convención Python del stack quedó fijada así:
-  `walk.target_x/target_y/target_theta` se expresan en coordenadas globales de campo
-  y [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py) hace la conversión al frame que consume el backend real
-
-Ruta práctica para ver el agente vivo:
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --policy heuristic
-```
-
-Por defecto ahora corre en modo continuo hasta `Ctrl+C`.
-También usa la política heurística por defecto.
-Si quieres limitarlo:
-
-```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --steps 500
-```
-
-Si quieres volver al patrón fijo de depuración:
-
-```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py --launch --policy fixed
-```
-
-Ese script:
-
-- abre `Build/Linux/SimRobot/Develop/SimRobot`
-- carga `Config/Scenes/RL1v0.ros2d`
-- manda acciones RL por shared memory con `rl_set_action(...)`
-- lee observaciones con `rl_get_obs(...)`
-
-Uso esperado:
-
-- al abrirse SimRobot, la escena visible debe empezar a correr sola
-- si `RLSkillProvider` está cargado correctamente, el robot visible debe empezar a reaccionar en vivo
-
-Limitación actual:
-
-- este probe visible no hace `reset()` del mundo como el backend embebido
-- sirve para validar visualización/control en vivo, no todavía para episodios RL completos en UI
-
-## Partido híbrido `RL vs B-Human`
-
-También quedó una prueba mixta para observar interacciones reales contra
-`B-Human` sin convertir todo el equipo a RL.
-
-Uso:
-
-```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
-python3 run_rl_vs_bhuman_3v3.py --launch --seconds 60
-```
-
-Ese runner:
-
-- abre la escena `RLvsBH3v3_3D.ros2`
-- deja el `player 1` del equipo RL como `B-Human`
-- controla por RL solo `player 2` y `player 3`
-- deja al equipo rival completo en `B-Human`
-- imprime trazas `zk=activo/calls` y eventos `[zweikampf]`
-
-Si sale algo como `zk=0/23`, se interpreta asi:
-
-- `0`: `Zweikampf` no esta activo en esa observacion
-- `23`: la skill ya fue llamada 23 veces en la corrida
-
-## Estado funcional actual
-
-### Qué sí funciona
-
-- `pybh` corre Cognition real en proceso Python
-- `rl_set_action()` y `rl_get_obs()` funcionan
-- el bridge ya soporta las 8 variantes públicas de `SkillRequest`
-- `pass_target` ya viaja hasta C++
-- el host embebido de SimRobot carga escena real
-- `simrobot` volvió a emitir observación RL
-- `train.py` ya levanta `MAPPO` real
-- se puede hacer smoke y train corto sobre SimRobot real
-
-### Qué sigue faltando
-
-Esta fase no cierra todavía el stack final. Falta:
-
-- restaurar entorno multiagente real
-- restaurar CTDE real
-- recuperar el reward grande y las métricas B-Human-aware de `main`
-- recuperar curriculum manager
-- recuperar logging serio
-- refinar semántica real de:
-  - `pass`
-  - `block`
-  - `mark`
-  - `observe`
-
-En particular:
-
-- hoy `block` / `mark` / `observe` están soportadas de punta a punta en bridge
-- pero su semántica operativa sigue siendo mínima, pensada para smoke
-
-## Qué archivo mirar para cada cosa
-
-Si quieres entrar rápido a un tema:
-
-- acción RL: [action.py](/home/rafael/Documentos/Robocup2026/RL/action.py)
-- config local: [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py)
-- backend `pybh`: [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py)
-- entorno RL: [environment.py](/home/rafael/Documentos/Robocup2026/RL/environment.py)
-- smoke de skills: [smoke_test_skill_requests.py](/home/rafael/Documentos/Robocup2026/RL/smoke_test_skill_requests.py)
-- heurístico: [heuristic_agent_experiment.py](/home/rafael/Documentos/Robocup2026/RL/heuristic_agent_experiment.py)
-- train RL: [train.py](/home/rafael/Documentos/Robocup2026/RL/train.py)
-
-Del lado C++:
-
-- binding Python: [Module.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/Module.cpp)
-- shared state: [RLSharedState.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/RLSharedState.h)
-- reseteo visible en SimRobot: [LocalConsole.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/SimulatedNao/LocalConsole.cpp)
-- host embebido real: [SimRobotHost.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/SimRobotHost.cpp)
-- traducción RL -> `SkillRequest`: [RLSkillProvider.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/Infrastructure/RLSkillProvider/RLSkillProvider.cpp)
-
-## Cierre de fase
-
-Si hay que resumir esta fase en una frase:
-
-“dejamos de tener un script suelto hablando con B-Human y pasamos a tener una
-superficie RL unificada, con bridge completo de `SkillRequest`, SimRobot real
-rehabilitado y un `MAPPO` mínimo corriendo encima”.
-
-Eso todavía no es el sistema final, pero ya es una base honesta para construir
-la siguiente etapa sin parches raros ni contratos duplicados.
+Variables seen in `train.py`: `RL_RUN_MODE`, `RL_TRAIN_STEPS`, `RL_SMOKE_STEPS`, `RL_STAGE_ID`, `RL_MAX_STAGE_ID`, `RL_LEARNER_DEVICE`, `RL_BC_WARM_START`, `RL_BC_CHECKPOINT`, `RL_BC_REPLAY`, `RL_BC_REPLAY_DATASET`, and others.
+The default backend in `ScriptRunConfig` is `simrobot_visible`.
+
+Other verified entry points (argparse):
+
+| Command | Flags seen in the source |
+|---|---|
+| `python smoke_test_skill_requests.py` | `--backend {simrobot,simrobot_visible}`, `--simrobot-profile {2d,3d}`, `--launch-simrobot`, `--simrobot-bin` |
+| `python train_multiagent_production.py` | `--stage-id`; the `tools/*.sh` scripts also pass `--checkpoint` and `--dataset` |
+| `python train_production.py` | `--dataset`, `--output-dataset`, `--checkpoint`, `--prepare-only` |
+| `python train_defender_bc.py` | `--dataset`, `--steps`, `--batch-size`, `--lr`, `--init-checkpoint`, `--reference-checkpoint`, `--distill-weight`, `--output-dir`, ... |
+| `pytest test_*.py` | Contract tests; some may need `pybh` |
+
+The `tools/run_*.sh` scripts record the exact recipes used for each policy version (for example `tools/run_v4_2.sh`, `tools/train_merge_v5.sh`).
+These commands could not be executed during documentation work (the authors' `pybh` build was not usable in the documentation environment); flags are quoted from the source, not from `--help` output.
+
+## Data and runs policy
+
+- `runs/` is gitignored: datasets (`*.npz`), logs, telemetry and training checkpoints are not versioned.
+- Tracked deliverables: root `ppo_*.onnx` weights with their `ppo_*.json` manifests, and `pt_defender_47/checkpoint_stage8_step2500.pt` and `checkpoint_stage8_step10000.pt`.
+
+| Policy | Files |
+|---|---|
+| Striker | `ppo_striker_hsl2026.{onnx,json}` (+ `.onnx.data`) |
+| Defender | `ppo_defender_hsl2026.{onnx,json}` |
+| Team (striker v4.1, v4.2) | `ppo_team_hsl2026.*`, `ppo_team_hsl2026_v4_1.*`, `ppo_team_hsl2026_v4_2.*` |
+| Merged brain v5 | `ppo_team_hsl2026_v5_merged.{onnx,json}` |
+| Goalkeeper | `ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
+
+## Project documents
+
+| Document | Content |
+|---|---|
+| [docs/README.md](docs/README.md) | Index of all documentation |
+| [docs/BRANCHES.md](docs/BRANCHES.md) | Branch registry and consolidation record |
+| [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md) | Paper claims mapped to repository evidence |
+
+## Known gaps
+
+- The corpus sizes and several result figures in the paper come from results produced outside this repository (see [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md)).
+- Paper figures and `references.bib` are not in this repository.
+- `environment.yml` is out of date (Python version, missing `onnx`/`onnxruntime`/`pytest`).
+- The C++ repository URL is to be confirmed by the authors.
+- Most documentation is in Spanish and reflects work in progress.
+- No automated CI; tests are run by hand and part of them require a working `pybh` build.
