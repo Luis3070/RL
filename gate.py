@@ -27,8 +27,11 @@ import math
 import os
 from dataclasses import dataclass
 
+import torch
+
 from action import SKILL_ORDER
 from config import GOAL_X
+from observation import ObsIndex
 from pybh_backend import BackendObservation
 from reward import BALL_TRUSTED_MAX_AGE_MS, features_from_obs, goal_ball_distance_mm
 
@@ -265,3 +268,135 @@ class SkillGate:
             shoot_arm_progress=progress,
             allowed_skills=_allowed_skills(shoot_armed=st.shoot_armed, dribble_armed=st.dribble_armed),
         )
+
+
+# Skill columns the dynamic gate arms/disarms, and the obs columns carrying the
+# gate's armed flags (Design A: baked into the observation).
+_SHOOT_SKILL_IDX = SKILL_ORDER.index("shoot")
+_DRIBBLE_SKILL_IDX = SKILL_ORDER.index("dribble")
+_PASS_SKILL_IDX = SKILL_ORDER.index("pass")
+_BLOCK_SKILL_IDX = SKILL_ORDER.index("block")
+_OBSERVE_SKILL_IDX = SKILL_ORDER.index("observe")
+_MARK_SKILL_IDX = SKILL_ORDER.index("mark")
+_STAND_SKILL_IDX = SKILL_ORDER.index("stand")
+_WALK_SKILL_IDX = SKILL_ORDER.index("walk")
+_GATE_OBS_REQUIRED = int(ObsIndex.dribble_armed) + 1
+_TEAM_GATE_OBS_REQUIRED = int(ObsIndex.is_off_ball_support) + 1
+
+
+def gate_skill_mask_from_obs(observations: torch.Tensor) -> torch.Tensor:
+    """Per-step forbid-invalid mask over SKILL_ORDER, read from the baked obs columns.
+
+    Multiplicative (1=allowed, 0=forbidden). Reads only obs columns:
+      3 (ball_rel_x), 21 (nearest_opponent_front_dist),  ← defender block/mark threat
+      23 (shoot_armed), 24 (dribble_armed),
+      41 (pass_armed), 42 (observe_armed),
+      44 (is_striker), 45 (is_open_support), 46 (is_off_ball_support).
+
+    Behaviour:
+      * Legacy obs (shape < 25) → all-allowed (back-compat smoke tests).
+      * Obs in [25, 47) → single-agent contract preserved bit-identical:
+          shoot/dribble follow their armed flag; once finish-armed, stand/walk are
+          masked too. This matches the validated 4/5 single-agent baseline.
+      * Obs ≥ 47 with role bits set → role-conditioned forbid per §11.A.4:
+          - striker: standard single-agent gate, plus pass when pass_armed.
+          - open_support: stand+walk, plus block when dribble_armed.
+          - off_ball_support (defender): stand+walk, dribble (unexpected-possession
+            escape hatch), block when the ball is in front (obs ball_rel_x<1800mm) or
+            dribble_armed, and mark when an opponent is in front (obs
+            nearest_opponent_front_dist<1500mm). No shoot; pass is reached only after
+            assign_roles re-tags it striker on recovery.
+          - any non-striker may execute observe when observe_armed.
+      * Obs ≥ 47 with no role bits set (e.g. zero-padded single-agent rollout)
+        → falls back to the single-agent contract above.
+
+    Because the mask is a pure function of stored obs columns, MAPPO's update-time
+    recompute reproduces it exactly. Design A holds end-to-end.
+    """
+    batch = observations.shape[0]
+    mask = torch.ones((batch, len(SKILL_ORDER)), dtype=observations.dtype, device=observations.device)
+    if observations.shape[-1] < _GATE_OBS_REQUIRED:
+        return mask
+
+    shoot_armed = observations[:, int(ObsIndex.shoot_armed)] >= 0.5
+    dribble_armed = observations[:, int(ObsIndex.dribble_armed)] >= 0.5
+    finish_armed = shoot_armed | dribble_armed
+
+    # ---- Single-agent path (preserves the validated 4/5 contract bit-identical) -----
+    if observations.shape[-1] < _TEAM_GATE_OBS_REQUIRED:
+        mask[:, _SHOOT_SKILL_IDX] = shoot_armed.to(mask.dtype)
+        mask[:, _DRIBBLE_SKILL_IDX] = dribble_armed.to(mask.dtype)
+        mask[:, _STAND_SKILL_IDX] = (~finish_armed).to(mask.dtype)
+        mask[:, _WALK_SKILL_IDX] = (~finish_armed).to(mask.dtype)
+        return mask
+
+    # ---- Multi-agent role-conditioned path -----------------------------------------
+    pass_armed = observations[:, int(ObsIndex.pass_armed)] >= 0.5
+    observe_armed = observations[:, int(ObsIndex.observe_armed)] >= 0.5
+    is_striker = observations[:, int(ObsIndex.is_striker)] >= 0.5
+    is_open = observations[:, int(ObsIndex.is_open_support)] >= 0.5
+    is_off_ball = observations[:, int(ObsIndex.is_off_ball_support)] >= 0.5
+    has_role = is_striker | is_open | is_off_ball
+
+    # Default: stand and walk always allowed (never-forbid contract).
+    mask[:, _STAND_SKILL_IDX] = torch.ones_like(mask[:, _STAND_SKILL_IDX])
+    mask[:, _WALK_SKILL_IDX] = torch.ones_like(mask[:, _WALK_SKILL_IDX])
+
+    # No role bits set → fall back to single-agent gate (e.g. zero-padded legacy obs).
+    single_agent = ~has_role
+    sa_mask_shoot = shoot_armed & single_agent
+    sa_mask_dribble = dribble_armed & single_agent
+    sa_finish = finish_armed & single_agent
+    mask[:, _STAND_SKILL_IDX] = torch.where(single_agent, (~sa_finish).to(mask.dtype), mask[:, _STAND_SKILL_IDX])
+    mask[:, _WALK_SKILL_IDX] = torch.where(single_agent, (~sa_finish).to(mask.dtype), mask[:, _WALK_SKILL_IDX])
+
+    # Striker: shoot/dribble follow their armed flag; pass requires pass_armed.
+    # NOTE: pass stays striker-only on purpose — a defender that recovers the ball is
+    # re-assigned to `striker` by assign_roles' D1 ball-control override, so its
+    # clearance pass flows through this same striker arm. off_ball_support never holds
+    # the ball, so it never needs its own pass arm.
+    mask[:, _SHOOT_SKILL_IDX] = (shoot_armed & (is_striker | single_agent)).to(mask.dtype)
+    mask[:, _PASS_SKILL_IDX] = (pass_armed & is_striker).to(mask.dtype)
+    # Dribble allowed for striker (armed) AND for off-ball-support (armed; escape hatch).
+    mask[:, _DRIBBLE_SKILL_IDX] = (
+        (dribble_armed & is_striker)
+        | (dribble_armed & is_off_ball)
+        | sa_mask_dribble
+    ).to(mask.dtype)
+
+    # ---- Defender (off_ball_support) block/mark arming ------------------------------
+    # Recomputable purely from stored columns so MAPPO's update-time recompute is exact
+    # (Design A). Encoding: ball_rel_x = mm / x_range (signed), nearest_opponent_front
+    # _dist = clip(mm / x_range, 0, 1); x_range = 4500 (config.ACTION.x_range). These
+    # thresholds are an exact SUPERSET of teacher_defender's emission conditions (which
+    # read the same obs.ball_rel_x / obs.nearest_opponent_front_dist plus extra
+    # our-half + near-cover guards that only narrow emission), so no teacher block/mark
+    # label is ever masked to zero.
+    ball_rel_x = observations[:, int(ObsIndex.ball_rel_x)]
+    opp_front = observations[:, int(ObsIndex.nearest_opponent_front_dist)]
+    # block = intercept the ball line → ball in front (<1800mm).
+    block_threat = (ball_rel_x > 0.0) & (ball_rel_x < (1800.0 / 4500.0))
+    # mark = man-mark a runner → opponent in front (<1500mm).
+    mark_threat = (opp_front > 0.0) & (opp_front < (1500.0 / 4500.0))
+
+    # Block: off_ball_support when a ball/opponent threat is in front (or unexpected
+    # possession via dribble_armed); open_support keeps the legacy dribble_armed arm.
+    mask[:, _BLOCK_SKILL_IDX] = (
+        (is_off_ball & (block_threat | dribble_armed))
+        | (is_open & dribble_armed)
+    ).to(mask.dtype)
+
+    # Observe allowed for any non-striker when armed.
+    mask[:, _OBSERVE_SKILL_IDX] = (observe_armed & (~is_striker) & has_role).to(mask.dtype)
+
+    # Mark: armed only for off_ball_support with an opponent in front. teacher_defender
+    # now emits mark, so the head is BC-trained and is no longer a dead head that could
+    # win a masked argmax — it stays hard-forbidden for striker/open_support. For
+    # role-tagged rows the mask is the arm condition; no-role (zero-padded single-agent)
+    # rows keep their prior base value untouched.
+    mark_allowed = is_off_ball & mark_threat
+    mask[:, _MARK_SKILL_IDX] = torch.where(
+        has_role, mark_allowed.to(mask.dtype), mask[:, _MARK_SKILL_IDX]
+    )
+
+    return mask
