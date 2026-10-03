@@ -17,3 +17,7 @@ AGENTS.md
 .venv/
 .deps/
 runs/
+
+# Local SDD / agent tooling (not part of the repository)
+.atl/
+openspec/
