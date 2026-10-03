@@ -1,8 +1,8 @@
 # Repository layout and package map
 
-Design for the Python package that replaces the 80 flat root `*.py` modules.
-Status: **design only**. No module has been moved yet; the table below is the
-contract for the move.
+Layout of the Python package that replaced the 80 flat root `*.py` modules.
+Status: **implemented**. The module map below is also the migration table from
+the old flat names (used by older docs and notes) to the new paths.
 
 ## Purpose
 
@@ -181,11 +181,11 @@ core  <-  curriculum  <-  teachers  <-  env  <-  datasets  <-  training  <-  eva
 diagnostics -> core, curriculum, teachers, env     (nothing imports diagnostics)
 ```
 
-Remaining back-edges in the layered graph (all must be fixed or accepted in T3):
+Remaining back-edges in the layered graph (see "Deviations" for what was done):
 
 | Edge | Where | Resolution |
 |---|---|---|
-| `datasets -> training` | `teacher_multiagent_dataset` imports `gate_skill_mask_from_obs` from `train` (3 lazy imports, lines 304, 908, 1281) | Move the function to `rlfootball/core/gate.py`; re-export from `train` so `tests` and `tools` keep working. This is the only code move T3 needs beyond import rewriting. |
+| `datasets -> training` | `teacher_multiagent_dataset` imports `gate_skill_mask_from_obs` from `train` (3 lazy imports, lines 304, 908, 1281) | Move the function to `rlfootball/core/gate.py`; re-export from `train` so `tests` and `tools` keep working. This is the only code move needed beyond import rewriting. |
 | `training -> datasets` (forward, fine) | `train_defender_bc`, `run_goalkeeper_production` | none needed |
 
 Not removable by mapping alone: the `datasets -> training` edge. With the function moved
@@ -230,3 +230,16 @@ only risk is stale bare `import config` in code that relied on the repo root bei
 - Use `git mv` so history follows; do the move in one commit per subpackage.
 - Policy artifacts (`ppo_*.onnx/json`, C++ side) are loaded by filename from `models/`, not by module name: unaffected.
 - `ROOT_DIR` depth changes from `.` to `rlfootball/core/`; every `ROOT = Path(__file__).resolve().parent` must be re-pointed.
+
+## Deviations
+
+Differences between the design above and what was implemented:
+
+- `gate_skill_mask_from_obs` (with its eight `_*_SKILL_IDX` constants and two `_*_GATE_OBS_REQUIRED` constants) now lives in `rlfootball/core/gate.py`; `rlfootball/training/train.py` re-exports it. The three lazy imports in `teacher_multiagent_dataset` and the other importers still import it from `train`, so the `datasets -> training` back-edge remains as a function-level import.
+- `tools/**` keep their `sys.path` insert of the repo root (they run as plain scripts, and the package is not installed). Root modules lose only the `sys.path` inserts that added the old flat directory; the B-Human `Make/Python` inserts in `pybh_backend`, `run_rl_vs_bhuman_3v3` and `diag_n6_slots` stay.
+- Repo-root lookups use `Path(__file__).resolve().parents[2]` directly (not `ROOT_DIR` from `config`), to keep each file self-contained. `diag_n6_slots` now climbs three levels to reach the sibling `SabanaHerons2026`.
+- Stale imports left over from the `tools/` regrouping were corrected (`tools.export_ppo_policy` -> `tools.export.export_ppo_policy`, and similar in `run_goalkeeper_production`, `train_stand_repair`, `train_param_repair`, `train_goalkeeper_ppo_closedloop`), plus the `tools/verify_goalkeeper_action_space_truth.py` path in `run_goalkeeper_production`.
+- `probe_protocol_experiment` re-runs itself with `python -m rlfootball.diagnostics.probe_protocol_experiment` instead of the file path.
+- Inline Python in four `.sh` heredocs now imports `rlfootball.core.*`.
+- Smoke test: `python -m tests.smoke_test_skill_requests` (run from the repo root).
+- `run_goalkeeper_production` and `train_goalkeeper` import `evaluate_step_gk` from `reward`, which does not define it. This predates the refactor and was left unchanged.

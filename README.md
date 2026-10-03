@@ -16,8 +16,8 @@ See [docs/README.md](docs/README.md) for the index.
 | This repository | Python | Environments, teachers, dataset generation, BC/PPO training, evaluation, ONNX export |
 | `SabanaHerons2026` (B-Human fork; URL to be confirmed by the authors) | C++ | SimRobot, the `pybh` Python binding, `RLSharedState` bridge, native ONNX inference |
 
-Python talks to B-Human in-process through `pybh` (see `pybh_backend.py`).
-`config.py` expects `SabanaHerons2026` as a sibling directory of this repository.
+Python talks to B-Human in-process through `pybh` (see `rlfootball/core/pybh_backend.py`).
+`rlfootball/core/config.py` expects `SabanaHerons2026` as a sibling directory of this repository.
 The old `bridge/` subprocess stack was removed in commit `a1da9e9` ("pybh-clean: drop legacy subprocess stack").
 
 Required `SabanaHerons2026` branches:
@@ -31,16 +31,15 @@ Required `SabanaHerons2026` branches:
 
 | Path | Purpose |
 |---|---|
-| `train.py`, `train_multiagent.py` | Main PPO entry points (single-agent, multi-agent) |
-| `train_production.py`, `train_multiagent_production.py` | Production wrappers with BC warm start and curriculum stages |
-| `train_bc.py`, `train_defender_bc.py`, `train_goalkeeper*.py`, `train_*_repair.py` | BC and fine-tuning/repair trainers |
-| `environment.py`, `parallel_environment.py`, `team_parallel_environment.py`, `wrapper.py` | Environments and wrappers |
-| `pybh_backend.py`, `config.py` | `pybh` backend (SimRobot embedded/visible) and central configuration |
-| `observation.py`, `action.py`, `goalkeeper_action.py`, `reward.py`, `gate.py` | Observation (47-dim), action space, reward, skill gating |
-| `teacher_*.py`, `multiagent_teacher.py`, `goalkeeper_teacher.py`, `generate_defender_dataset.py`, `merge_*.py` | Rule-based teachers and dataset generation/merging |
-| `behavioral_evaluator.py`, `model_evaluator.py`, `teacher_evaluator.py`, `behavioral_stability*.py` | Evaluation and stability checks |
-| `test_*.py`, `smoke_test_skill_requests.py` | Contract tests and the bridge smoke test |
-| `gui_visible_*.py`, `live_simrobot_probe*.py`, `visualize_simrobot_skills.py`, `run_rl_vs_bhuman_3v3.py` | Visible-SimRobot checks and RL vs B-Human runs |
+| `rlfootball/core/` | Configuration, observation (47-dim), action space, reward, skill gate, `pybh` backend, wire audit |
+| `rlfootball/curriculum/` | Curriculum stage specs and production scenarios |
+| `rlfootball/teachers/` | Rule-based teachers (single-agent, multi-agent, goalkeeper, defender) |
+| `rlfootball/env/` | Environments and the skrl wrapper |
+| `rlfootball/datasets/` | Teacher dataset collection, merging and audits |
+| `rlfootball/training/` | PPO/MAPPO entry points (`train`, `train_multiagent`), production wrappers, BC and repair trainers |
+| `rlfootball/evaluation/` | Behavioral, model and teacher evaluators, stability checks, RL vs B-Human 3v3 |
+| `rlfootball/diagnostics/` | Visible-SimRobot checks, live probes, sweeps, visualisation |
+| `tests/` | Contract tests and the bridge smoke test |
 | `tools/` | Grouped by purpose: `run/` (launchers, `run_*.sh`), `export/` (ONNX export), `eval/` (evaluation, validation, probes), `dataset/` (dataset generation and audits), `misc/` |
 | `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
 | `models/` | Tracked policy deliverables and manifests (see below) |
@@ -65,7 +64,7 @@ Minimal setup, following `scripts/setup_validation_env.sh`:
 
 ```bash
 scripts/setup_validation_env.sh                      # creates .venv, installs torch, skrl, pettingzoo, ...
-scripts/run_with_validation_env.sh python3 diag_n6_slots.py   # sets PYTHONPATH to ../SabanaHerons2026/Make/Python
+scripts/run_with_validation_env.sh python3 -m rlfootball.diagnostics.diag_n6_slots   # sets PYTHONPATH to ../SabanaHerons2026/Make/Python
 ```
 
 `pybh` must be built from `SabanaHerons2026` (`Make/Python`, `python3 setup.py build_ext --inplace`),
@@ -74,25 +73,28 @@ The `RLSharedState` segment name used by this repo is `/pybh_rl_shared_state_v3`
 
 ## Running
 
-`train.py` and `train_multiagent.py` have no command-line flags. They read a `ScriptRunConfig` and override it with `RL_*` environment variables (`_run_cfg_from_env` in `train.py`).
+Run every command from the repository root; entry points are modules (`python -m rlfootball.<subpackage>.<module>`), and the `tools/` and `scripts/` launchers also assume the repository root.
+Older documents and notes use the pre-refactor flat names (`train.py`, `config.py`, ...); the old-to-new table is in [docs/REPO_LAYOUT.md](docs/REPO_LAYOUT.md).
+
+`rlfootball/training/train.py` and `rlfootball/training/train_multiagent.py` have no command-line flags. They read a `ScriptRunConfig` and override it with `RL_*` environment variables (`_run_cfg_from_env` in `rlfootball/training/train.py`).
 
 ```bash
-RL_RUN_MODE=smoke RL_SMOKE_STEPS=4 python train.py
-RL_RUN_MODE=train RL_TRAIN_STEPS=800000 python train_multiagent.py
+RL_RUN_MODE=smoke RL_SMOKE_STEPS=4 python -m rlfootball.training.train
+RL_RUN_MODE=train RL_TRAIN_STEPS=800000 python -m rlfootball.training.train_multiagent
 ```
 
-Variables seen in `train.py`: `RL_RUN_MODE`, `RL_TRAIN_STEPS`, `RL_SMOKE_STEPS`, `RL_STAGE_ID`, `RL_MAX_STAGE_ID`, `RL_LEARNER_DEVICE`, `RL_BC_WARM_START`, `RL_BC_CHECKPOINT`, `RL_BC_REPLAY`, `RL_BC_REPLAY_DATASET`, and others.
+Variables seen in `rlfootball/training/train.py`: `RL_RUN_MODE`, `RL_TRAIN_STEPS`, `RL_SMOKE_STEPS`, `RL_STAGE_ID`, `RL_MAX_STAGE_ID`, `RL_LEARNER_DEVICE`, `RL_BC_WARM_START`, `RL_BC_CHECKPOINT`, `RL_BC_REPLAY`, `RL_BC_REPLAY_DATASET`, and others.
 The default backend in `ScriptRunConfig` is `simrobot_visible`.
 
 Other verified entry points (argparse):
 
 | Command | Flags seen in the source |
 |---|---|
-| `python smoke_test_skill_requests.py` | `--backend {simrobot,simrobot_visible}`, `--simrobot-profile {2d,3d}`, `--launch-simrobot`, `--simrobot-bin` |
-| `python train_multiagent_production.py` | `--stage-id`; the `tools/run/*.sh` scripts also pass `--checkpoint` and `--dataset` |
-| `python train_production.py` | `--dataset`, `--output-dataset`, `--checkpoint`, `--prepare-only` |
-| `python train_defender_bc.py` | `--dataset`, `--steps`, `--batch-size`, `--lr`, `--init-checkpoint`, `--reference-checkpoint`, `--distill-weight`, `--output-dir`, ... |
-| `pytest test_*.py` | Contract tests; some may need `pybh` |
+| `python -m tests.smoke_test_skill_requests` | `--backend {simrobot,simrobot_visible}`, `--simrobot-profile {2d,3d}`, `--launch-simrobot`, `--simrobot-bin` |
+| `python -m rlfootball.training.train_multiagent_production` | `--stage-id`; the `tools/run/*.sh` scripts also pass `--checkpoint` and `--dataset` |
+| `python -m rlfootball.training.train_production` | `--dataset`, `--output-dataset`, `--checkpoint`, `--prepare-only` |
+| `python -m rlfootball.training.train_defender_bc` | `--dataset`, `--steps`, `--batch-size`, `--lr`, `--init-checkpoint`, `--reference-checkpoint`, `--distill-weight`, `--output-dir`, ... |
+| `pytest` (reads `pytest.ini`, runs `tests/`) | Contract tests; some may need `pybh` |
 
 The `tools/run/*.sh` scripts record the exact recipes used for each policy version (for example `tools/run/run_v4_2.sh`, `tools/run/train_merge_v5.sh`).
 These commands could not be executed during documentation work (the authors' `pybh` build was not usable in the documentation environment); flags are quoted from the source, not from `--help` output.
