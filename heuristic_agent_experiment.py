@@ -297,7 +297,7 @@ def main() -> None:
     print_summary(results, label)
     print(f"  Tiempo total: {elapsed:.1f}s  ({elapsed / args.episodes:.2f}s/episodio)")
 
-    save_csv(results, _SCRIPT_DIR / "heuristic_experiment_results.csv")
+    save_csv(results, _SCRIPT_DIR / "results" / "heuristic_experiment_results.csv")
     if not args.no_plot:
         plot_results(results, _SCRIPT_DIR / "heuristic_experiment_plot.png")
 
