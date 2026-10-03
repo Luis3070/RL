@@ -16,12 +16,12 @@ para continuar es `checkpoint_stage8_step4000.pt`.
 Estado: pendiente para cada corrida nueva.
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 source .venv/bin/activate
 unset PYBH_RL_SHM_NAME
 
-export PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL
-export LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
+export PYTHONPATH=/Make/Python:
+export LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
 export RL_GATE_SHOOT_OPEN_ENTER=0.30
 export RL_GATE_SHOOT_OPEN_EXIT=0.20
 ```
@@ -39,7 +39,7 @@ Estado: hecho una vez en esta sesion, repetir si se recompila algo de
 `RLSharedState`, `LocalConsole`, `Module.cpp`, SimRobot o PythonController.
 
 ```bash
-cd /home/rafael/Documentos/HSL/SabanaHerons2026
+cd 
 env CCACHE_DIR=/tmp/ccache-hsl cmake --build Build/Linux/CMake/Develop --target SimRobot SimulatedNao -j2
 env CCACHE_DIR=/tmp/ccache-hsl cmake --build Build/Linux/Python --target PythonController -j2
 cp Build/Linux/Python/Release/controller.cpython-312-x86_64-linux-gnu.so Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
@@ -57,7 +57,7 @@ PASS esperado:
 Estado: PASS.
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 RL_MA_TEACHER_STAGE=8 RL_MA_TEACHER_DRY_RUN=1 .venv/bin/python teacher_multiagent_dataset.py
 ```
 
@@ -77,11 +77,11 @@ Estado: PASS de infraestructura. Con pocos steps puede escribir 0 filas por
 filtros, eso es aceptable para este paso.
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 unset PYBH_RL_SHM_NAME
 
-PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL \
-LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
+PYTHONPATH=/Make/Python: \
+LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_TEACHER_STAGE=8 \
@@ -111,11 +111,11 @@ Este paso no produce dataset final. Solo confirma que el pipeline puede escribir
 muestras.
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 unset PYBH_RL_SHM_NAME
 
-PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL \
-LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
+PYTHONPATH=/Make/Python: \
+LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_TEACHER_STAGE=8 \
@@ -181,12 +181,12 @@ necesario probar 2 SimRobot todavia.
 Ejecutar chunked. No usar filtros relajados.
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 source .venv/bin/activate
 unset PYBH_RL_SHM_NAME
 
-export PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL
-export LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
+export PYTHONPATH=/Make/Python:
+export LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
 export RL_GATE_SHOOT_OPEN_ENTER=0.30
 export RL_GATE_SHOOT_OPEN_EXIT=0.20
 
@@ -400,12 +400,12 @@ Resumen de evaluacion:
 Comando usado para el run inicial:
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 source .venv/bin/activate
 unset PYBH_RL_SHM_NAME
 
-export PYTHONPATH=/home/rafael/Documentos/HSL/RL:/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python
-export LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
+export PYTHONPATH=:/Make/Python
+export LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH
 export RL_SCENE_NAME=RLMAStage7_3D
 export RL_MA_PROD_PLAYERS=1
 export RL_MA_PROD_SIMROBOT_LAUNCH=1

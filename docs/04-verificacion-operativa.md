@@ -28,7 +28,7 @@ python3 -m py_compile \
 ## Verificar superficie expuesta
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 - <<'PY'
 import pybh.controller as pybh
 print("has_reset_world_extended", hasattr(pybh, "rl_reset_world_extended"))
@@ -42,14 +42,14 @@ Esperado:
 ## Smoke embebido `2d` / `3d`
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 smoke_test_skill_requests.py --backend simrobot --simrobot-profile 2d
 ```
 
 Y:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 smoke_test_skill_requests.py --backend simrobot --simrobot-profile 3d
 ```
 
@@ -62,21 +62,21 @@ Esperado:
 ## Smoke visible
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 smoke_test_skill_requests.py --backend simrobot_visible --simrobot-profile 3d --launch-simrobot
 ```
 
 ## Verificación heurística
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 heuristic_agent_experiment.py --episodes 3 --no-plot --backend simrobot --simrobot-profile 2d
 ```
 
 ## Matriz de skills
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 validate_simrobot_matrix.py \
   --steps-per-skill 20 \
   --output docs/06-simrobot-skill-matrix.md

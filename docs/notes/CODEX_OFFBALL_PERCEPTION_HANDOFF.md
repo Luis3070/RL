@@ -70,5 +70,5 @@ rebuild, also see `CODEX_SESSION_LESSONS_20260618.md` [removed from this branch;
 5. Diagnostic logging removed/env-gated-off. Changes uncommitted.
 
 ## ENV (single sim session)
-PYTHONPATH=/home/luis/GitHub/RL:/home/luis/GitHub/SabanaHerons2026/Make/Python ; DISPLAY=:1 ;
+PYTHONPATH=:/Make/Python ; DISPLAY=:1 ;
 python=~/anaconda3/envs/RLNAO/bin/python ; ALWAYS `pgrep -x SimRobot` empty before launch.

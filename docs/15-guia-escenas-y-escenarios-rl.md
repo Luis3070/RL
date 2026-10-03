@@ -34,7 +34,7 @@ La escena define el mundo cargado por SimRobot:
 
 Ejemplo base:
 
-- [RL1v0_3D.ros2](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RL1v0_3D.ros2)
+- [RL1v0_3D.ros2](/Config/Scenes/RL1v0_3D.ros2)
 
 ### 2. Archivo `.con`
 
@@ -46,7 +46,7 @@ El `.con` no define geometria. Define comandos de consola al abrir la escena:
 
 Ejemplo base:
 
-- [RL1v0_3D.con](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RL1v0_3D.con)
+- [RL1v0_3D.con](/Config/Scenes/RL1v0_3D.con)
 
 En este proyecto, para escenas RL naturales, el `.con` debe arrancar el juego en estado activo:
 
@@ -73,8 +73,8 @@ El escenario RL 3D actual es:
 
 Piezas especialmente importantes:
 
-- [threads.cfg](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenarios/4v4_RL3D/threads.cfg)
-- [setupPosesProvider.cfg](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenarios/4v4_RL3D/setupPosesProvider.cfg)
+- [threads.cfg](/Config/Scenarios/4v4_RL3D/threads.cfg)
+- [setupPosesProvider.cfg](/Config/Scenarios/4v4_RL3D/setupPosesProvider.cfg)
 
 ### 4. Python `live_simrobot_probe.py`
 
@@ -85,7 +85,7 @@ El probe visible no solo observa. Tambien puede pisar la pose inicial:
 
 Archivo:
 
-- [live_simrobot_probe.py](/home/rafael/Documentos/Robocup2026/RL/live_simrobot_probe.py)
+- [live_simrobot_probe.py](/live_simrobot_probe.py)
 
 ## Minimo que debe tener una escena nueva
 
@@ -129,7 +129,7 @@ Eso no es decorativo. Hoy el bridge y varios bypass de debug estan pensados para
 
 Referencias:
 
-- [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py)
+- [config.py](/config.py)
 - `TEAM_NUMBER = 24`
 
 ### Robot controlado por Python
@@ -141,7 +141,7 @@ Por default, Python controla:
 
 Referencias:
 
-- [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py)
+- [config.py](/config.py)
 - `PLAYER_NUMBER = 1`
 
 Si cambias el robot visible o el player number, documentalo tambien en Python o vas a terminar mandando acciones al robot equivocado.
@@ -195,7 +195,7 @@ La forma mas estable que usamos fue:
 
 Referencia:
 
-- [RL1v0_3D_extra_aligned.ros2](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RL1v0_3D_extra_aligned.ros2)
+- [RL1v0_3D_extra_aligned.ros2](/Config/Scenes/RL1v0_3D_extra_aligned.ros2)
 
 Notas practicas:
 
@@ -251,7 +251,7 @@ Constantes actuales:
 
 Archivo:
 
-- [live_simrobot_probe.py](/home/rafael/Documentos/Robocup2026/RL/live_simrobot_probe.py)
+- [live_simrobot_probe.py](/live_simrobot_probe.py)
 
 Entonces:
 
@@ -285,7 +285,7 @@ El caso mas comun:
 
 Referencia:
 
-- [setupPosesProvider.cfg](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenarios/4v4_RL3D/setupPosesProvider.cfg)
+- [setupPosesProvider.cfg](/Config/Scenarios/4v4_RL3D/setupPosesProvider.cfg)
 
 Ahí se ve, por ejemplo, que `player 1` arranca en:
 
@@ -296,7 +296,7 @@ Ahí se ve, por ejemplo, que `player 1` arranca en:
 
 No fue el culpable en nuestras pruebas porque en `field_e` esta apagado:
 
-- [staticInitialPoseProvider.cfg](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Locations/field_e/staticInitialPoseProvider.cfg)
+- [staticInitialPoseProvider.cfg](/Config/Locations/field_e/staticInitialPoseProvider.cfg)
 - `isActive = false`
 
 ## Regla operativa para poses
@@ -426,26 +426,26 @@ Antes de perder tiempo depurando:
 ### Probe visible 3D respetando escena inicial
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+cd 
+PYTHONPATH=/Make/Python \
 python3 live_simrobot_probe.py --launch --policy heuristic --simrobot-profile 3d --no-reset
 ```
 
 ### Probe visible con escena específica
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+cd 
+PYTHONPATH=/Make/Python \
 python3 live_simrobot_probe.py --launch --policy heuristic --simrobot-profile 3d \
-  --scene /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RL1v0_3D_extra_aligned.ros2 \
+  --scene /Config/Scenes/RL1v0_3D_extra_aligned.ros2 \
   --no-reset
 ```
 
 ### Wrapper que usa escena extra por default
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+cd 
+PYTHONPATH=/Make/Python \
 python3 live_simrobot_probe_extra.py --launch --policy heuristic --simrobot-profile 3d --no-reset
 ```
 

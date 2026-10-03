@@ -349,7 +349,7 @@ Presupuesto de episodio: `RL_MA_TEACHER_MAX_STEPS=600`. Los guards existentes
 ```bash
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 export RL_MA_TEACHER_COLLISION_SUSTAIN_STEPS=16
-export PYTHONPATH=/home/luis/GitHub/RL
+export PYTHONPATH=
 
 # Chunked: 3 chunks × 8 episodios. Un freeze = un chunk perdido.
 for i in 1 2 3; do

@@ -86,8 +86,8 @@ Esto se activa con:
 Uso:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+cd 
+PYTHONPATH=/Make/Python \
 python3 run_rl_vs_bhuman_3v3.py --launch --seconds 60
 ```
 

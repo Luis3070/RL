@@ -17,7 +17,7 @@ Result:
 - `Play2026` adds `lastKickTimestamp` and `lastKickWasOutsideCenterCircle`, but still no `activity`.
 
 Therefore the current RL bridge uses a derived proxy in
-[SkillBehaviorControl.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/BehaviorControl/SkillBehaviorControl/SkillBehaviorControl.cpp):
+[SkillBehaviorControl.cpp](/Src/Modules/BehaviorControl/SkillBehaviorControl/SkillBehaviorControl.cpp):
 
 - `kicking`: `shootingTo` is set or `passTarget >= 0`
 - `dribbling`: teammate has a fresh ball and the ball is within close-control distance
@@ -42,8 +42,8 @@ The exported team ball is backed by `TeammatesBallModel`, produced by
 
 Relevant code:
 
-- [TeammatesBallModel.h](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Representations/Modeling/TeammatesBallModel.h)
-- [TeammatesBallModelProvider.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Modules/Modeling/TeammatesBallModelProvider/TeammatesBallModelProvider.cpp)
+- [TeammatesBallModel.h](/Src/Representations/Modeling/TeammatesBallModel.h)
+- [TeammatesBallModelProvider.cpp](/Src/Modules/Modeling/TeammatesBallModelProvider/TeammatesBallModelProvider.cpp)
 
 Important properties:
 

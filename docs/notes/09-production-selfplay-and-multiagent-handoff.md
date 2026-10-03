@@ -22,7 +22,7 @@ Hard constraints (do NOT relax — see `docs/05-premisas-irrompibles.md`):
 - Use **visible** SimRobot only (`simrobot_visible` / `3d_visible`); embedded preflight crashes at reset.
 - Shoot band stays **2.5–3.0 m** (field constraint).
 - Do NOT use `conda run`; always:
-  `source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO && cd /home/luis/GitHub/RL && PYTHONPATH=/home/luis/GitHub/RL python <script>`
+  `source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO && cd  && PYTHONPATH= python <script>`
 
 ---
 
@@ -36,9 +36,9 @@ State at handoff:
 ### 1.1 Launch the corrected fine-tune
 
 ```
-source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO && \
-cd /home/luis/GitHub/RL && \
-PYTHONPATH=/home/luis/GitHub/RL python train_production.py
+source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO && \
+cd  && \
+PYTHONPATH= python train_production.py
 ```
 
 Optional overrides (env vars; all defaults set in the wrapper):
@@ -63,7 +63,7 @@ If `bc_beta` collapses to <0.02 before 15k, the BC half-life is still too short 
 ### 1.3 Production behavioral eval (mandatory before any self-play step)
 
 ```
-PYTHONPATH=/home/luis/GitHub/RL python behavioral_evaluator.py
+PYTHONPATH= python behavioral_evaluator.py
 ```
 Reads checkpoint from `CHECKPOINT_PATH` inside `behavioral_evaluator.py` (no argparse). Update to the new checkpoint before running.
 

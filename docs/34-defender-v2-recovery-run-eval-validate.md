@@ -35,7 +35,7 @@ validación: validamos pase-de-salida + conducir-fuera como la conducta de despe
 ## Requisitos de entorno
 
 - Pasos de **dataset/entrenamiento/sim**: Linux con `pybh` compilado
-  (`PYTHONPATH=/home/luis/GitHub/SabanaHerons2026/Make/Python`), conda `RLNAO`, `DISPLAY`
+  (`PYTHONPATH=/Make/Python`), conda `RLNAO`, `DISPLAY`
   activo. UNA sola sesión de sims, máx 4 slots, todo *chunked* (un freeze = un chunk).
 - Paso **offline** (semáforo): tu `offline_team_eval.py` sobre el ONNX exportado — corre
   en Windows sin pybh, como hiciste con v2b.
@@ -49,7 +49,7 @@ Incluye automáticamente el escenario nuevo `defense_recovery_clear` (ya está e
 `team_defense_scenarios` y en `DEFAULT_STAGE8_SCENARIO_WEIGHTS`).
 
 ```bash
-export PYTHONPATH=/home/luis/GitHub/RL:/home/luis/GitHub/SabanaHerons2026/Make/Python
+export PYTHONPATH=:/Make/Python
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 export RL_MA_TEACHER_COLLISION_SUSTAIN_STEPS=16
 
