@@ -161,7 +161,7 @@ Add `docs/NN-title.md` with the next free number (the highest is 42; 08 is absen
 
 ### Branch and PR workflow
 
-1. Branch from the integration branch agreed by the team (see [BRANCHES.md](BRANCHES.md)); one feature or fix per branch.
+1. Branch from `rl-v4.2-multiagent-gk`, the current integration branch (the most recently updated project branch; see [BRANCHES.md](BRANCHES.md)); one feature or fix per branch. Once this layout lands on `main`, branch from `main` instead.
 2. Commit in small, reviewable units with Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), keeping tests and docs with the change.
 3. Never commit `runs/`, `.env`, datasets (`*.npz`), logs (`*.log`), or credentials. They are gitignored; do not force-add them.
 4. Open a PR only after the checklist in section 5 passes. In the description state what changed, which old names it touches, and what was run.
