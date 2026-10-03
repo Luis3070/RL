@@ -3,7 +3,7 @@
 Index of every file under `docs/` (working notes live in `docs/notes/`). Most documents are working logs written during development; many are in Spanish (column `Lang`).
 Descriptions are derived from each file's title and opening lines.
 Most documents refer to modules by their pre-refactor flat names (for example `train.py`); the old-to-new table is in [REPO_LAYOUT.md](REPO_LAYOUT.md).
-Related: [root README](../README.md), [branch registry](BRANCHES.md), [paper traceability](PAPER_TRACEABILITY.md).
+Related: [root README](../README.md), [project structure and integration guide](PROJECT_STRUCTURE.md), [branch registry](BRANCHES.md), [paper traceability](PAPER_TRACEABILITY.md).
 
 Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `defender`, `goalkeeper`, `multiagent`, `audit` (validation, evaluation, stability).
 
@@ -55,6 +55,7 @@ Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `de
 | [40-obs26-stability-repair-setup.md](40-obs26-stability-repair-setup.md) | Obs-26 setup to repair the embedded PPO (renumbered from 28) | audit | ES |
 | [41-defender-obs26-pipeline-canonico.md](41-defender-obs26-pipeline-canonico.md) | Canonical obs-26 defender pipeline (renumbered from 29) | defender | ES |
 | [42-recuperacion-defender-onnx-a-pt.md](42-recuperacion-defender-onnx-a-pt.md) | Short recovery of the defender `.pt` from its ONNX (renumbered from 30) | defender | ES |
+| [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and rules for integrating new work | - | EN |
 | [README.md](README.md) | This index | - | EN |
 
 Numbering notes: document 08 is absent; two files share number 25 and two share number 35.
