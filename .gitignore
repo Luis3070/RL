@@ -28,9 +28,5 @@ openspec/
 /dev/shm/
 runs/tmp_*/
 *.partial.npz
-# Keep the commit clean: ONNX weights + vital .py + transplant docs are tracked;
-# generated manifests, shell runners, and Codex handoffs are not.
-ppo_*.json
-tools/*.sh
-CODEX_*.md
+# ONNX weights, policy manifests (ppo_*.json) and run scripts (tools/*.sh) are tracked.
 # NOTE: ppo_*.onnx (weights) at repo ROOT ARE deliverables — tracked, not ignored.
