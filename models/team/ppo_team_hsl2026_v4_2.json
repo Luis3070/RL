@@ -30,7 +30,7 @@
     "is_open_support": 45,
     "is_off_ball_support": 46
   },
-  "checkpoint": "/home/luis/GitHub/RL/runs/multiagent_v4_2/checkpoint_stage7_step12000.pt",
+  "checkpoint": "runs/multiagent_v4_2/checkpoint_stage7_step12000.pt",
   "checkpoint_sha256": "78176eb5f005db3ecc8b10f2b7d36ff4f424d573710e0d12b60fcfb762ac0069",
   "onnx_sha256": "1de359e735d997ea9bcb60532fb27fc3cae4605426476f2a826fde4324324633",
   "normalization_contract": "ppo_obs_v47_team_hsl2026",

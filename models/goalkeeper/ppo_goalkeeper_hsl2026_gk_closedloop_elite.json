@@ -1,6 +1,6 @@
 {
   "bridge_note": "intercept_* actions require the GK C++ SkillRequest bridge for native execution",
-  "checkpoint": "/home/luis/GitHub/RL/runs/goalkeeper_ppo/ppo_gk_closedloop_20260619_120752/checkpoint_gk_closedloop.pt",
+  "checkpoint": "runs/goalkeeper_ppo/ppo_gk_closedloop_20260619_120752/checkpoint_gk_closedloop.pt",
   "checkpoint_sha256": "c0713fe9a629087ffd1c2ffd581b96528b68f2b8f687446e9b3857d94cee9ba3",
   "format": "onnx",
   "obs_size_contract": 64,

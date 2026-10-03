@@ -29,7 +29,7 @@
     "is_open_support": 45,
     "is_off_ball_support": 46
   },
-  "checkpoint": "/home/luis/GitHub/RL/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt",
+  "checkpoint": "runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt",
   "checkpoint_sha256": "f84d3b1bb9eee279def9a1eb8b446a6bdc9b631f3eb22618cf25d7bef25a0a13",
   "onnx_sha256": "7126a01ccda2de17fa63af6d2067d29edd505d9602ca8c50fea83483a75e3320",
   "normalization_contract": "ppo_obs_v47_team_hsl2026",
