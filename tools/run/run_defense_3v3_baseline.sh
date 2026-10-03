@@ -5,8 +5,9 @@
 # real Design-A gate applied. Sequential single-sim. Reads goals_conceded_rate
 # + defender_* from each run's eval_summary.csv.
 set -u
-REPO=/home/luis/GitHub/RL
-export PYTHONPATH="$REPO:/home/luis/GitHub/SabanaHerons2026/Make/Python"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
 export DISPLAY="${DISPLAY:-:1}"
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 PY="${PY:-$HOME/anaconda3/envs/RLNAO/bin/python}"

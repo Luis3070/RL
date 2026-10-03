@@ -8,8 +8,9 @@
 # CONTINGENT_HOLD=0 + lifted hold bonuses + triangle-forcing pool. Warm-start v4.2@12000 (+KL anchor)
 # preserves pass 99.9% + 5/5 shot discipline.
 set -u
-REPO=/home/luis/GitHub/RL
-export PYTHONPATH="$REPO:/home/luis/GitHub/SabanaHerons2026/Make/Python"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
 export DISPLAY="${DISPLAY:-:1}"
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 export RL_MA_TEACHER_VISIBLE_SCENE_NAME=RL1v0_3D_visible

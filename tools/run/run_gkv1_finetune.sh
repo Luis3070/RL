@@ -3,7 +3,8 @@
 # Warm-starts from defender step2500 checkpoint; uses GK BC dataset.
 # Run from repo root: bash tools/run/run_gkv1_finetune.sh
 set -u
-cd /home/bryamdigar/Projects/Programacion/Semillero/RL
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+cd "$RL_REPO_DIR"
 source .venv_env.sh
 pkill -f "teacher_goalkeeper_dataset" 2>/dev/null
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3
@@ -24,7 +25,7 @@ RL_GK_BC_SKILL_LOSS_SCALE=0.50 \
 RL_GK_BC_PARAM_LOSS_SCALE=0.50 \
 RL_GK_EXPERIMENT_NAME=goalkeeper_gkv1 \
   "$PY" -m rlfootball.training.train_goalkeeper \
-  --checkpoint /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/defender_47_v2/checkpoint_stage8_step2500.pt
+  --checkpoint "$RL_REPO_DIR/runs/defender_47_v2/checkpoint_stage8_step2500.pt"
 rc=$?
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3
 echo "[gkv1-finetune] train exit rc=$rc"

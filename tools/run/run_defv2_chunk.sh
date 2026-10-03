@@ -4,7 +4,8 @@
 # SimRobot freeze loses at most the in-progress scenario.
 set -u
 i="${1:?chunk index required}"
-cd /home/bryamdigar/Projects/Programacion/Semillero/RL
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+cd "$RL_REPO_DIR"
 source .venv_env.sh
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3
 

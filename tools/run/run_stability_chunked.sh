@@ -12,7 +12,8 @@ if [ "${#SEEDS[@]}" -eq 1 ]; then read -r -a SEEDS <<< "${SEEDS[0]}"; fi
 
 export RL_GATE_SHOOT_OPEN_ENTER="${RL_GATE_SHOOT_OPEN_ENTER:-0.30}"
 export RL_GATE_SHOOT_OPEN_EXIT="${RL_GATE_SHOOT_OPEN_EXIT:-0.20}"
-export PYTHONPATH="${PYTHONPATH:-/home/luis/GitHub/RL}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+export PYTHONPATH="${PYTHONPATH:-$RL_REPO_DIR}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
 OUT_ROOT="runs/behavioral_stability/chunked_${STAMP}"

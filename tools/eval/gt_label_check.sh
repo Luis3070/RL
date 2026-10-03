@@ -5,8 +5,9 @@
 # flaky in-sim opponent perception -> should be a stable read. Writes to a SCRATCH dir
 # (never the canonical dataset). Short (2 eps) — this is a label-distribution probe.
 set -u
-REPO=/home/luis/GitHub/RL
-export PYTHONPATH="$REPO:/home/luis/GitHub/SabanaHerons2026/Make/Python"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
 export DISPLAY="${DISPLAY:-:1}"
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 PY="${PY:-$HOME/anaconda3/envs/RLNAO/bin/python}"

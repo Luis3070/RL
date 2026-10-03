@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BHUMAN_DIR="$(cd "${ROOT_DIR}/../SabanaHerons2026" && pwd)"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+ROOT_DIR="$RL_REPO_DIR"
+BHUMAN_DIR="$SABANAHERONS_DIR"
 VENV_DIR="${ROOT_DIR}/.venv"
 
 need_cmd() {

@@ -9,8 +9,9 @@
 #   bash tools/run/run_v3_attack.sh train    # BC+PPO fine-tune from v2b@7500
 #   bash tools/run/run_v3_attack.sh validate runs/multiagent_v3/checkpoint_stage7_step10000.pt
 set -u
-REPO=/home/luis/GitHub/RL
-export PYTHONPATH="$REPO:/home/luis/GitHub/SabanaHerons2026/Make/Python"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
 export DISPLAY="${DISPLAY:-:1}"
 export RL_GATE_SHOOT_OPEN_ENTER="${RL_GATE_SHOOT_OPEN_ENTER:-0.30}"
 export RL_GATE_SHOOT_OPEN_EXIT="${RL_GATE_SHOOT_OPEN_EXIT:-0.20}"

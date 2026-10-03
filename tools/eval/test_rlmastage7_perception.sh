@@ -5,8 +5,9 @@
 # natural_ball_seen_rate>0) and (2) opponent perception works (opponent_seen_rate>0,
 # executed_mark_rate / executed_block_rate). Default stage-8 scene (NO force escape).
 set -u
-REPO=/home/luis/GitHub/RL
-export PYTHONPATH="$REPO:/home/luis/GitHub/SabanaHerons2026/Make/Python"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
 export DISPLAY="${DISPLAY:-:1}"
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 PY="${PY:-$HOME/anaconda3/envs/RLNAO/bin/python}"

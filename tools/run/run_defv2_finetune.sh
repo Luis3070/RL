@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -u
-cd /home/bryamdigar/Projects/Programacion/Semillero/RL
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+cd "$RL_REPO_DIR"
 source .venv_env.sh
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3
 export PYBH_RL_SHM_NAME="/pybh_rl_defv2_finetune"
@@ -13,8 +14,8 @@ RL_MA_PROD_TRAIN_STEPS=10000 RL_MA_PROD_MAX_EPISODE_STEPS=600 \
 RL_MA_PROD_EVAL_INTERVAL=2500 RL_MA_PROD_CHECKPOINT_INTERVAL=2500 \
 RL_MA_PROD_SCENARIO_SET=defense RL_MA_PROD_EXPERIMENT_NAME=defender_47_v2 \
   "$PY" -m rlfootball.training.train_multiagent_production --stage-id 8 \
-  --checkpoint /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt \
-  --dataset /home/bryamdigar/Projects/Programacion/Semillero/RL/runs/teacher_multiagent_dataset/dataset_defense_plus_attack_v2/samples.npz
+  --checkpoint "$RL_REPO_DIR/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt" \
+  --dataset "$RL_REPO_DIR/runs/teacher_multiagent_dataset/dataset_defense_plus_attack_v2/samples.npz"
 rc=$?
 pkill -x SimRobot 2>/dev/null; pkill -x Xvfb 2>/dev/null; sleep 3
 echo "[finetune] train exit rc=$rc"

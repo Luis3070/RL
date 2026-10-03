@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-shot status for the v3 regen. Run: bash tools/misc/v3_status.sh
-cd /home/luis/GitHub/RL
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+cd "$RL_REPO_DIR"
 LOG="$(cat /tmp/v3_regen_log.txt 2>/dev/null)"
 RUN=$(pgrep -f "run_v3_attack|teacher_multiagent_dataset" | grep -v grep | wc -l)
 echo "============ v3 regen status ============"
