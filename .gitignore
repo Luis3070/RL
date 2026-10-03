@@ -21,3 +21,16 @@ runs/
 # Local SDD / agent tooling (not part of the repository)
 .atl/
 openspec/
+
+# --- session hardening (large/transient; keep ONNX + docs + py tracked) ---
+*.log
+*.npz
+/dev/shm/
+runs/tmp_*/
+*.partial.npz
+# Keep the commit clean: ONNX weights + vital .py + transplant docs are tracked;
+# generated manifests, shell runners, and Codex handoffs are not.
+ppo_*.json
+tools/*.sh
+CODEX_*.md
+# NOTE: ppo_*.onnx (weights) at repo ROOT ARE deliverables — tracked, not ignored.

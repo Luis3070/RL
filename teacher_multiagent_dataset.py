@@ -61,6 +61,7 @@ from gate import GateConfig, GateDecision, SkillGate
 from multiagent_teacher import (
     EMA_ALPHA_TRIANGLE,
     EMA_ALPHA_OPEN_LANE,
+    CONTINGENT_HOLD,
     TeamCoordinationState,
     advance_pass_target_age,
     assign_roles,
@@ -93,7 +94,19 @@ SIMROBOT_PROFILE = os.getenv("RL_MA_TEACHER_SIMROBOT_PROFILE", "3d_visible")
 SIMROBOT_LAUNCH = os.getenv("RL_MA_TEACHER_SIMROBOT_LAUNCH", "1") == "1"
 _DEFAULT_VISIBLE_PARALLEL_SLOTS = "0" if STAGE_ID == 8 else "1"
 VISIBLE_PARALLEL_SLOTS = os.getenv("RL_MA_TEACHER_VISIBLE_PARALLEL_SLOTS", _DEFAULT_VISIBLE_PARALLEL_SLOTS) == "1"
-_DEFAULT_VISIBLE_SCENE_NAME = get_stage_scene_path(_EARLY_STAGE_ID, "3d_visible").stem
+# Per-slot parallel collection renders each robot in its own 1v0 scene with the other
+# players added as dummy bodies (_ensure_stage_obstacle_bodies). The multi-robot
+# RLMAStage*_3D scene that get_stage_scene_path returns is the WRONG scene for this
+# mode: its pre-placed robots are not produced by the per-slot dummy path and — verified
+# 2026-06-17 — the robot detector yields ZERO obstacle detections under it (defender
+# perceives 0 opponents, all roles obstacle_count=0). The dedicated 1v0 scene the dummy
+# path was built for detects opponents in ~100% of frames. So parallel slots must use
+# RL1v0_3D_visible regardless of stage; only single-scene (Pattern A) uses the stage scene.
+_PARALLEL_SLOT_SCENE_NAME = "RL1v0_3D_visible"
+_DEFAULT_VISIBLE_SCENE_NAME = (
+    _PARALLEL_SLOT_SCENE_NAME if VISIBLE_PARALLEL_SLOTS
+    else get_stage_scene_path(_EARLY_STAGE_ID, "3d_visible").stem
+)
 VISIBLE_SCENE_NAME = os.getenv("RL_MA_TEACHER_VISIBLE_SCENE_NAME", _DEFAULT_VISIBLE_SCENE_NAME)
 VISIBLE_DISPLAY_BASE = int(os.getenv("RL_MA_TEACHER_DISPLAY_BASE", "180"))
 EPISODES_PER_SCENARIO = int(os.getenv("RL_MA_TEACHER_EPISODES", "4"))
@@ -110,6 +123,82 @@ OUTPUT_ROOT = Path(os.getenv(
 ))
 STEP_DT_MS = float(os.getenv("RL_MA_TEACHER_STEP_DT_MS", "33.0"))
 DRY_RUN = os.getenv("RL_MA_TEACHER_DRY_RUN", "0") == "1"
+
+# Opponent-perception diagnostic (option 2): per-step raw ObstacleModel counts per role,
+# aggregated and dumped at exit. Distinguishes "vision sees nothing" (obstacle_count=0)
+# from "robots seen but opponents misclassified" (obstacle_count>0, opponent_count=0).
+OBSTACLE_DEBUG = os.getenv("RL_MA_TEACHER_OBSTACLE_DEBUG", "0") == "1"
+OBSTACLE_DEBUG_PATH = os.getenv("RL_MA_TEACHER_OBSTACLE_DEBUG_PATH", "/tmp/obstacle_debug.json")
+_OBSTACLE_DEBUG_ROWS: list[dict] = []
+
+# ---------------------------------------------------------------------------
+# MULTI-AGENT MEASUREMENT HARNESS (eval mode). When RL_MA_EVAL_POLICY=<ckpt> is set,
+# the collector drives ALL agents with that policy (gate-aware argmax + env's role-aware
+# residual->absolute converter) instead of the teacher, keeps EVERY episode (no sanitizer),
+# and logs per-step cooperation records. Reuses the STABLE shared-sim (Pattern-A) orchestration
+# — the same path that collected 34k rows — so it sidesteps the unusable parallel-slots eval.
+# ---------------------------------------------------------------------------
+_EVAL_POLICY_PATH = os.getenv("RL_MA_EVAL_POLICY", "").strip()
+_EVAL_POLICY = None
+_EVAL_ROWS: list[dict] = []
+# Inference-side upgrade overrides (deploy as a thin wrapper next to the ONNX; flag-gated
+# so we can A/B them in the harness). #3 block-priority: when both block & mark are gate-
+# allowed and the BALL is the nearer in-front threat, intercept the lane (block) instead of
+# tracking the man (mark). #4 collision-avoid: when a close opponent sits in the walk/dribble
+# heading, deflect the target laterally away (reduces pushing fouls / falls).
+_EVAL_BLOCK_PRIORITY = os.getenv("RL_EVAL_BLOCK_PRIORITY", "0") == "1"
+_EVAL_COLLISION_AVOID = os.getenv("RL_EVAL_COLLISION_AVOID", "0") == "1"
+_EVAL_COLLISION_AVOID_MM = float(os.getenv("RL_EVAL_COLLISION_AVOID_MM", "500.0"))
+
+
+def _load_eval_policy(path: str):
+    import torch, torch.nn.functional as F
+    sd = torch.load(path, map_location="cpu")["policy_state_dict"]
+
+    class _P(torch.nn.Module):
+        def __init__(s):
+            super().__init__()
+            for k in ("trunk.0.weight", "trunk.0.bias", "trunk.2.weight", "trunk.2.bias",
+                      "skill_head.weight", "skill_head.bias", "param_head.weight", "param_head.bias"):
+                s.register_buffer(k.replace(".", "_"), sd[k])
+
+        def forward(s, o):
+            h = F.elu(F.linear(o, s.trunk_0_weight, s.trunk_0_bias))
+            h = F.elu(F.linear(h, s.trunk_2_weight, s.trunk_2_bias))
+            return (F.linear(h, s.skill_head_weight, s.skill_head_bias),
+                    torch.tanh(F.linear(h, s.param_head_weight, s.param_head_bias)))
+    return _P().eval()
+
+
+def _dump_obstacle_debug() -> None:
+    if not (OBSTACLE_DEBUG and _OBSTACLE_DEBUG_ROWS):
+        return
+    import json
+    agg: dict = {}
+    for role in sorted({r["role"] for r in _OBSTACLE_DEBUG_ROWS}):
+        rows = [r for r in _OBSTACLE_DEBUG_ROWS if r["role"] == role]
+        n = len(rows)
+        agg[role] = {
+            "n": n,
+            "mean_obstacle_count": round(sum(r["oc"] for r in rows) / n, 3),
+            "mean_teammate_count": round(sum(r["otc"] for r in rows) / n, 3),
+            "mean_opponent_count": round(sum(r["ooc"] for r in rows) / n, 3),
+            "mean_uncertain_count": round(sum(r["ouc"] for r in rows) / n, 3),
+            "frac_any_obstacle_seen": round(sum(1 for r in rows if r["oc"] > 0) / n, 3),
+            "frac_opponent_seen": round(sum(1 for r in rows if r["ooc"] > 0) / n, 3),
+            "frac_nearest_obstacle_lt2000mm": round(sum(1 for r in rows if 0 < r["nod"] < 2000) / n, 3),
+            "opp_angle_abs_mean_rad": round(sum(abs(r.get("noppa", 0.0)) for r in rows) / n, 4),
+            "opp_angle_nonzero_frac": round(sum(1 for r in rows if abs(r.get("noppa", 0.0)) > 1e-4) / n, 3),
+            "opp_front_seen_frac": round(sum(1 for r in rows if 0 < r.get("noppfd", 9e9) < 1500) / n, 3),
+        }
+    with open(OBSTACLE_DEBUG_PATH, "w") as fh:
+        json.dump(agg, fh, indent=2)
+    print(f"[obstacle-debug] wrote {OBSTACLE_DEBUG_PATH}: {agg}", flush=True)
+
+
+if OBSTACLE_DEBUG:
+    import atexit
+    atexit.register(_dump_obstacle_debug)
 
 # §14.18 sanitizer filters
 MIN_KEEP_STEPS_OPEN_SUPPORT = int(os.getenv("RL_MA_TEACHER_MIN_OPEN_HOLD_STEPS", "20"))
@@ -799,29 +888,28 @@ def _payload_to_action(payload: Mapping[str, float]) -> StructuredSkillAction:
     )
 
 
-def _team_label_allowed(role: str, skill_name: str, decision: GateDecision) -> bool:
-    """Mirror train.gate_skill_mask_from_obs for Design-A positive BC labels."""
-    if role == "striker":
-        if skill_name == "shoot":
-            return bool(decision.shoot_armed)
-        if skill_name == "dribble":
-            return bool(decision.dribble_armed)
-        if skill_name == "pass":
-            return bool(decision.pass_armed)
-        return skill_name in {"stand", "walk"}
-    if role == "open_support":
-        if skill_name == "observe":
-            return bool(decision.observe_armed)
-        return skill_name in {"stand", "walk"}
-    if role == "off_ball_support":
-        if skill_name == "dribble":
-            return bool(decision.dribble_armed)
-        if skill_name == "block":
-            return bool(decision.dribble_armed)
-        if skill_name == "observe":
-            return bool(decision.observe_armed)
-        return skill_name in {"stand", "walk"}
-    return False
+_GATE_MASK_FN = None
+
+
+def _team_label_allowed(skill_name: str, encoded) -> bool:
+    """Single-source Design-A label filter: keep a BC label iff the REAL train-time
+    gate (train.gate_skill_mask_from_obs) allows that skill at the baked 47-dim obs.
+
+    This replaces the former hand-mirror, which drifted from the gate — it never
+    allowed the defender's `mark` and only allowed `block` via dribble_armed, so the
+    corrected teacher's block/mark labels would have been silently dropped here (the
+    gate-mark-leak class of bug). Calling the gate directly makes drift impossible:
+    block is armed from the encoded obs[3] (ball in front) and mark from obs[21]
+    (opponent in front), exactly as train-time MAPPO recomputes it.
+    """
+    global _GATE_MASK_FN
+    if _GATE_MASK_FN is None:
+        # Lazy import: importing train at module load triggers its chdir side-effect.
+        from train import gate_skill_mask_from_obs as _fn
+        _GATE_MASK_FN = _fn
+    import torch
+    mask = _GATE_MASK_FN(torch.as_tensor(encoded, dtype=torch.float32).reshape(1, -1))
+    return float(mask[0, SKILL_ORDER.index(skill_name)].item()) != 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -856,14 +944,24 @@ def _episode_kept_v2(
         return False, f"role_thrash({role_swap_count})"
     if PASS_INTERCEPTED_DROP and pass_intercepted:
         return False, "pass_intercepted"
-    open_steps = int(role_step_counts.get("open_support", 0))
-    off_steps = int(role_step_counts.get("off_ball_support", 0))
-    if open_steps > 0:
-        if int(role_hold_steps.get("open_support", 0)) < MIN_KEEP_STEPS_OPEN_SUPPORT:
-            return False, "open_support_hold_too_short"
-    if off_steps > 0:
-        if int(role_hold_steps.get("off_ball_support", 0)) < MIN_KEEP_STEPS_OFF_BALL_SUPPORT:
-            return False, "off_ball_hold_too_short"
+    # v3 (doc-35): the geometric hold-step minimum is a v2 premise — it assumes a
+    # support that doesn't sit near its slot long enough is a bad episode. The
+    # contingent-hold teacher deliberately REPOSITIONS supports unless they're a live
+    # pass option, so it drives hold-steps low ON PURPOSE (and short give-and-go /
+    # contrast scenarios end before a deep support can accrue 30 steps). Applying the
+    # filter under CONTINGENT_HOLD dropped 100% of contrastive episodes and ~80% of
+    # 3v3. Skip it in the contingent regime — the contingent teacher + the audit
+    # (contrast balance, skill distribution) are the quality gate now. v2 behaviour
+    # (filter active, env-tunable) is preserved when CONTINGENT_HOLD is off.
+    if not CONTINGENT_HOLD:
+        open_steps = int(role_step_counts.get("open_support", 0))
+        off_steps = int(role_step_counts.get("off_ball_support", 0))
+        if open_steps > 0:
+            if int(role_hold_steps.get("open_support", 0)) < MIN_KEEP_STEPS_OPEN_SUPPORT:
+                return False, "open_support_hold_too_short"
+        if off_steps > 0:
+            if int(role_hold_steps.get("off_ball_support", 0)) < MIN_KEEP_STEPS_OFF_BALL_SUPPORT:
+                return False, "off_ball_hold_too_short"
     return True, "kept"
 
 
@@ -911,6 +1009,13 @@ def _collect_team_scenario(
         seed = seed_base + attempt
         rng_ep = np.random.default_rng(seed)
         world_spec = scenario.world_fn(rng_ep)
+        # Let the obs encoder see this episode's GT opponents so that, when
+        # RL_TRAIN_GT_OPPONENT_OBS=1, _encode_obs fills obs[18]/obs[21] from ground
+        # truth. Without this the encoder env (never reset with a world_spec) has no
+        # opponents and the off-ball defender's block/mark labels get gate-dropped even
+        # under GT — the long-standing multi-agent dataset deadness. No effect with the
+        # flag off. Defense scenarios used for GT collection are static, so spawn==current.
+        encoder_env._current_world_spec = world_spec
 
         # Reset all backends to this episode's world. Primary places robots.
         for gate in gates.values():
@@ -1081,6 +1186,19 @@ def _collect_team_scenario(
                 role = roles.get(aid, "off_ball_support")
                 obs = obs_by_agent[aid]
 
+                if OBSTACLE_DEBUG:
+                    _OBSTACLE_DEBUG_ROWS.append({
+                        "role": role,
+                        "oc": int(obs.obstacle_count),
+                        "otc": int(obs.obstacle_teammate_count),
+                        "ooc": int(obs.obstacle_opponent_count),
+                        "ouc": int(obs.obstacle_uncertain_count),
+                        "nod": float(obs.nearest_obstacle_dist),
+                        "noppd": float(obs.nearest_opponent_dist),
+                        "noppa": float(obs.nearest_opponent_angle),
+                        "noppfd": float(obs.nearest_opponent_front_dist),
+                    })
+
                 # Role swap tracking
                 if prev_role[aid] is not None and prev_role[aid] != role:
                     ep_role_swap_count += 1
@@ -1152,6 +1270,65 @@ def _collect_team_scenario(
                 # Encode 47-dim obs with team-augmented gate bits
                 encoded = _encode_for_agent(encoder_env, obs, team_decision)
 
+                # ---- EVAL MODE: drive this agent with the policy, not the teacher ----
+                if _EVAL_POLICY is not None:
+                    import torch
+                    enc_t = torch.as_tensor(encoded, dtype=torch.float32).reshape(1, -1)
+                    with torch.no_grad():
+                        sl, pmn = _EVAL_POLICY(enc_t)
+                    gmask = _GATE_MASK_FN(enc_t) if callable(_GATE_MASK_FN) else None
+                    if gmask is None:
+                        from train import gate_skill_mask_from_obs as _g
+                        gmask = _g(enc_t)
+                    sl = sl + (gmask - 1.0) * 1e9
+                    sk = int(sl.argmax(1).item())
+                    # #3 BLOCK-PRIORITY: if mark chosen but block is also armed and the ball
+                    # is the nearer in-front threat (enc obs[3] ball_rel_x < obs[21] opp_front,
+                    # both normalized), intercept the lane instead of tracking the man.
+                    if _EVAL_BLOCK_PRIORITY and SKILL_ORDER[sk] == "mark":
+                        _bi = SKILL_ORDER.index("block")
+                        if float(gmask[0, _bi].item()) > 0.5:
+                            _ballf = float(enc_t[0, 3].item()); _oppf = float(enc_t[0, 21].item())
+                            if 0.0 < _ballf < _oppf:
+                                sk = _bi
+                    pr = pmn[0].numpy()
+                    resid = StructuredSkillAction(
+                        skill_type=sk, target_x=float(pr[0]), target_y=float(pr[1]),
+                        target_theta=float(pr[2]),
+                        pass_target=int(np.clip(round((float(pr[3]) + 1.0) * 0.5 * 2.0), 0, 2)),
+                    )
+                    encoder_env._team_role = role
+                    encoder_env._team_coordination_target = coord
+                    absolute = encoder_env._decode_residual_policy_action(resid, obs=obs)
+                    # #4 COLLISION-AVOID: deflect walk/dribble target away from a close opponent.
+                    if _EVAL_COLLISION_AVOID and resid.skill_name in ("walk", "dribble"):
+                        _dopp = float(obs.nearest_opponent_dist)
+                        if 0.0 < _dopp < _EVAL_COLLISION_AVOID_MM:
+                            _ang = float(obs.robot_theta) + float(obs.nearest_opponent_angle)
+                            _ox = float(obs.robot_x) + _dopp * math.cos(_ang)
+                            _oy = float(obs.robot_y) + _dopp * math.sin(_ang)
+                            _ax = float(obs.robot_x) - _ox; _ay = float(obs.robot_y) - _oy
+                            _n = math.hypot(_ax, _ay) or 1.0
+                            _push = (_EVAL_COLLISION_AVOID_MM - _dopp)
+                            absolute = replace(
+                                absolute,
+                                target_x=float(np.clip(absolute.target_x + _ax / _n * _push, -4500.0, 4500.0)),
+                                target_y=float(np.clip(absolute.target_y + _ay / _n * _push, -3000.0, 3000.0)),
+                            )
+                    actions_for_step[aid] = absolute
+                    prev_skill_name[aid] = resid.skill_name
+                    ep_role_step_counts[role] += 1
+                    _EVAL_ROWS.append({
+                        "scn": scenario.name, "att": attempt, "step": step, "aid": aid,
+                        "role": role, "skill": SKILL_ORDER[sk],
+                        "bx": float(team_ball[0]), "by": float(team_ball[1]),
+                        "rx": float(obs.robot_x), "ry": float(obs.robot_y),
+                        "opp_seen": int(float(obs.nearest_opponent_dist) < 4500.0),
+                        "ball_seen": float(obs.ball_seen_percentage),
+                    })
+                    continue
+                # ---- end eval mode ----
+
                 # Teacher payload (absolute + residual)
                 payload, absolute, residual = team_teacher_payload(
                     obs, stage_id, prev_skill_name[aid],
@@ -1185,7 +1362,7 @@ def _collect_team_scenario(
                 # Record only labels that the train-time mask can actually select.
                 # The teacher may execute a short continuation action for rollout
                 # stability; those frames must not become positive BC labels.
-                if _team_label_allowed(role, residual.skill_name, team_decision):
+                if _team_label_allowed(residual.skill_name, encoded):
                     action_vec = np.asarray([
                         float(residual.skill_type),
                         float(residual.target_x),
@@ -1268,17 +1445,21 @@ def _collect_team_scenario(
             dropped_episodes += 1
             continue
 
-        # Episode complete — apply v2 sanitizer
+        # Episode complete — apply v2 sanitizer (EVAL mode keeps every episode; the
+        # behavior under collisions/outcomes IS the measurement).
         metrics: dict[str, float] = {}  # TODO Wed AM: extract from primary backend per-episode tracker
-        kept, reason = _episode_kept_v2(
-            scenario, metrics,
-            role_step_counts=ep_role_step_counts,
-            role_hold_steps=ep_role_hold_steps,
-            role_swap_count=ep_role_swap_count,
-            pass_intercepted=ep_pass_intercepted,
-            teammate_collision=ep_teammate_collision,
-            agent_out_of_bounds=ep_agent_out_of_bounds,
-        )
+        if _EVAL_POLICY is not None:
+            kept, reason = True, "eval_keep"
+        else:
+            kept, reason = _episode_kept_v2(
+                scenario, metrics,
+                role_step_counts=ep_role_step_counts,
+                role_hold_steps=ep_role_hold_steps,
+                role_swap_count=ep_role_swap_count,
+                pass_intercepted=ep_pass_intercepted,
+                teammate_collision=ep_teammate_collision,
+                agent_out_of_bounds=ep_agent_out_of_bounds,
+            )
         if not kept:
             dropped_episodes += 1
             drop_reasons[reason] += 1
@@ -1332,6 +1513,13 @@ def _collect_team_scenario(
 def main() -> int:
     if DRY_RUN:
         return _dry_run_smoke()
+
+    global _EVAL_POLICY
+    if _EVAL_POLICY_PATH:
+        _EVAL_POLICY = _load_eval_policy(_EVAL_POLICY_PATH)
+        # prime the lazy gate fn used in the per-agent eval branch
+        _team_label_allowed("walk", np.zeros(47, dtype=np.float32))
+        print(f"[ma-eval] MULTI-AGENT MEASUREMENT MODE — policy={_EVAL_POLICY_PATH} (no dataset sanitizer)", flush=True)
 
     if STAGE_ID not in _RL_FIELD_AGENTS_BY_STAGE:
         raise ValueError(
@@ -1489,7 +1677,80 @@ def main() -> int:
         total_episodes=next_episode_id,
         partial=False,
     )
+    if _EVAL_POLICY is not None:
+        _summarize_eval(output_dir)
     return 0
+
+
+def _summarize_eval(output_dir: Path) -> None:
+    """Cooperation / multi-agent behavior summary for the merged-policy match eval."""
+    import collections, json
+    rows = _EVAL_ROWS
+    if not rows:
+        print("[ma-eval] no rows logged"); return
+    # group by episode (scn, att)
+    eps = collections.defaultdict(list)
+    for r in rows:
+        eps[(r["scn"], r["att"])].append(r)
+    GOAL_X = 4500.0
+    n_ep = len(eps)
+    all3 = []           # % steps with all 3 distinct roles present simultaneously
+    ballprog = []       # net ball advance toward opp goal (mm), per episode
+    scored = conceded = 0
+    pass_attempts = 0
+    skill_by_role = collections.defaultdict(collections.Counter)
+    role_steps = collections.Counter()
+    opp_seen_steps = ball_seen_acc = total_agent_steps = 0
+    _coll_steps = [0, 0]   # [total_steps, colliding_steps]
+    for (scn, att), ers in eps.items():
+        steps = collections.defaultdict(dict)   # step -> {aid: row}
+        for r in ers:
+            steps[r["step"]][r["aid"]] = r
+            skill_by_role[r["role"]][r["skill"]] += 1
+            role_steps[r["role"]] += 1
+            opp_seen_steps += r["opp_seen"]; ball_seen_acc += r["ball_seen"]; total_agent_steps += 1
+            if r["skill"] == "pass":
+                pass_attempts += 1
+        # role co-occurrence
+        co = [len({steps[s][a]["role"] for a in steps[s]}) for s in steps]
+        all3.append(100.0 * np.mean([c >= 3 for c in co])) if co else None
+        # teammate-collision proxy: any RL pair within 350mm at a step
+        for s in steps:
+            ps = [(r["rx"], r["ry"]) for r in steps[s].values()]
+            close = any(math.hypot(ps[i][0]-ps[j][0], ps[i][1]-ps[j][1]) < 350.0
+                        for i in range(len(ps)) for j in range(i+1, len(ps)))
+            _coll_steps[0] += 1; _coll_steps[1] += int(close)
+        # ball progression: use the ball x from first and last step (any agent's team_ball)
+        sk = sorted(steps)
+        bx0 = next(iter(steps[sk[0]].values()))["bx"]
+        bxN = next(iter(steps[sk[-1]].values()))["bx"]
+        ballprog.append(bxN - bx0)
+        maxbx = max(r["bx"] for r in ers); minbx = min(r["bx"] for r in ers)
+        if maxbx > GOAL_X - 100: scored += 1
+        if minbx < -GOAL_X + 100: conceded += 1
+    print("\n" + "=" * 70)
+    print(f"[ma-eval] MULTI-AGENT MATCH COOPERATION SUMMARY  episodes={n_ep}")
+    print(f"  role co-occurrence (all 3 roles present): {np.mean(all3):.1f}% of steps")
+    print(f"  role-step share: " + "  ".join(f"{k}={100*v/max(1,sum(role_steps.values())):.0f}%" for k, v in role_steps.items()))
+    print(f"  ball progression toward opp goal: mean {np.mean(ballprog):+.0f} mm/episode  (>0 = team advances)")
+    print(f"  pass attempts (striker->teammate): {pass_attempts}")
+    print(f"  episodes ball reached opp goal (scored): {scored}/{n_ep}   own goal (conceded): {conceded}/{n_ep}")
+    print(f"  perception: opp_seen={100*opp_seen_steps/max(1,total_agent_steps):.0f}%  mean_ball_seen={ball_seen_acc/max(1,total_agent_steps):.0f}%")
+    print(f"  teammate-collision: {100*_coll_steps[1]/max(1,_coll_steps[0]):.1f}% of steps (any RL pair <350mm)  "
+          f"[block_priority={_EVAL_BLOCK_PRIORITY} collision_avoid={_EVAL_COLLISION_AVOID}]")
+    for role in ("striker", "open_support", "off_ball_support"):
+        c = skill_by_role.get(role)
+        if c:
+            tot = sum(c.values())
+            print(f"  {role:16s} skills: " + "  ".join(f"{k}={100*v/tot:.0f}%" for k, v in c.most_common()))
+    out = output_dir / "eval_match_summary.json"
+    out.write_text(json.dumps({"episodes": n_ep, "rows": len(rows),
+                               "role_co_occurrence_pct": float(np.mean(all3)),
+                               "ball_progression_mm": float(np.mean(ballprog)),
+                               "pass_attempts": pass_attempts, "scored": scored, "conceded": conceded,
+                               "skill_by_role": {k: dict(v) for k, v in skill_by_role.items()}}, indent=2))
+    print(f"  wrote {out}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

@@ -90,6 +90,16 @@ SUPPORT_SLOT_CANDIDATE_GRID = (     # field-frame xy candidates; y mirrored by b
 CAN_SCORE_BOOST = 0.3               # own ball: + 0.3 × can_score_now added to shoot rating
 OPPONENT_LANE_CLEARANCE_MM = 800.0  # nearest_opponent_front_dist must exceed this
 
+# v3 (doc-35) contingent hold: a support stands ONLY when it is a live pass option —
+# the striker controls the ball and the support's receive lane is open. Otherwise it
+# repositions (walk), even if sitting on its slot. This ties "stand" to a REASON, which
+# is what the geometric hold lacked; in contrastive worlds (teammate open vs covered) it
+# produces DIFFERENT labels (hold vs reposition) on the same ego-slot — the contingency
+# the policy needs to learn. Env-tunable; default ON for the v3 teacher.
+CONTINGENT_HOLD = os.getenv("RL_MA_CONTINGENT_HOLD", "1") not in ("0", "false", "False", "")
+SUPPORT_CONTROL_NEAR_MM = float(os.getenv("RL_MA_SUPPORT_CONTROL_NEAR_MM", "600.0"))   # teammate within this of team ball ⇒ "striker controls"
+SUPPORT_LANE_CLEAR_MM = float(os.getenv("RL_MA_SUPPORT_LANE_CLEAR_MM", "700.0"))       # front opponent nearer than this ⇒ receive lane covered
+
 # Exclusions
 GK_EXCLUDE_X_MM = -2000.0          # teammate with absolute x < this is treated as GK
 
@@ -115,6 +125,10 @@ DEFENDER_BLOCK_BALL_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_BALL_DIST_MM", "2
 DEFENDER_BLOCK_FRONT_OPP_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_OPP_MM", "1300.0"))
 DEFENDER_BLOCK_FRONT_BALL_X_MM = float(os.getenv("RL_MA_DEF_BLOCK_FRONT_BALL_X_MM", "1800.0"))
 DEFENDER_BLOCK_COVER_DIST_MM = float(os.getenv("RL_MA_DEF_BLOCK_COVER_DIST_MM", "900.0"))
+# Mark a runner (not the ball-carrier): opponent in our front cone within this range
+# while the ball itself is NOT in front. Threshold matches the train.py gate's
+# mark_threat (nearest_opponent_front_dist < 1500mm) so no mark label is masked.
+DEFENDER_MARK_FRONT_OPP_MM = float(os.getenv("RL_MA_DEF_MARK_FRONT_OPP_MM", "1500.0"))
 
 # Recovery + defensive clearance (§Part2 D1-D3). When a defender wins the ball it
 # must clear to safety or pass out — not keep blocking/holding. D1: physical ball
@@ -481,8 +495,13 @@ def _pass_reachable_proxy(striker_obs: BackendObservation, target: TeammateSlot)
     Returns 1.0 if the pass lane looks clear; 0.0 otherwise.
     Replaces BHuman's full geometric passTargetFree × passLineFree × targetInField check.
     """
-    # Use striker's front-cone opponent distance as pass-line clearance proxy.
-    if float(striker_obs.nearest_opponent_front_dist) <= OPPONENT_LANE_CLEARANCE_MM:
+    # Front-cone opponent distance as pass-line clearance proxy. Convention (matches
+    # support_is_live_pass_option and the defender block gate): a non-positive value
+    # means NO opponent detected in front → lane clear. Only a POSITIVE distance below
+    # the clearance counts as covered — otherwise "no opponent" (0.0) would be wrongly
+    # read as "opponent on top of us" and starve every clear-lane pass.
+    front = float(striker_obs.nearest_opponent_front_dist)
+    if 0.0 < front <= OPPONENT_LANE_CLEARANCE_MM:
         return 0.0
     return 1.0
 
@@ -677,24 +696,60 @@ def teacher_striker(
     return decision
 
 
+def support_is_live_pass_option(obs: BackendObservation) -> bool:
+    """v3 (doc-35): is THIS support a live pass option right now?
+
+    True when (a) the team ball is valid and a teammate is controlling it (within
+    SUPPORT_CONTROL_NEAR_MM of the ball — i.e. the striker has it) and (b) the
+    support's front receive lane isn't tightly covered by an opponent. This is the
+    contingency that makes "hold" meaningful: stand when you're a real outlet,
+    reposition otherwise.
+    """
+    if not bool(getattr(obs, "global_team_ball_valid", False)):
+        return False
+    bx = float(getattr(obs, "global_team_ball_x_mm", 0.0))
+    by = float(getattr(obs, "global_team_ball_y_mm", 0.0))
+    poses = getattr(obs, "teammate_poses", ()) or ()
+    ages = getattr(obs, "teammate_ages_ms", ()) or ()
+    controls = False
+    for idx, pose in enumerate(poses):
+        age = float(ages[idx]) if idx < len(ages) else float("inf")
+        if age <= TEAMMATE_FRESH_MAX_AGE_MS and math.hypot(float(pose[0]) - bx, float(pose[1]) - by) < SUPPORT_CONTROL_NEAR_MM:
+            controls = True
+            break
+    if not controls:
+        return False
+    front_opp = float(obs.nearest_opponent_front_dist)
+    lane_covered = 0.0 < front_opp < SUPPORT_LANE_CLEAR_MM
+    return not lane_covered
+
+
 def teacher_open_support(
     obs: BackendObservation,
     stage_id: int,
     prev_skill_name: str | None,
     gate_decision: GateDecision,
     coordination_target: tuple[float, float],
+    phase: str = "attack",
 ) -> StructuredSkillAction:
     """§11.B.2.2 — walk-or-stand toward the smoothed open-lane target.
 
     Design-A: always emits walk or stand. Mask for is_open_support forbids
     shoot and dribble. Gate consistency holds.
     coordination_target is the EMA-smoothed open-lane center (field mm), from env.
+
+    v3 (doc-35): in ATTACK, hold (stand) only when at the slot AND a live pass
+    option; otherwise reposition (walk) — keeps the support an active outlet
+    instead of parking in the void. In DEFENSE the open bit is the defense-supporter
+    (cover, not a pass outlet), so contingent hold does NOT apply — geometric hold.
     """
     tx, ty = coordination_target
     dx = tx - float(obs.robot_x)
     dy = ty - float(obs.robot_y)
     dist = math.hypot(dx, dy)
-    if dist < HOLD_TOLERANCE_OPEN_MM:
+    at_slot = dist < HOLD_TOLERANCE_OPEN_MM
+    contingent = CONTINGENT_HOLD and phase != "defense"
+    if at_slot and (not contingent or support_is_live_pass_option(obs)):
         return StructuredSkillAction(skill_type=SkillType.stand)
     target_theta = math.atan2(dy, dx)
     return _support_walk_action(tx, ty, target_theta)
@@ -724,7 +779,10 @@ def teacher_off_ball_support(
     dx = tx - float(obs.robot_x)
     dy = ty - float(obs.robot_y)
     dist = math.hypot(dx, dy)
-    if dist < HOLD_TOLERANCE_OFF_BALL_MM:
+    at_slot = dist < HOLD_TOLERANCE_OFF_BALL_MM
+    # v3 (doc-35): contingent hold — stand only when at the triangle vertex AND a
+    # live pass option; otherwise reposition.
+    if at_slot and (not CONTINGENT_HOLD or support_is_live_pass_option(obs)):
         return StructuredSkillAction(skill_type=SkillType.stand)
     target_theta = math.atan2(dy, dx)
     return _support_walk_action(tx, ty, target_theta)
@@ -755,6 +813,19 @@ def teacher_defender(
             skill_type=SkillType.block,
             target_x=0.0,
             target_y=_signed_block_offset(obs),
+            target_theta=0.0,
+            pass_target=0,
+        )
+    if defender_mark_armed(
+        obs,
+        team_ball_valid=team_ball_valid,
+        face_ball_xy=face_ball_xy,
+        coordination_target=coordination_target,
+    ):
+        return StructuredSkillAction(
+            skill_type=SkillType.mark,
+            target_x=0.0,
+            target_y=_signed_mark_offset(obs),
             target_theta=0.0,
             pass_target=0,
         )
@@ -811,7 +882,7 @@ def stage_aware_team_teacher_action(
         )
     if role == "open_support":
         return teacher_open_support(
-            obs, stage_id, prev_skill_name, gate_decision, coordination_target,
+            obs, stage_id, prev_skill_name, gate_decision, coordination_target, phase=phase,
         )
     if role == "off_ball_support":
         if phase == "defense":
@@ -897,7 +968,7 @@ def _to_residual_role(
     if role == "striker":
         return absolute_to_residual_action(action, obs)
 
-    if action.skill_name not in {"walk", "dribble", "block"}:
+    if action.skill_name not in {"walk", "dribble", "block", "mark"}:
         # stand / shoot / pass: zeros, preserve pass_target if any.
         return StructuredSkillAction(
             skill_type=action.skill_type,
@@ -912,7 +983,10 @@ def _to_residual_role(
         # the ball via the existing single-agent helper.
         return absolute_to_residual_action(action, obs)
 
-    if action.skill_name == "block":
+    if action.skill_name in {"block", "mark"}:
+        # block/mark carry a 1-D lateral offset in target_y (param_mask (0,1,0,0));
+        # target_x is masked. Pass the offset through unchanged so the defender's
+        # block-the-ball-line / mark-the-runner aim survives into the BC label.
         return StructuredSkillAction(
             skill_type=action.skill_type,
             target_x=0.0,
@@ -1227,11 +1301,57 @@ def defender_block_armed(
     )
     if dist_to_cover > DEFENDER_BLOCK_COVER_DIST_MM:
         return False
-    ball_dist = math.hypot(ball_x - float(obs.robot_x), ball_y - float(obs.robot_y))
+    # Block = intercept the ball line. Arm only on the ball being in the front cone
+    # (obs.ball_rel_x), which the train.py gate recomputes 1:1 as its block_threat
+    # (ball_rel_x < 1800mm). The earlier team-ball-distance / opponent-front terms were
+    # dropped here: the distance term was not recomputable from a stored obs column
+    # (it read the team ball) so it could emit a block label the gate would mask, and
+    # the opponent-front term now drives `mark` instead (man-mark the runner).
     ball_front = 0.0 < float(obs.ball_rel_x) < DEFENDER_BLOCK_FRONT_BALL_X_MM
-    opponent_front = 0.0 < float(obs.nearest_opponent_front_dist) < DEFENDER_BLOCK_FRONT_OPP_MM
-    central_threat = abs(ball_y) < OWN_GOAL_POST_Y_MM + 400.0
-    return bool((ball_dist < DEFENDER_BLOCK_BALL_DIST_MM and central_threat) or ball_front or opponent_front)
+    return bool(ball_front)
+
+
+def defender_mark_armed(
+    obs: BackendObservation,
+    *,
+    team_ball_valid: bool,
+    face_ball_xy: tuple[float, float] | None,
+    coordination_target: tuple[float, float],
+) -> bool:
+    """Synthetic high-level mark gate for defensive BC labels.
+
+    Mark a runner: an opponent is in our front cone (within DEFENDER_MARK_FRONT_OPP_MM)
+    while the ball itself is NOT in front (that case is a `block`). Arm condition reads
+    only obs.nearest_opponent_front_dist + obs.ball_rel_x — the same stored columns the
+    train.py gate uses for mark_threat (nearest_opponent_front_dist < 1500mm), so the
+    gate is an exact superset and no mark label is masked. The our-half + near-cover
+    guards mirror block and only narrow emission.
+    """
+    if not team_ball_valid or face_ball_xy is None:
+        return False
+    ball_x, ball_y = float(face_ball_xy[0]), float(face_ball_xy[1])
+    if ball_x > DEFENDER_BLOCK_BALL_X_MAX_MM:
+        return False
+    dist_to_cover = math.hypot(
+        float(obs.robot_x) - float(coordination_target[0]),
+        float(obs.robot_y) - float(coordination_target[1]),
+    )
+    if dist_to_cover > DEFENDER_BLOCK_COVER_DIST_MM:
+        return False
+    opponent_front = 0.0 < float(obs.nearest_opponent_front_dist) < DEFENDER_MARK_FRONT_OPP_MM
+    ball_front = 0.0 < float(obs.ball_rel_x) < DEFENDER_BLOCK_FRONT_BALL_X_MM
+    return bool(opponent_front and not ball_front)
+
+
+def _signed_mark_offset(obs: BackendObservation) -> float:
+    """Lateral target_y offset toward the marked opponent (block/mark param_mask=(0,1,0,0)).
+
+    Uses the nearest opponent's bearing+range to place the offset on the opponent's
+    side. Mirrors _signed_block_offset's normalisation (÷900, clipped) so the C++
+    SkillRequest::Builder::mark(Vector2f) target convention matches block exactly.
+    """
+    opp_rel_y = float(obs.nearest_opponent_dist) * math.sin(float(obs.nearest_opponent_angle))
+    return float(np.clip(opp_rel_y / 900.0, -1.0, 1.0))
 
 
 def defensive_clear_pass_target(

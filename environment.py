@@ -104,6 +104,32 @@ def _split_csv_env(name: str) -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
+# v4.5: off-ball coordination residual (Version-B graph-coordination, inference-only).
+# Diagnosis (2026-06-16) proved triangle_hold=0.000 is a CLOSED-LOOP navigation gap: the
+# off_ball_support never traverses to its triangle slot (median 2.3m away in sim) even though
+# `walk` is anchored on the coordination target and the reward/metric are ready. This override
+# commits the off-ball support to walk-to-slot when it's far, with hysteresis, then releases
+# control to the policy once inside so it can settle/hold. Env-gated (default OFF) — single-agent
+# and all prior validated paths are untouched. Decode already anchors a support walk on the
+# coordination target, so a zero-residual walk lands exactly on triangle_ema.
+OFFBALL_COORD = _env_flag("RL_MA_OFFBALL_COORD", False)
+OFFBALL_COORD_ENTER_MM = float(os.getenv("RL_MA_OFFBALL_COORD_ENTER_MM", "800.0"))
+OFFBALL_COORD_EXIT_MM = float(os.getenv("RL_MA_OFFBALL_COORD_EXIT_MM", "450.0"))
+
+# Merged-ONNX defense signal (TRAINING-ONLY, NOT a deployment path). When set, the
+# opponent-distance obs slots (obs[18] nearest_opponent_dist, obs[21]
+# nearest_opponent_front_dist) are populated from the env's GROUND-TRUTH opponent
+# positions instead of the perceived ObstacleModel. This unblocks block/mark learning
+# where in-sim off-ball perception is ~0 (gaze/detector-range limited — see
+# CODEX_OFFBALL_PERCEPTION_HANDOFF.md). Deployment ALWAYS runs with this OFF and fills
+# obs[21] from real vision; the obs CONTRACT is identical, only the training-time SOURCE
+# differs. The staged plan validates that GT-trained mark also fires on real perception
+# (GT off, roomy scene) so there is no sim2real gap. `opponent_seen_rate` deliberately
+# stays perception-based (tracker reads obs.nearest_opponent_dist) so it remains an honest
+# perception metric even while this flag feeds GT into the policy obs. Default OFF.
+GT_OPPONENT_OBS = _env_flag("RL_TRAIN_GT_OPPONENT_OBS", False)
+
+
 def _parse_production_weights() -> dict[str, float]:
     weights = dict(_DEFAULT_PRODUCTION_SCENARIO_WEIGHTS)
     raw = os.getenv("RL_PRODUCTION_SCENARIO_WEIGHTS", "")
@@ -438,6 +464,35 @@ class RealSimRobotEnv(ParallelEnv):
         if self._last_backend_obs is None:
             raise RuntimeError("step() called before reset()")
 
+        # v4.5 off-ball coordination residual (inference-only, env-gated). Commit the off-ball
+        # support to walk to its triangle slot when far, with hysteresis, then release to the
+        # policy once inside so it can settle/hold. Forcing `walk` with zero residual makes the
+        # role-aware decoder land the walk target exactly on the coordination target (triangle_ema).
+        if (
+            OFFBALL_COORD
+            and self._team_role == "off_ball_support"
+            and self._team_coordination_target is not None
+        ):
+            if not hasattr(self, "_offball_coord_active"):
+                self._offball_coord_active = False
+            _tx, _ty = self._team_coordination_target
+            _dist = math.hypot(
+                float(self._last_backend_obs.robot_x) - _tx,
+                float(self._last_backend_obs.robot_y) - _ty,
+            )
+            if _dist >= OFFBALL_COORD_ENTER_MM:
+                self._offball_coord_active = True
+            elif _dist <= OFFBALL_COORD_EXIT_MM:
+                self._offball_coord_active = False
+            if self._offball_coord_active:
+                raw_policy_action = StructuredSkillAction(
+                    skill_type=SkillType.from_public_name("walk"),
+                    target_x=0.0,
+                    target_y=0.0,
+                    target_theta=0.0,
+                    pass_target=raw_policy_action.pass_target,
+                )
+
         policy_residual_x = float(np.clip(raw_policy_action.target_x, -1.0, 1.0))
         policy_residual_y = float(np.clip(raw_policy_action.target_y, -1.0, 1.0))
         policy_residual_theta = float(np.clip(raw_policy_action.target_theta, -1.0, 1.0))
@@ -722,7 +777,20 @@ class RealSimRobotEnv(ParallelEnv):
         if policy_action.skill_name not in {"walk", "dribble"}:
             return policy_action, False, ""
 
-        fallback_targets = build_fallback_action_targets(policy_action.skill_name, obs)
+        # Role-aware anchor — MUST mirror _decode_residual_policy_action. A support's walk is
+        # anchored on its coordination target (open_lane/triangle EMA), NOT the ball. Using the
+        # ball-anchored fallback here repaired every support walk-to-slot back toward the ball
+        # (target_error vs the far slot always exceeded the residual radius), so supports could
+        # never reach their triangle/open slot — the closed-loop cause of triangle_hold=0.000.
+        if (
+            self._team_role in ("open_support", "off_ball_support")
+            and policy_action.skill_name == "walk"
+            and self._team_coordination_target is not None
+        ):
+            from multiagent_teacher import build_open_lane_anchor
+            fallback_targets = build_open_lane_anchor(obs, self._team_coordination_target)
+        else:
+            fallback_targets = build_fallback_action_targets(policy_action.skill_name, obs)
         target_error_mm = math.hypot(
             float(policy_action.target_x) - float(fallback_targets["target_x"]),
             float(policy_action.target_y) - float(fallback_targets["target_y"]),
@@ -766,6 +834,36 @@ class RealSimRobotEnv(ParallelEnv):
     def state(self) -> np.ndarray:
         return self.get_global_state()
 
+    def _gt_opponent_distances(self, transform_fn) -> tuple[float, float] | None:
+        """Training-only: nearest opponent distance (all-directions, front) in mm from
+        GROUND-TRUTH positions, using current dynamic positions if present else the spawn
+        WorldSpec. Returns None when no opponents are spawned (caller falls back to the
+        perceived obs). `transform_fn(field_x, field_y) -> (rel_x, rel_y)` maps to the
+        robot frame; rel_x > 0 means in front (matches the obs[21] gate semantics)."""
+        positions: list[tuple[float, float]] = []
+        dws = getattr(self, "_dynamic_world_state", None)
+        dyn_pos = getattr(dws, "opponent_positions", None) if dws is not None else None
+        if dyn_pos is not None and len(dyn_pos) > 0:
+            positions = [(float(p[0]), float(p[1])) for p in dyn_pos]
+        elif self._current_world_spec is not None and self._current_world_spec.opponents:
+            positions = [(float(o.x), float(o.y)) for o in self._current_world_spec.opponents]
+        if not positions:
+            return None
+        best_all = float("inf")
+        best_front = float("inf")
+        for ox, oy in positions:
+            rel_x, rel_y = transform_fn(ox, oy)
+            dist = math.hypot(rel_x, rel_y)
+            if dist < best_all:
+                best_all = dist
+            if rel_x > 0.0 and dist < best_front:
+                best_front = dist
+        # 5000mm = "far/unseen" sentinel (norm_dist clamps to 1.0 -> gate leaves mark/block
+        # disarmed), matching the teacher's blank-obs convention.
+        all_d = best_all if best_all != float("inf") else 5000.0
+        front_d = best_front if best_front != float("inf") else 5000.0
+        return all_d, front_d
+
     def _encode_obs(self, obs: BackendObservation) -> np.ndarray:
         def norm_time(value: float) -> float:
             return float(np.clip(value / TIME_NORM_MS, 0.0, 1.0))
@@ -784,6 +882,18 @@ class RealSimRobotEnv(ParallelEnv):
             rel_y = dx * s + dy * c
 
             return rel_x, rel_y
+
+        # Training-only GT opponent distances (see GT_OPPONENT_OBS). Populated from the
+        # env's known opponent positions so block/mark can learn where in-sim off-ball
+        # perception is ~0. No-op (uses perceived obs) when the flag is off or there are
+        # no spawned opponents — so deployment/eval semantics are untouched.
+        opp_all_norm = norm_dist(obs.nearest_opponent_dist)
+        opp_front_norm = norm_dist(obs.nearest_opponent_front_dist)
+        if GT_OPPONENT_OBS:
+            gt = self._gt_opponent_distances(transform_to_robot_frame)
+            if gt is not None:
+                opp_all_norm = norm_dist(gt[0])
+                opp_front_norm = norm_dist(gt[1])
 
         gate_feats = (
             self._gate_decision.obs_features()
@@ -810,10 +920,10 @@ class RealSimRobotEnv(ParallelEnv):
             float(np.clip(obs.shot_opening_with_obstacles, 0.0, 1.0)),
             float(np.clip(obs.pass_options_count / PASS_COUNT_NORM, 0.0, 1.0)),
             norm_dist(obs.nearest_teammate_dist),
-            norm_dist(obs.nearest_opponent_dist),
+            opp_all_norm,
             norm_dist(obs.nearest_uncertain_obstacle_dist),
             norm_dist(obs.nearest_teammate_front_dist),
-            norm_dist(obs.nearest_opponent_front_dist),
+            opp_front_norm,
             norm_dist(obs.nearest_uncertain_front_dist),
             *gate_feats,
         ]
@@ -1004,6 +1114,7 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_export_source_reset_steps": 0,
             "ball_export_source_dynamic_steps": 0,
             "natural_ball_seen_steps": 0,
+            "opponent_seen_steps": 0,
             "natural_ball_consistent_steps": 0,
             "ball_visible_steps": 0,
             "ball_trusted_steps": 0,
@@ -1092,6 +1203,8 @@ class RealSimRobotEnv(ParallelEnv):
             bool(step_ctx.obs.natural_ball_seen_percentage > 0.0 or step_ctx.obs.natural_time_since_ball_seen <= 1000.0)
         )
         tracker["natural_ball_consistent_steps"] += int(bool(step_ctx.obs.natural_ball_consistent_with_game_state))
+        # Opponent perception: a real opponent within sensor range (4500mm sentinel = unseen).
+        tracker["opponent_seen_steps"] += int(bool(float(step_ctx.obs.nearest_opponent_dist) < 4500.0))
         masks = _ball_observation_masks(step_ctx.obs)
         tracker["ball_visible_steps"] += int(bool(masks["ball_visible_mask"]))
         tracker["ball_trusted_steps"] += int(bool(masks["ball_trusted_mask"]))
@@ -1401,6 +1514,7 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
             "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
             "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "opponent_seen_rate": float(tracker["opponent_seen_steps"] / steps),
             "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
             "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
             "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),
@@ -1589,12 +1703,14 @@ class RealSimRobotEnv(ParallelEnv):
             "policy_shoot_rate": float(tracker["policy_skill_counts"].get("shoot", 0) / steps),
             "policy_pass_rate": float(tracker["policy_skill_counts"].get("pass", 0) / steps),
             "policy_block_rate": float(tracker["policy_skill_counts"].get("block", 0) / steps),
+            "policy_mark_rate": float(tracker["policy_skill_counts"].get("mark", 0) / steps),
             "executed_stand_rate": float(tracker["skill_counts"].get("stand", 0) / steps),
             "executed_walk_rate": float(tracker["skill_counts"].get("walk", 0) / steps),
             "executed_dribble_rate": float(tracker["skill_counts"].get("dribble", 0) / steps),
             "executed_shoot_rate": float(tracker["skill_counts"].get("shoot", 0) / steps),
             "executed_pass_rate": float(tracker["skill_counts"].get("pass", 0) / steps),
             "executed_block_rate": float(tracker["skill_counts"].get("block", 0) / steps),
+            "executed_mark_rate": float(tracker["skill_counts"].get("mark", 0) / steps),
             "policy_skill_prob_walk_mean": float(tracker["policy_skill_prob_sums"].get("walk", 0.0) / steps),
             "policy_skill_prob_dribble_mean": float(tracker["policy_skill_prob_sums"].get("dribble", 0.0) / steps),
             "policy_skill_prob_shoot_mean": float(tracker["policy_skill_prob_sums"].get("shoot", 0.0) / steps),
@@ -1639,6 +1755,7 @@ class RealSimRobotEnv(ParallelEnv):
             "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
             "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
             "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "opponent_seen_rate": float(tracker["opponent_seen_steps"] / steps),
             "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
             "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
             "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),

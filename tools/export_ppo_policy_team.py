@@ -15,6 +15,21 @@ from pathlib import Path
 from action import SKILL_ORDER
 from observation import OBS_SIZE
 
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _resolve_repo_path(path_str: str) -> Path:
+    """Resolve a CLI path, treating relative paths as relative to the RL repo root.
+
+    Importing pybh (pulled in transitively via train/env modules) changes the
+    process CWD to SabanaHerons2026/Make/Python, so a relative `runs/...` arg typed
+    from the RL repo would otherwise resolve against the wrong root.
+    """
+    p = Path(path_str).expanduser()
+    if not p.is_absolute():
+        p = _REPO / p
+    return p.resolve()
+
 
 class ActorExport(torch.nn.Module):
     def __init__(self, state_dict):
@@ -38,6 +53,9 @@ class ActorExport(torch.nn.Module):
 
 
 def export(checkpoint_path: str, output_path: str, active_skills: list[str], specialization: str):
+    checkpoint_path = str(_resolve_repo_path(checkpoint_path))
+    out_path = _resolve_repo_path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     sd = ckpt["policy_state_dict"]
 
@@ -55,7 +73,6 @@ def export(checkpoint_path: str, output_path: str, active_skills: list[str], spe
     skill_logits, param_mean = actor(dummy)
     print("sanity — skill_logits:", skill_logits.shape, "param_mean:", param_mean.shape)
 
-    out_path = Path(output_path)
     # dynamo=False: the new dynamo exporter requires onnxscript (not in RLNAO);
     # the legacy exporter handles this 2-layer MLP fine and matches what the
     # production obs26 export used.
