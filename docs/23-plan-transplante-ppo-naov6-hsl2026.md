@@ -78,7 +78,7 @@ El contrato actual del PPO esta en:
 - `train.py`: arquitectura del actor PPO, mascara de skills y carga de checkpoints.
 - `environment.py`: decode de accion, repair de target y stepping contra B-Human/SimRobot.
 - `reward.py`: anchors de walk/dribble/shoot y condiciones de shoot-zone.
-- `FOR_TRAIN_PRODUCTION.md`: contexto historico del primer intento productivo.
+- `FOR_TRAIN_PRODUCTION.md` [removed from this branch; available on rl-v4.2-multiagent-gk]: contexto historico del primer intento productivo.
 - `cambios_para_produccion.md`: resumen historico del salto original a 4/5; ya no debe leerse como baseline vigente.
 - `docs/25-guia-transplante-ppo-bhuman.md`: referencia exacta del pipeline de inferencia que se debe replicar en robot.
 
@@ -1239,8 +1239,8 @@ La primera version exitosa no es "todo el equipo con RL". Es un PPO striker segu
 Locales:
 
 - `README.md`
-- `FOR_TRAIN_PRODUCTION.md`
-- `HANDOFF_VISIBLE_3D_STATUS.md`
+- `FOR_TRAIN_PRODUCTION.md` [removed from this branch; available on rl-v4.2-multiagent-gk]
+- `HANDOFF_VISIBLE_3D_STATUS.md` [removed from this branch; available on rl-v4.2-multiagent-gk]
 - `docs/03-contrato-rl-env.md`
 - `docs/05-premisas-irrompibles.md`
 - `docs/12-wire-rl-realista-final.md`

@@ -25,7 +25,7 @@ path ~L610). Si ese bloque no llena algo, **el default del dataclass se queda**
 permanentemente — no hay ningún otro camino para que se abra.
 
 `gate_skill_mask_from_obs()` en `train.py:18-128` es la fuente única de verdad de la
-máscara (Design-A, ver `CLAUDE.md`). Las líneas relevantes para block/pass:
+máscara (Design-A, ver `CLAUDE.md` [removed from this branch; available on rl-v4.2-multiagent-gk]). Las líneas relevantes para block/pass:
 
 ```python
 has_role = is_striker | is_open | is_off_ball

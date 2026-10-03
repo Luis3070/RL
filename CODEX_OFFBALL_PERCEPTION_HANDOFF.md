@@ -45,8 +45,8 @@ Give the OFF-BALL role a head/gaze behavior that periodically SCANS the danger z
   otherwise patch the C++ head behavior gated to the off-ball/defender role.
 
 If the fix is C++: rebuild only what's needed (`pybh` extension and/or SimulatedNao) per
-`CLAUDE.md` "Rebuilding the C++ Bridge". Note current pybh binary is from Jun-10; if you
-rebuild, also see `CODEX_SESSION_LESSONS_20260618.md` about the Trionda ball cfg.
+`CLAUDE.md` [removed from this branch; available on rl-v4.2-multiagent-gk] "Rebuilding the C++ Bridge". Note current pybh binary is from Jun-10; if you
+rebuild, also see `CODEX_SESSION_LESSONS_20260618.md` [removed from this branch; available on rl-v4.2-multiagent-gk] about the Trionda ball cfg.
 
 ## ALLOWED TO CHANGE
 - Head/gaze behavior for the off-ball/defender role (C++ behavior or a Python head hook).

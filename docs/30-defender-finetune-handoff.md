@@ -450,7 +450,7 @@ episodios de eval stage-8 son suficientes.
    los archivos (`defender_policy.py`, `train_defender_bc.py`, recovery ONNX→pt
    se quedan allá; su `DefenderActor` y sus máscaras violan el contrato 47).
 4. Ojo numeración de docs: su rama tiene `docs/29-defender-obs26-pipeline-canonico.md`
-   y `docs/30-recuperacion-defender-onnx-a-pt.md` — nombres de archivo distintos
+   y `docs/30-recuperacion-defender-onnx-a-pt.md` [renumbered in this branch to `docs/41-defender-obs26-pipeline-canonico.md` and `docs/42-recuperacion-defender-onnx-a-pt.md`] — nombres de archivo distintos
    a los nuestros (sin conflicto de merge), pero al citar "doc 29/30" decir SIEMPRE
    de qué rama.
 5. Si el fine-tune 47 pasa el rubric completo (§9), `ppo_defender_hsl2026.onnx`
