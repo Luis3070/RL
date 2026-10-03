@@ -60,6 +60,23 @@ Mismatches found:
 | Extra packages | The code also needs `onnx` and `onnxruntime`, and `pytest` for tests; they are not listed in `environment.yml`. |
 | `pettingzoo[all]` | Can fail to build (box2d needs swig); plain `pettingzoo` is enough. |
 
+### Local paths (`.env`)
+
+Launchers under `tools/` and `scripts/` and `rlfootball/core/config.py` read two variables:
+
+| Variable | Meaning | Default when unset |
+|---|---|---|
+| `RL_REPO_DIR` | Absolute path of this repository | repository root, resolved from the script location |
+| `SABANAHERONS_DIR` | Absolute path of the C++ B-Human fork `SabanaHerons2026` | sibling directory `../SabanaHerons2026` |
+
+Both are optional. To override them, copy the template and edit it:
+
+```bash
+cp .env.example .env
+```
+
+`.env` is gitignored; variables already set in your shell take precedence over it.
+
 Minimal setup, following `scripts/setup_validation_env.sh`:
 
 ```bash
