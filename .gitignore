@@ -30,3 +30,4 @@ runs/tmp_*/
 *.partial.npz
 # ONNX weights, policy manifests (ppo_*.json) and run scripts (tools/*.sh) are tracked.
 # NOTE: ppo_*.onnx (weights) at repo ROOT ARE deliverables — tracked, not ignored.
+odd/
