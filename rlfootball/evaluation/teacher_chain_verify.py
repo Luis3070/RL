@@ -13,8 +13,8 @@ then dribble, then shoot?).
 
 Run (interactive conda env; `conda run` corrupts SimRobot's env):
 
-  source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \
-    && cd /home/luis/GitHub/RL && PYTHONPATH=/home/luis/GitHub/RL \
+  source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \
+    && cd $RL_REPO_DIR && PYTHONPATH=$RL_REPO_DIR \
        python teacher_chain_verify.py
 """
 

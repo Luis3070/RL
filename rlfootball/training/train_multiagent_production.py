@@ -25,8 +25,8 @@ Stage 6 (2v0 + BH GK) is the warmup; promote to stage 7 (3v3 vs full BH) per
 §14.21 LOCKED scenario weights for the Monday 2026-06-15 demo.
 
 Run:
-  source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \\
-    && cd /home/luis/GitHub/RL && PYTHONPATH=/home/luis/GitHub/RL \\
+  source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \\
+    && cd $RL_REPO_DIR && PYTHONPATH=$RL_REPO_DIR \\
        python train_multiagent_production.py --stage-id 6
 
   # Then, after stage 6 promotes, run stage 7:

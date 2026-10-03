@@ -399,7 +399,7 @@ def main() -> None:
     # Edit these values directly from the IDE. No argparse on purpose.
     #CHECKPOINT_PATH: Path | None = None
     # Exampl
-    CHECKPOINT_PATH = Path("/home/luis/GitHub/RL/runs/gated_climb_s1_s4/checkpoint_stage1_step5000.pt")
+    CHECKPOINT_PATH = Path("runs/gated_climb_s1_s4/checkpoint_stage1_step5000.pt")
 
     EXPERIMENT_NAME = "pybh_mappo_takeover_ppo"
     DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"

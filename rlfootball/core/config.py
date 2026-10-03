@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -8,7 +9,25 @@ from rlfootball.core.action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-BHUMAN_DIR = (ROOT_DIR.parent / "SabanaHerons2026").resolve()
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal KEY=VALUE loader; existing environment variables win."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
+_load_dotenv(ROOT_DIR / ".env")
+BHUMAN_DIR = Path(os.environ.get("SABANAHERONS_DIR") or ROOT_DIR.parent / "SabanaHerons2026").resolve()
 SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
 
 TEAM_NUMBER = 24

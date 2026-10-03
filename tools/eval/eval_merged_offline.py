@@ -6,10 +6,11 @@ instrument). Covers: sanity, per-role skill distribution, diversity/entropy,
 input-noise robustness, role-conditioning, and baseline agreement vs v4.2 (attack
 ref), models/defender/checkpoints (defense ref) and v2b@7500 (pre-merge base).
 
-Run: PYTHONPATH=/home/luis/GitHub/RL:.../Make/Python python tools/eval/eval_merged_offline.py
+Run: PYTHONPATH=$RL_REPO_DIR:$SABANAHERONS_DIR/Make/Python python tools/eval/eval_merged_offline.py
 """
+from pathlib import Path
 import numpy as np, torch, torch.nn.functional as F
-R = "/home/luis/GitHub/RL/"
+R = str(Path(__file__).resolve().parents[2]) + "/"
 from rlfootball.core.action import SKILL_ORDER
 from rlfootball.core.observation import ObsIndex, OBS_SIZE
 from rlfootball.training import train as T

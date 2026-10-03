@@ -22,8 +22,8 @@ train_bc.py / train.py BC-replay consume it unchanged.
 
 Run (interactive conda env; `conda run` corrupts SimRobot):
 
-  source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \
-    && cd /home/luis/GitHub/RL && PYTHONPATH=/home/luis/GitHub/RL \
+  source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \
+    && cd $RL_REPO_DIR && PYTHONPATH=$RL_REPO_DIR \
        python teacher_production_dataset.py
 """
 

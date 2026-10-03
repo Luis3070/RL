@@ -14,8 +14,8 @@ summary.json) plus two new arrays per §11.B.4.4:
 
 Runs (interactive conda env; `conda run` corrupts SimRobot):
 
-  source /home/luis/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \\
-    && cd /home/luis/GitHub/RL && PYTHONPATH=/home/luis/GitHub/RL \\
+  source ~/anaconda3/etc/profile.d/conda.sh && conda activate RLNAO \\
+    && cd $RL_REPO_DIR && PYTHONPATH=$RL_REPO_DIR \\
        RL_MA_TEACHER_STAGE=6 python teacher_multiagent_dataset.py
   # Then re-run with RL_MA_TEACHER_STAGE=7 for the stage-7 scenarios.
 
