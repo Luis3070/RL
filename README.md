@@ -120,7 +120,7 @@ These commands could not be executed during documentation work (the authors' `py
 
 ## Known gaps
 
-- The corpus sizes and several result figures in the paper come from results produced outside this repository (see [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md)).
+- The corpus sizes and several result figures in the paper come from results produced outside this repository (see [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md)). TODO: publish those results here.
 - Paper figures and `references.bib` are not in this repository.
 - `environment.yml` is out of date (Python version, missing `onnx`/`onnxruntime`/`pytest`).
 - The C++ repository URL is to be confirmed by the authors.

@@ -45,3 +45,8 @@ Datasets and checkpoints live under `runs/`, which is gitignored, so no dataset 
 | `tools/run_defv2_*.sh` (cited by working notes such as `HANDOFF.md`) | Found: `run_defv2_chunk.sh`, `run_defv2_finetune.sh`, `run_defv2_floor.sh`, `run_defv2_stability.sh`, `run_defv2_stability_seed67.sh` (checked with `fd 'run_defv2' tools`) |
 | Datasets, run logs, training checkpoints | Under `runs/` (gitignored); not available from this repository |
 | Corpus-generation results behind rows 1-7 | Produced outside this repository; to be confirmed by the authors |
+
+## TODO
+
+- [ ] Publish the results reported in the paper (rows marked `not in repository` or `partial`): the corpus datasets and their summaries (rows 1-8, 21), the raw evaluation outputs behind rows 9-16, the production stress run behind row 17, and the reward decomposition behind row 22. Owner: the co-author who produced them. Once published, update the `Where in this repo` and `Status` columns.
+- [ ] Add the paper figures and `references.bib`, or link to where they are hosted.
