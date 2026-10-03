@@ -64,7 +64,7 @@ atexit.register(_dump)
 
 
 def _install_accumulator() -> None:
-    import team_parallel_environment as tpe
+    from rlfootball.env import team_parallel_environment as tpe
 
     orig = tpe.TeamSlotSimRobotEnv._team_metrics
 
@@ -93,7 +93,7 @@ def main() -> None:
 
     _install_accumulator()
 
-    import train_multiagent_production as tmp
+    from rlfootball.training import train_multiagent_production as tmp
 
     sys.argv = [
         "team_holdrate_eval",

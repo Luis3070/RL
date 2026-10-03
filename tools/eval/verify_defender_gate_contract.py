@@ -12,12 +12,12 @@ import math
 import numpy as np
 import torch
 
-from action import SKILL_ORDER, SkillType
-from observation import OBS_SIZE, ObsIndex
-from gate import GateDecision
-from train import gate_skill_mask_from_obs
-import multiagent_teacher as mt
-from pybh_backend import BackendObservation
+from rlfootball.core.action import SKILL_ORDER, SkillType
+from rlfootball.core.observation import OBS_SIZE, ObsIndex
+from rlfootball.core.gate import GateDecision
+from rlfootball.training.train import gate_skill_mask_from_obs
+from rlfootball.teachers import multiagent_teacher as mt
+from rlfootball.core.pybh_backend import BackendObservation
 
 X_RANGE = 4500.0
 SKILL_IDX = {s: i for i, s in enumerate(SKILL_ORDER)}

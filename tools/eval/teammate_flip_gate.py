@@ -23,11 +23,11 @@ for _p in (_REPO, _REPO.parent / "SabanaHerons2026" / "Make" / "Python"):
         sys.path.insert(0, str(_p))
 
 import numpy as np
-import multiagent_teacher as mt
-from multiagent_teacher import TeammateSlot
-from gate import GateDecision
-from pybh_backend import BackendObservation
-import production_curriculum as pc
+from rlfootball.teachers import multiagent_teacher as mt
+from rlfootball.teachers.multiagent_teacher import TeammateSlot
+from rlfootball.core.gate import GateDecision
+from rlfootball.core.pybh_backend import BackendObservation
+from rlfootball.curriculum import production_curriculum as pc
 
 MIN_FLIP = 0.10   # req 7 stop floor
 N = 60

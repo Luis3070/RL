@@ -10,8 +10,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from config import PLAYER_NUMBER, SIMROBOT_BIN
-from pybh_backend import PyBHBackend
+from rlfootball.core.config import PLAYER_NUMBER, SIMROBOT_BIN
+from rlfootball.core.pybh_backend import PyBHBackend
 
 import pybh.controller as pybh
 

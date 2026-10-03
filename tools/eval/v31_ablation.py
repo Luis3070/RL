@@ -13,8 +13,8 @@ for _p in (_REPO, _REPO.parent / "SabanaHerons2026" / "Make" / "Python"):
     if _p.exists() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 import numpy as np, torch, torch.nn.functional as F
-from action import SKILL_ORDER
-from train import gate_skill_mask_from_obs
+from rlfootball.core.action import SKILL_ORDER
+from rlfootball.training.train import gate_skill_mask_from_obs
 
 CORPUS = str(_REPO / "runs/teacher_multiagent_dataset/dataset_v31_backbone_plus_overlay/samples.npz")
 RUN = _REPO / "runs/multiagent_v31"

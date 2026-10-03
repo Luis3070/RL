@@ -29,7 +29,7 @@ echo "=================================================================="
 echo "[gt-label-check] exit_rc=$RC  Label distribution (GT obs ON):"
 "$PY" - <<'PY'
 import glob, numpy as np
-from action import SKILL_ORDER
+from rlfootball.core.action import SKILL_ORDER
 npzs = sorted(glob.glob("runs/tmp_gt_labelcheck/**/samples.npz", recursive=True))
 if not npzs:
     print("  (no samples.npz written)"); raise SystemExit

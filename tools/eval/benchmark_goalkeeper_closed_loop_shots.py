@@ -15,8 +15,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from goalkeeper_action import GK_SKILL_ORDER
-from goalkeeper_teacher import (
+from rlfootball.core.goalkeeper_action import GK_SKILL_ORDER
+from rlfootball.teachers.goalkeeper_teacher import (
     GOALIE_LINE_X_MM,
     OWN_GOAL_HALF_Y_MM,
     OWN_GOAL_X_MM,
@@ -24,9 +24,9 @@ from goalkeeper_teacher import (
     goalkeeper_teacher_action,
     goalkeeper_skill_mask_np,
 )
-from pybh_backend import BackendObservation
-from train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
-from config import TRAIN
+from rlfootball.core.pybh_backend import BackendObservation
+from rlfootball.training.train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
+from rlfootball.core.config import TRAIN
 
 
 DT_S = 0.10

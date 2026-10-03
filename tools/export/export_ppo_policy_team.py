@@ -12,8 +12,8 @@ Uso:
 """
 import argparse, hashlib, json, torch
 from pathlib import Path
-from action import SKILL_ORDER
-from observation import OBS_SIZE
+from rlfootball.core.action import SKILL_ORDER
+from rlfootball.core.observation import OBS_SIZE
 
 _REPO = Path(__file__).resolve().parents[2]
 

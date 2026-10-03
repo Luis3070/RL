@@ -13,8 +13,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from goalkeeper_action import GK_SKILL_ORDER, GKSkillType
-from goalkeeper_teacher import (
+from rlfootball.core.goalkeeper_action import GK_SKILL_ORDER, GKSkillType
+from rlfootball.teachers.goalkeeper_teacher import (
     GOALIE_LINE_X_MM,
     BALL_CATCH_MAX_WALK_DISTANCE_MM,
     build_gk_cognition,
@@ -24,8 +24,8 @@ from goalkeeper_teacher import (
     goalkeeper_skill_mask_np,
     goalkeeper_teacher_action,
 )
-from pybh_backend import BackendObservation, PyBHBackend
-from config import SIMROBOT_BIN
+from rlfootball.core.pybh_backend import BackendObservation, PyBHBackend
+from rlfootball.core.config import SIMROBOT_BIN
 
 
 def _obs(

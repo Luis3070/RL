@@ -12,11 +12,11 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from action import SkillType, StructuredSkillAction
-from config import PLAYER_NUMBER, SIMROBOT_BIN
-from goalkeeper_action import GKSkillType, GKStructuredAction
-from goalkeeper_teacher import GOALIE_LINE_X_MM, gk_action_to_current_bridge
-from pybh_backend import PyBHBackend
+from rlfootball.core.action import SkillType, StructuredSkillAction
+from rlfootball.core.config import PLAYER_NUMBER, SIMROBOT_BIN
+from rlfootball.core.goalkeeper_action import GKSkillType, GKStructuredAction
+from rlfootball.teachers.goalkeeper_teacher import GOALIE_LINE_X_MM, gk_action_to_current_bridge
+from rlfootball.core.pybh_backend import PyBHBackend
 
 import pybh.controller as pybh
 

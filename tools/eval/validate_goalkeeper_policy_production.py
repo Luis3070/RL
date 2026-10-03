@@ -13,10 +13,10 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from goalkeeper_action import GK_ACTION_PARAM_MASKS, GK_SKILL_ORDER
-from goalkeeper_teacher import goalkeeper_skill_mask_np
-from train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
-from config import TRAIN
+from rlfootball.core.goalkeeper_action import GK_ACTION_PARAM_MASKS, GK_SKILL_ORDER
+from rlfootball.teachers.goalkeeper_teacher import goalkeeper_skill_mask_np
+from rlfootball.training.train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
+from rlfootball.core.config import TRAIN
 
 
 def _resolve(path: str | Path) -> Path:

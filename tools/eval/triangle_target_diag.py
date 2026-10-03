@@ -75,7 +75,7 @@ atexit.register(_dump)
 
 
 def _install() -> None:
-    import team_parallel_environment as tpe
+    from rlfootball.env import team_parallel_environment as tpe
 
     orig = tpe.TeamSlotSimRobotEnv._refresh_team_state
 
@@ -138,7 +138,7 @@ def main() -> None:
         "team_3v0_dynamic:0,giveandgo_outlet_present:0,giveandgo_outlet_absent:0,pass_forcing:0",
     )
     _install()
-    import train_multiagent_production as tmp
+    from rlfootball.training import train_multiagent_production as tmp
     sys.argv = [
         "triangle_target_diag", "--stage-id", "7",
         "--checkpoint", str(REPO / "runs/multiagent_v4_4/checkpoint_stage7_step12000.pt"),

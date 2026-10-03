@@ -44,8 +44,8 @@ case "${1:-}" in
     PROBE_GLOB="dataset_stage6_*"
     "$PY" - "$PROBE" <<'PYEOF'
 import numpy as np, glob, os, sys, collections, json
-from observation import ObsIndex
-from action import SKILL_ORDER
+from rlfootball.core.observation import ObsIndex
+from rlfootball.core.action import SKILL_ORDER
 ds=glob.glob(os.path.join(sys.argv[1],"dataset_stage6_*"))
 if not ds: print("[probe] NO chunk written — generation failed"); sys.exit(1)
 chunk=sorted(ds)[-1]

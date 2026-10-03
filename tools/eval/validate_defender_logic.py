@@ -30,11 +30,11 @@ os.chdir = lambda *a, **k: None  # noqa: E731 - restored right after import
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import multiagent_teacher as mt  # noqa: E402
-import production_curriculum as pc  # noqa: E402
-from gate import GateDecision  # noqa: E402
-from action import SkillType  # noqa: E402
-from pybh_backend import BackendObservation  # noqa: E402
+from rlfootball.teachers import multiagent_teacher as mt  # noqa: E402
+from rlfootball.curriculum import production_curriculum as pc  # noqa: E402
+from rlfootball.core.gate import GateDecision  # noqa: E402
+from rlfootball.core.action import SkillType  # noqa: E402
+from rlfootball.core.pybh_backend import BackendObservation  # noqa: E402
 
 os.chdir = _real_chdir
 

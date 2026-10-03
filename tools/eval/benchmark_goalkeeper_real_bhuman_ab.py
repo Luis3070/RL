@@ -17,10 +17,10 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from action import SkillType, StructuredSkillAction
-from config import BHUMAN_DIR, SIMROBOT_BIN, TRAIN
-from goalkeeper_action import GK_SKILL_ORDER
-from goalkeeper_teacher import (
+from rlfootball.core.action import SkillType, StructuredSkillAction
+from rlfootball.core.config import BHUMAN_DIR, SIMROBOT_BIN, TRAIN
+from rlfootball.core.goalkeeper_action import GK_SKILL_ORDER
+from rlfootball.teachers.goalkeeper_teacher import (
     GOALIE_LINE_X_MM,
     OWN_GOAL_HALF_Y_MM,
     OWN_GOAL_X_MM,
@@ -28,8 +28,8 @@ from goalkeeper_teacher import (
     gk_action_to_native_bridge_name,
     goalkeeper_skill_mask_np,
 )
-from pybh_backend import PyBHBackend
-from train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
+from rlfootball.core.pybh_backend import PyBHBackend
+from rlfootball.training.train_goalkeeper_ppo import GoalkeeperPPOActor, _masked_logits
 
 import pybh.controller as pybh
 
@@ -143,7 +143,7 @@ def _send_rl_action(backend: PyBHBackend, actor: GoalkeeperPPOActor, device: tor
         class _A:
             @property
             def skill(self):
-                from goalkeeper_action import GKSkillType
+                from rlfootball.core.goalkeeper_action import GKSkillType
                 return GKSkillType.from_public_name(skill)
         set_action(1, gk_action_to_native_bridge_name(_A()), 0.0, 0.0, 0.0, -1)
     elif skill == "clear":

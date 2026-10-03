@@ -25,9 +25,9 @@ for _p in (_REPO, _REPO.parent / "SabanaHerons2026" / "Make" / "Python"):
     if _p.exists() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import multiagent_teacher as mt
-from gate import GateDecision
-from pybh_backend import BackendObservation
+from rlfootball.teachers import multiagent_teacher as mt
+from rlfootball.core.gate import GateDecision
+from rlfootball.core.pybh_backend import BackendObservation
 
 
 def _obs(**kw) -> BackendObservation:

@@ -33,7 +33,7 @@ echo "=================================================================="
 echo "[collect-defense-gt] exit_rc=$RC  Newest stage-8 dataset + label distribution:"
 "$PY" - <<'PY'
 import glob, os, numpy as np, collections
-from action import SKILL_ORDER
+from rlfootball.core.action import SKILL_ORDER
 dirs = sorted(glob.glob("runs/teacher_multiagent_dataset/dataset_stage8_*"), key=os.path.getmtime)
 if not dirs:
     print("  (no stage-8 dataset dir)"); raise SystemExit

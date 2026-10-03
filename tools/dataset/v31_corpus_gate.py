@@ -15,8 +15,8 @@ for _p in (_REPO, _REPO.parent / "SabanaHerons2026" / "Make" / "Python"):
     if _p.exists() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 import numpy as np
-from action import SKILL_ORDER
-from observation import ObsIndex
+from rlfootball.core.action import SKILL_ORDER
+from rlfootball.core.observation import ObsIndex
 
 d = Path(sys.argv[1] if len(sys.argv) > 1 else "runs/teacher_multiagent_dataset/dataset_v31_backbone_plus_overlay")
 z = np.load(d / "samples.npz", allow_pickle=True)

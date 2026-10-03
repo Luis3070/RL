@@ -12,8 +12,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from goalkeeper_action import GK_SKILL_ORDER
-from goalkeeper_teacher import GK_OBS_SIZE
+from rlfootball.core.goalkeeper_action import GK_SKILL_ORDER
+from rlfootball.teachers.goalkeeper_teacher import GK_OBS_SIZE
 
 
 class ActorExport(torch.nn.Module):

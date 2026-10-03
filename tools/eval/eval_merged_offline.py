@@ -10,9 +10,9 @@ Run: PYTHONPATH=/home/luis/GitHub/RL:.../Make/Python python tools/eval/eval_merg
 """
 import numpy as np, torch, torch.nn.functional as F
 R = "/home/luis/GitHub/RL/"
-from action import SKILL_ORDER
-from observation import ObsIndex, OBS_SIZE
-import train as T
+from rlfootball.core.action import SKILL_ORDER
+from rlfootball.core.observation import ObsIndex, OBS_SIZE
+from rlfootball.training import train as T
 
 torch.manual_seed(0); np.random.seed(0)
 S = {n: i for i, n in enumerate(SKILL_ORDER)}

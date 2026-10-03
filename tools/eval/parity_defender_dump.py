@@ -29,9 +29,9 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import torch  # noqa: E402
 
-from observation import ObsIndex, OBS_SIZE  # noqa: E402
-from action import SKILL_ORDER  # noqa: E402
-from train import gate_skill_mask_from_obs  # noqa: E402
+from rlfootball.core.observation import ObsIndex, OBS_SIZE  # noqa: E402
+from rlfootball.core.action import SKILL_ORDER  # noqa: E402
+from rlfootball.training.train import gate_skill_mask_from_obs  # noqa: E402
 
 MODEL_PATH = REPO_ROOT / "models" / "defender" / "ppo_defender_hsl2026.onnx"
 
