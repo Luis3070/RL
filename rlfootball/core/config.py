@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -11,19 +12,32 @@ from rlfootball.core.action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
+_DOTENV_KEYS = ("RL_REPO_DIR", "SABANAHERONS_DIR")
+
+
 def _load_dotenv(path: Path) -> None:
-    """Minimal KEY=VALUE loader; existing environment variables win."""
+    """Read simple KEY=VALUE lines for the documented keys only.
+
+    Mirrors scripts/env.sh: optional `export `, one pair of matching quotes,
+    unquoted trailing ` # comment`. Already-set variables win.
+    """
     if not path.is_file():
         return
     for line in path.read_text().splitlines():
         line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or key not in _DOTENV_KEYS:
             continue
-        key, _, value = line.partition("=")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        os.environ.setdefault(key.strip(), value)
+        if value[:1] in ("'", '"') and value.find(value[0], 1) > 0:
+            value = value[1:value.find(value[0], 1)]
+        else:
+            value = re.sub(r"\s+#.*$", "", value)
+        if not os.environ.get(key):
+            os.environ[key] = value
 
 
 _load_dotenv(ROOT_DIR / ".env")
