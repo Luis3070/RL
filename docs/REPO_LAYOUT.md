@@ -242,4 +242,4 @@ Differences between the design above and what was implemented:
 - `probe_protocol_experiment` re-runs itself with `python -m rlfootball.diagnostics.probe_protocol_experiment` instead of the file path.
 - Inline Python in four `.sh` heredocs now imports `rlfootball.core.*`.
 - Smoke test: `python -m tests.smoke_test_skill_requests` (run from the repo root).
-- `run_goalkeeper_production` and `train_goalkeeper` import `evaluate_step_gk` from `reward`, which does not define it. This predates the refactor and was left unchanged.
+- `train_goalkeeper` imports `evaluate_step_gk` from `reward`, which does not define it. This predates the refactor and was left unchanged.
