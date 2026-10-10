@@ -239,7 +239,7 @@ def _build_run_cfg(args: argparse.Namespace) -> train.ScriptRunConfig:
         capture_eval_steps=_env_bool("RL_MA_PROD_CAPTURE_EVAL_STEPS", False),
         pack_parallel_eval=_env_bool("RL_MA_PROD_PACK_PARALLEL_EVAL", True),
         abort_on_wire_fail=False,
-        bc_warm_start=True,
+        bc_warm_start=_env_bool("RL_MA_PROD_BC_WARM_START", True),
         bc_checkpoint_path=str(checkpoint),
         bc_replay=True,
         bc_replay_dataset_path=str(dataset),

@@ -359,6 +359,21 @@ class BackendObservation:
     teammate_poses: tuple[tuple[float, float, float], ...] = ()
     teammate_ages_ms: tuple[float, ...] = ()
     teammate_activities: tuple[int, ...] = ()
+    # Real isGoalkeeper flag per teammate (TeamData.teammates), parallel to
+    # teammate_poses in the SAME (unsorted, wire) order — position-match against
+    # teammate_poses to use, do not assume it survives any re-sort. Empty unless the
+    # live match harness's C++ export is present (training's synthetic injection never
+    # sets this).
+    teammate_is_gk: tuple[bool, ...] = ()
+
+    # Real GameController score (autoreferee ground truth). Defaults to 0 so any
+    # consumer running against an older pybh build degrades to "no goals seen"
+    # rather than raising.
+    own_score: int = 0
+    opponent_score: int = 0
+    # Team-fused opponent field positions. Measurement only -- never encoded into the
+    # 47-dim obs (that contract is frozen).
+    opponent_positions: tuple[tuple[float, float], ...] = ()
 
     global_team_ball_x_mm: float = 0.0
     global_team_ball_y_mm: float = 0.0
@@ -463,6 +478,13 @@ class BackendObservation:
             teammate_poses=tuple(zip(payload.get("teammate_x_mm", []), payload.get("teammate_y_mm", []), payload.get("teammate_theta", []),)),
             teammate_ages_ms=tuple(payload.get("teammate_age_ms", [])),
             teammate_activities=tuple(payload.get("teammate_activity", [])),
+            teammate_is_gk=tuple(bool(v) for v in payload.get("teammate_is_gk", [])),
+            own_score=int(payload.get("own_score", 0)),
+            opponent_score=int(payload.get("opponent_score", 0)),
+            opponent_positions=tuple(
+                (float(x), float(y))
+                for x, y in zip(payload.get("opponent_x_mm", []), payload.get("opponent_y_mm", []))
+            ),
             # Finite-guarded: with no team comm (isolated slot sims, or comm
             # dropouts on hardware) the TeammatesBallModel wire fields can be
             # NaN. A NaN here propagates into the encoded obs and poisons the

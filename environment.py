@@ -834,16 +834,25 @@ class RealSimRobotEnv(ParallelEnv):
     def state(self) -> np.ndarray:
         return self.get_global_state()
 
-    def _gt_opponent_distances(self, transform_fn) -> tuple[float, float] | None:
+    def _gt_opponent_distances(self, transform_fn, obs: BackendObservation | None = None) -> tuple[float, float] | None:
         """Training-only: nearest opponent distance (all-directions, front) in mm from
-        GROUND-TRUTH positions, using current dynamic positions if present else the spawn
-        WorldSpec. Returns None when no opponents are spawned (caller falls back to the
-        perceived obs). `transform_fn(field_x, field_y) -> (rel_x, rel_y)` maps to the
-        robot frame; rel_x > 0 means in front (matches the obs[21] gate semantics)."""
+        GROUND-TRUTH positions. Returns None when no opponents are known (caller falls
+        back to the perceived obs). `transform_fn(field_x, field_y) -> (rel_x, rel_y)`
+        maps to the robot frame; rel_x > 0 means in front (matches obs[21] gate semantics).
+
+        Source priority matters once opponents are allowed to play REAL B-Human football
+        instead of being teleported along a script (RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES=0):
+        the dynamic-world state stops updating and the spawn WorldSpec goes stale within
+        seconds, so both legacy sources would silently feed the policy the opponents'
+        kickoff positions. The live GlobalOpponentsModel export (added 2026-08-11) tracks
+        them wherever they actually run, so prefer it whenever it is populated."""
         positions: list[tuple[float, float]] = []
+        live_pos = getattr(obs, "opponent_positions", ()) if obs is not None else ()
         dws = getattr(self, "_dynamic_world_state", None)
         dyn_pos = getattr(dws, "opponent_positions", None) if dws is not None else None
-        if dyn_pos is not None and len(dyn_pos) > 0:
+        if live_pos:
+            positions = [(float(px), float(py)) for px, py in live_pos]
+        elif dyn_pos is not None and len(dyn_pos) > 0:
             positions = [(float(p[0]), float(p[1])) for p in dyn_pos]
         elif self._current_world_spec is not None and self._current_world_spec.opponents:
             positions = [(float(o.x), float(o.y)) for o in self._current_world_spec.opponents]
@@ -890,7 +899,7 @@ class RealSimRobotEnv(ParallelEnv):
         opp_all_norm = norm_dist(obs.nearest_opponent_dist)
         opp_front_norm = norm_dist(obs.nearest_opponent_front_dist)
         if GT_OPPONENT_OBS:
-            gt = self._gt_opponent_distances(transform_to_robot_frame)
+            gt = self._gt_opponent_distances(transform_to_robot_frame, obs)
             if gt is not None:
                 opp_all_norm = norm_dist(gt[0])
                 opp_front_norm = norm_dist(gt[1])
@@ -1393,6 +1402,62 @@ class RealSimRobotEnv(ParallelEnv):
             cur_dist = math.hypot(float(step_ctx.obs.ball_x) - own_goal_x, float(step_ctx.obs.ball_y))
             threat_reduction = float(np.clip((cur_dist - prev_dist) / 300.0, -1.0, 1.0))
 
+        # Possession race: reward.py scaffolds first_to_ball/bad_duel fields (StepContext,
+        # StepEvaluation) but environment.py hardcodes both to False at construction time
+        # (see the `first_to_ball=False, bad_duel=False` StepContext(...) call above) --
+        # the signal was never actually wired up anywhere in the codebase, so no checkpoint
+        # has ever been trained to care about winning the ball ahead of the opponent. Live
+        # match telemetry (10-match batches, 2026-08-10/11) confirms this gap empirically:
+        # B-Human's possession proxy consistently ran ~2-3x the RL team's. This computes a
+        # real possession-transition signal here (stage-8 only, self-contained, does not
+        # touch the shared single-agent reward.py path) using the same
+        # BALL_CONTROL_RADIUS_MM=350mm convention already validated by
+        # multiagent_teacher.py/tools/summarize_v5_vs_bhuman_matches.py's possession/
+        # recovery proxies.
+        possession_control_mm = 350.0
+        contest_radius_mm = 1200.0
+        own_ball_dist = math.hypot(float(step_ctx.obs.ball_rel_x), float(step_ctx.obs.ball_rel_y))
+        opp_dist = float(step_ctx.obs.nearest_opponent_dist)
+        we_control = own_ball_dist <= possession_control_mm and opp_dist > possession_control_mm
+        won_ball_race = False
+        contest_closing = 0.0
+        contested = opp_dist <= contest_radius_mm
+        if step_ctx.prev_obs is not None:
+            prev_own_ball_dist = math.hypot(float(step_ctx.prev_obs.ball_rel_x), float(step_ctx.prev_obs.ball_rel_y))
+            prev_opp_dist = float(step_ctx.prev_obs.nearest_opponent_dist)
+            prev_we_control = prev_own_ball_dist <= possession_control_mm and prev_opp_dist > possession_control_mm
+            won_ball_race = we_control and not prev_we_control
+            # Dense pursuit gradient, POSITIVE-ONLY and only while an opponent contests.
+            # Measured across three 10-match batches (2026-08-10/11), the striker's mean
+            # closing rate on the ball is NEGATIVE whenever an opponent is within 600mm
+            # (-4 to -8 mm/step) and positive otherwise: the policy systematically concedes
+            # every 50/50. `approach_ball` (+0.02) is the only pursuit term in the stage-8
+            # weights and is ~150x weaker than the collision penalty below, so conceding is
+            # the reward-optimal action. Rewarding only the CLOSING direction (never
+            # penalising the retreat) avoids the repair3 failure mode, where a symmetric
+            # possession_lost penalty taught the policy to avoid duels altogether
+            # (1W-9D-0L, 2/10 stalled, possession unchanged).
+            if contested:
+                contest_closing = float(np.clip((prev_own_ball_dist - own_ball_dist) / 40.0, 0.0, 1.0))
+
+        # Contest-aware collision relief. `_derive_collision` lumps FALLING
+        # (motion_engine_fall_state) together with mere obstacle arm/foot contact, and
+        # stage 8 weights the lump at -3.0. Physically winning a contested ball against a
+        # real B-Human opponent almost always involves incidental contact, so the lump term
+        # makes every duel strictly negative-EV. Falling stays fully penalised (it is a real
+        # failure); incidental contact while genuinely contesting the ball is discounted.
+        fall_event = int(step_ctx.obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE
+        # Widened from (ball<=800 AND opp<=800), which fired 0/6 episodes in the repair4
+        # run's telemetry while the raw collision term still averaged 7.5 hits/episode
+        # (= -22.5 reward at weight -3.0, i.e. 3x the +7.0 goal bonus). The tight gate
+        # required the SAME robot to be simultaneously on the ball and body-to-body with
+        # an opponent on the very frame of contact, which almost never coincides. Any
+        # non-falling contact while near the ball is the contact we want to stop taxing.
+        near_ball_contact = own_ball_dist <= 1200.0
+        collision_relief = 0.0
+        if step_ctx.collision and near_ball_contact and not fall_event:
+            collision_relief = -0.75 * float(evaluation.weighted_terms.get("collision", 0.0))
+
         terms = dict(evaluation.terms)
         weighted_terms = dict(evaluation.weighted_terms)
         defense_terms = {
@@ -1406,6 +1471,10 @@ class RealSimRobotEnv(ParallelEnv):
             "defense_far_corridor": float(np.clip(corridor_distance / 1800.0, 0.0, 1.0)) if defense_phase else 0.0,
             "defense_gk_near": 1.0 if defense_phase and gk_near else 0.0,
             "defense_collision": 1.0 if step_ctx.collision else 0.0,
+            "possession_won": 1.0 if won_ball_race else 0.0,
+            "possession_held": 1.0 if we_control else 0.0,
+            "contest_closing": contest_closing,
+            "collision_contest_relief": collision_relief,
         }
         defense_weights = {
             "defense_goal_side": 0.035,
@@ -1418,6 +1487,12 @@ class RealSimRobotEnv(ParallelEnv):
             "defense_far_corridor": -0.035,
             "defense_gk_near": -0.080,
             "defense_collision": -0.120,
+            "possession_won": 0.150,
+            "possession_held": 0.015,
+            "contest_closing": 0.120,
+            # Already an absolute reward delta (computed from the collision term itself),
+            # so it passes through with weight 1.0 rather than being scaled again.
+            "collision_contest_relief": 1.000,
         }
         for name, value in defense_terms.items():
             terms[name] = float(value)
