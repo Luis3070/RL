@@ -137,6 +137,7 @@ _OBSTACLE_DEBUG_ROWS: list[dict] = []
 _EVAL_POLICY_PATH = os.getenv("RL_MA_EVAL_POLICY", "").strip()
 _EVAL_POLICY = None
 _EVAL_ROWS: list[dict] = []
+_MATCH_SUMMARY_ENABLED = os.getenv("RL_MA_MATCH_SUMMARY", "0") == "1"
 # Inference-side upgrade overrides (deploy as a thin wrapper next to the ONNX; flag-gated
 # so we can A/B them in the harness). #3 block-priority: when both block & mark are gate-
 # allowed and the BALL is the nearer in-front threat, intercept the lane (block) instead of
@@ -145,6 +146,41 @@ _EVAL_ROWS: list[dict] = []
 _EVAL_BLOCK_PRIORITY = os.getenv("RL_EVAL_BLOCK_PRIORITY", "0") == "1"
 _EVAL_COLLISION_AVOID = os.getenv("RL_EVAL_COLLISION_AVOID", "0") == "1"
 _EVAL_COLLISION_AVOID_MM = float(os.getenv("RL_EVAL_COLLISION_AVOID_MM", "500.0"))
+
+
+def _record_match_row(
+    *,
+    scenario_name: str,
+    attempt: int,
+    step: int,
+    aid: int,
+    role: str,
+    skill: str,
+    team_ball: tuple[float, float, bool],
+    obs,
+) -> None:
+    if not (_EVAL_POLICY is not None or _MATCH_SUMMARY_ENABLED):
+        return
+    bx = float(team_ball[0])
+    by = float(team_ball[1])
+    rx = float(obs.robot_x)
+    ry = float(obs.robot_y)
+    _EVAL_ROWS.append({
+        "scn": scenario_name,
+        "att": int(attempt),
+        "step": int(step),
+        "aid": int(aid),
+        "role": role,
+        "skill": skill,
+        "bx": bx,
+        "by": by,
+        "rx": rx,
+        "ry": ry,
+        "ball_dist": float(math.hypot(rx - bx, ry - by)),
+        "opp_dist": float(obs.nearest_opponent_dist),
+        "opp_seen": int(float(obs.nearest_opponent_dist) < 4500.0),
+        "ball_seen": float(obs.ball_seen_percentage),
+    })
 
 
 def _load_eval_policy(path: str):
@@ -1314,14 +1350,16 @@ def _collect_team_scenario(
                     actions_for_step[aid] = absolute
                     prev_skill_name[aid] = resid.skill_name
                     ep_role_step_counts[role] += 1
-                    _EVAL_ROWS.append({
-                        "scn": scenario.name, "att": attempt, "step": step, "aid": aid,
-                        "role": role, "skill": SKILL_ORDER[sk],
-                        "bx": float(team_ball[0]), "by": float(team_ball[1]),
-                        "rx": float(obs.robot_x), "ry": float(obs.robot_y),
-                        "opp_seen": int(float(obs.nearest_opponent_dist) < 4500.0),
-                        "ball_seen": float(obs.ball_seen_percentage),
-                    })
+                    _record_match_row(
+                        scenario_name=scenario.name,
+                        attempt=attempt,
+                        step=step,
+                        aid=aid,
+                        role=role,
+                        skill=SKILL_ORDER[sk],
+                        team_ball=team_ball,
+                        obs=obs,
+                    )
                     continue
                 # ---- end eval mode ----
 
@@ -1344,6 +1382,16 @@ def _collect_team_scenario(
                     record_pass_target(team_state, aid, int(residual.pass_target))
 
                 ep_role_step_counts[role] += 1
+                _record_match_row(
+                    scenario_name=scenario.name,
+                    attempt=attempt,
+                    step=step,
+                    aid=aid,
+                    role=role,
+                    skill=residual.skill_name,
+                    team_ball=team_ball,
+                    obs=obs,
+                )
 
                 # Hold-step accounting (close to target = "holding")
                 dist_to_target = math.hypot(
@@ -1444,8 +1492,8 @@ def _collect_team_scenario(
         # Episode complete — apply v2 sanitizer (EVAL mode keeps every episode; the
         # behavior under collisions/outcomes IS the measurement).
         metrics: dict[str, float] = {}  # TODO Wed AM: extract from primary backend per-episode tracker
-        if _EVAL_POLICY is not None:
-            kept, reason = True, "eval_keep"
+        if _EVAL_POLICY is not None or _MATCH_SUMMARY_ENABLED:
+            kept, reason = True, "match_summary_keep"
         else:
             kept, reason = _episode_kept_v2(
                 scenario, metrics,
@@ -1516,6 +1564,8 @@ def main() -> int:
         # prime the lazy gate fn used in the per-agent eval branch
         _team_label_allowed("walk", np.zeros(47, dtype=np.float32))
         print(f"[ma-eval] MULTI-AGENT MEASUREMENT MODE — policy={_EVAL_POLICY_PATH} (no dataset sanitizer)", flush=True)
+    elif _MATCH_SUMMARY_ENABLED:
+        print("[ma-eval] MULTI-AGENT MEASUREMENT MODE — deterministic teacher baseline (no dataset sanitizer)", flush=True)
 
     if STAGE_ID not in _RL_FIELD_AGENTS_BY_STAGE:
         raise ValueError(
@@ -1673,13 +1723,13 @@ def main() -> int:
         total_episodes=next_episode_id,
         partial=False,
     )
-    if _EVAL_POLICY is not None:
+    if _EVAL_POLICY is not None or _MATCH_SUMMARY_ENABLED:
         _summarize_eval(output_dir)
     return 0
 
 
 def _summarize_eval(output_dir: Path) -> None:
-    """Cooperation / multi-agent behavior summary for the merged-policy match eval."""
+    """Cooperation / multi-agent behavior summary for matched policy/teacher runs."""
     import collections, json
     rows = _EVAL_ROWS
     if not rows:
@@ -1694,7 +1744,10 @@ def _summarize_eval(output_dir: Path) -> None:
     ballprog = []       # net ball advance toward opp goal (mm), per episode
     scored = conceded = 0
     pass_attempts = 0
+    possession_steps = possession_total_steps = 0
+    ball_recoveries = 0
     skill_by_role = collections.defaultdict(collections.Counter)
+    skill_total = collections.Counter()
     role_steps = collections.Counter()
     opp_seen_steps = ball_seen_acc = total_agent_steps = 0
     _coll_steps = [0, 0]   # [total_steps, colliding_steps]
@@ -1703,6 +1756,7 @@ def _summarize_eval(output_dir: Path) -> None:
         for r in ers:
             steps[r["step"]][r["aid"]] = r
             skill_by_role[r["role"]][r["skill"]] += 1
+            skill_total[r["skill"]] += 1
             role_steps[r["role"]] += 1
             opp_seen_steps += r["opp_seen"]; ball_seen_acc += r["ball_seen"]; total_agent_steps += 1
             if r["skill"] == "pass":
@@ -1716,6 +1770,24 @@ def _summarize_eval(output_dir: Path) -> None:
             close = any(math.hypot(ps[i][0]-ps[j][0], ps[i][1]-ps[j][1]) < 350.0
                         for i in range(len(ps)) for j in range(i+1, len(ps)))
             _coll_steps[0] += 1; _coll_steps[1] += int(close)
+        # possession proxy: a controlled agent is either close enough to touch the ball,
+        # or executes a ball-control skill while still within a plausible intervention radius.
+        prev_control = False
+        for s in sorted(steps):
+            rs = list(steps[s].values())
+            if not rs:
+                continue
+            min_ball_dist = min(float(r["ball_dist"]) for r in rs)
+            active_control = any(
+                r["skill"] in ("dribble", "pass", "shoot") and float(r["ball_dist"]) <= 1200.0
+                for r in rs
+            )
+            controlled = min_ball_dist <= 650.0 or active_control
+            possession_steps += int(controlled)
+            possession_total_steps += 1
+            if controlled and not prev_control:
+                ball_recoveries += 1
+            prev_control = controlled
         # ball progression: use the ball x from first and last step (any agent's team_ball)
         sk = sorted(steps)
         bx0 = next(iter(steps[sk[0]].values()))["bx"]
@@ -1730,21 +1802,38 @@ def _summarize_eval(output_dir: Path) -> None:
     print(f"  role-step share: " + "  ".join(f"{k}={100*v/max(1,sum(role_steps.values())):.0f}%" for k, v in role_steps.items()))
     print(f"  ball progression toward opp goal: mean {np.mean(ballprog):+.0f} mm/episode  (>0 = team advances)")
     print(f"  pass attempts (striker->teammate): {pass_attempts}")
+    print(f"  possession proxy: {100*possession_steps/max(1,possession_total_steps):.1f}% of episode steps")
+    print(f"  ball recoveries proxy: {ball_recoveries/max(1,n_ep):.2f}/episode")
     print(f"  episodes ball reached opp goal (scored): {scored}/{n_ep}   own goal (conceded): {conceded}/{n_ep}")
     print(f"  perception: opp_seen={100*opp_seen_steps/max(1,total_agent_steps):.0f}%  mean_ball_seen={ball_seen_acc/max(1,total_agent_steps):.0f}%")
     print(f"  teammate-collision: {100*_coll_steps[1]/max(1,_coll_steps[0]):.1f}% of steps (any RL pair <350mm)  "
           f"[block_priority={_EVAL_BLOCK_PRIORITY} collision_avoid={_EVAL_COLLISION_AVOID}]")
+    tot_skill = max(1, sum(skill_total.values()))
+    print("  action distribution: " + "  ".join(f"{k}={100*v/tot_skill:.0f}%" for k, v in skill_total.most_common()))
     for role in ("striker", "open_support", "off_ball_support"):
         c = skill_by_role.get(role)
         if c:
             tot = sum(c.values())
             print(f"  {role:16s} skills: " + "  ".join(f"{k}={100*v/tot:.0f}%" for k, v in c.most_common()))
     out = output_dir / "eval_match_summary.json"
-    out.write_text(json.dumps({"episodes": n_ep, "rows": len(rows),
-                               "role_co_occurrence_pct": float(np.mean(all3)),
-                               "ball_progression_mm": float(np.mean(ballprog)),
-                               "pass_attempts": pass_attempts, "scored": scored, "conceded": conceded,
-                               "skill_by_role": {k: dict(v) for k, v in skill_by_role.items()}}, indent=2))
+    out.write_text(json.dumps({
+        "condition": "policy" if _EVAL_POLICY is not None else "deterministic_teacher",
+        "policy_path": _EVAL_POLICY_PATH if _EVAL_POLICY is not None else "",
+        "episodes": n_ep,
+        "rows": len(rows),
+        "role_co_occurrence_pct": float(np.mean(all3)),
+        "ball_progression_mm": float(np.mean(ballprog)),
+        "pass_attempts": int(pass_attempts),
+        "possession_proxy_pct": float(100.0 * possession_steps / max(1, possession_total_steps)),
+        "ball_recoveries_per_episode": float(ball_recoveries / max(1, n_ep)),
+        "scored": int(scored),
+        "conceded": int(conceded),
+        "perception_opp_seen_pct": float(100.0 * opp_seen_steps / max(1, total_agent_steps)),
+        "perception_ball_seen_mean_pct": float(ball_seen_acc / max(1, total_agent_steps)),
+        "teammate_collision_proxy_pct": float(100.0 * _coll_steps[1] / max(1, _coll_steps[0])),
+        "action_distribution": dict(skill_total),
+        "skill_by_role": {k: dict(v) for k, v in skill_by_role.items()},
+    }, indent=2))
     print(f"  wrote {out}")
     print("=" * 70)
 

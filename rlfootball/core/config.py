@@ -42,7 +42,7 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(ROOT_DIR / ".env")
 BHUMAN_DIR = Path(os.environ.get("SABANAHERONS_DIR") or ROOT_DIR.parent / "SabanaHerons2026").resolve()
-SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
+SIMROBOT_BIN = Path(os.environ.get("RL_SIMROBOT_BIN", str(BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot")))
 
 TEAM_NUMBER = 24
 PLAYER_NUMBER = 1
