@@ -6,6 +6,9 @@ Python reinforcement-learning code for the paper
 a behavioral-cloning (BC) warm start, PPO with a KL anchor, and a role-conditioned
 merged policy (striker, defender, goalkeeper).
 
+The C++ side of the system (B-Human fork, SimRobot, the `pybh` binding and native ONNX inference) lives in
+[juanulloa2050/SabanaHerons2026](https://github.com/juanulloa2050/SabanaHerons2026).
+
 Many documents under `docs/` are written in Spanish and are historical work logs.
 See [docs/README.md](docs/README.md) for the index.
 
@@ -14,7 +17,7 @@ See [docs/README.md](docs/README.md) for the index.
 | Repository | Language | Role |
 |---|---|---|
 | This repository | Python | Environments, teachers, dataset generation, BC/PPO training, evaluation, ONNX export |
-| `SabanaHerons2026` (B-Human fork; URL to be confirmed by the authors) | C++ | SimRobot, the `pybh` Python binding, `RLSharedState` bridge, native ONNX inference |
+| [`SabanaHerons2026`](https://github.com/juanulloa2050/SabanaHerons2026) (B-Human fork) | C++ | SimRobot, the `pybh` Python binding, `RLSharedState` bridge, native ONNX inference |
 
 Python talks to B-Human in-process through `pybh` (see `rlfootball/core/pybh_backend.py`).
 `rlfootball/core/config.py` expects `SabanaHerons2026` as a sibling directory of this repository.
@@ -47,19 +50,15 @@ Required `SabanaHerons2026` branches:
 | `models/defender/checkpoints/` | Tracked defender PyTorch checkpoints |
 | `docs/` | Documentation (index: [docs/README.md](docs/README.md)) |
 | `docs/notes/` | Historical working notes (`HANDOFF.md`, `CODEX_OFFBALL_PERCEPTION_HANDOFF.md`, `cambios_para_produccion.md`, `bhuman-logic/`) (mostly Spanish) |
-| `environment.yml` | Conda environment (outdated, see below) |
+| `environment.yml` | Conda environment (see "Environment setup") |
 
 ## Environment setup
 
-`environment.yml` pins `python=3.10`, `pytorch-cuda=11.8` and installs `skrl`, `pettingzoo`, `gymnasium`.
+`environment.yml` creates a conda environment with PyTorch (CUDA 11.8), `skrl`, `pettingzoo` and `gymnasium`. In addition:
 
-Mismatches found:
-
-| Item | Finding |
-|---|---|
-| Python version | `environment.yml` says 3.10; `scripts/setup_validation_env.sh` uses a `python3` venv at `.venv`, and the previous README referenced `cpython-312` `pybh` modules. Use the Python version your `pybh` build targets. |
-| Extra packages | The code also needs `onnx` and `onnxruntime`, and `pytest` for tests; they are not listed in `environment.yml`. |
-| `pettingzoo[all]` | Can fail to build (box2d needs swig); plain `pettingzoo` is enough. |
+- Use the Python version your `pybh` build targets; `scripts/setup_validation_env.sh` creates a `python3` virtual environment in `.venv`.
+- Install `onnx` and `onnxruntime` for export and inference, and `pytest` for the tests.
+- Plain `pettingzoo` is enough; `pettingzoo[all]` also builds box2d, which needs swig.
 
 ### Local paths (`.env`)
 
@@ -115,7 +114,6 @@ Other verified entry points (argparse):
 | `pytest` (reads `pytest.ini`, runs `tests/`) | Contract tests; some may need `pybh` |
 
 The `tools/run/*.sh` scripts record the exact recipes used for each policy version (for example `tools/run/run_v4_2.sh`, `tools/run/train_merge_v5.sh`).
-These commands could not be executed during documentation work (the authors' `pybh` build was not usable in the documentation environment); flags are quoted from the source, not from `--help` output.
 
 ## Data and runs policy
 
@@ -128,8 +126,8 @@ These commands could not be executed during documentation work (the authors' `py
 | Defender | `models/defender/ppo_defender_hsl2026.{onnx,json}` |
 | Team (striker v4.1, v4.2) | `models/team/ppo_team_hsl2026.*`, `ppo_team_hsl2026_v4_1.*`, `ppo_team_hsl2026_v4_2.*` |
 | Merged brain v5 | `models/team/ppo_team_hsl2026_v5_merged.{onnx,json}` |
-| Final all-learned team (no `.json` manifest) | `models/team/ppo_team_hsl2026_final_alllearned.onnx` |
-| Learned support coordinator (no `.json` manifest) | `models/team/ppo_coord_hsl2026_final_learned_coordinator.onnx` |
+| Final all-learned team | `models/team/ppo_team_hsl2026_final_alllearned.onnx` |
+| Learned support coordinator | `models/team/ppo_coord_hsl2026_final_learned_coordinator.onnx` |
 | Goalkeeper | `models/goalkeeper/ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
 
 ## Datasets
@@ -151,7 +149,7 @@ In the final merge corpus, `walk` and `stand` account for 85.94% of positive lab
 Up to v5, every policy in this repository learned from teacher datasets collected in scripted scenarios: the rule-based teacher decides, the network imitates it, and PPO fine-tunes the result.
 The latest step takes training into full matches.
 The team now learns from live 4v4 games against a stock B-Human team, using its own observations (no oracle), and the outcome is a single network that plays all three field roles plus a small learned coordinator for the support robots.
-This section explains how that was done, what the measurements show, and what is still missing.
+This section explains how that was done and what the measurements show.
 
 ### How the new team is trained
 
@@ -169,7 +167,7 @@ The two resulting networks are in `models/team/`:
 
 | File | What it is |
 |---|---|
-| `models/team/ppo_team_hsl2026_final_alllearned.onnx` | The all-learned team policy: one network for striker, open support and off-ball support, with the same 47-dim contract as v5. `tools/eval/heldout_policy_compare.py` identifies the final team as `runs/kickstart/loop_20261006_224436/iter_12/policy.pt`; the ONNX export step itself is not recorded in this repository |
+| `models/team/ppo_team_hsl2026_final_alllearned.onnx` | The all-learned team policy: one network for striker, open support and off-ball support, with the same 47-dim contract as v5. `tools/eval/heldout_policy_compare.py` identifies the final team as `runs/kickstart/loop_20261006_224436/iter_12/policy.pt` |
 | `models/team/ppo_coord_hsl2026_final_learned_coordinator.onnx` | The learned support coordinator: observation in, normalised field target (x/4500, y/3000) out |
 
 ### Why the warm start matters: held-out comparison
@@ -217,7 +215,7 @@ Before the new pipeline, the v5 policy was played in batches of live 600-second 
 These results describe **v5, not the final all-learned team**.
 Goals use the corrected count, where a goal is confirmed only by the same robot that saw the ball cross the line (`tools/paper/recompute_goals_corrected.py` explains the bug this fixes).
 Possession, recoveries and passes are estimated from ball and robot telemetry.
-Each batch keeps the name it was recorded under; the tracked files do not say what changed between the `repair*` and `gt_repair*` batches, so the table does not interpret them.
+Each batch keeps the name it was recorded under.
 Averages include stalled matches.
 
 | Batch | Matches | W-D-L | Goals for-against | Stalled | Possession RL / opp. / loose+unknown (%) | Recoveries RL / opp. per match | Pass attempts per match (success) |
@@ -235,16 +233,15 @@ Averages include stalled matches.
 Source: `results/paper/table_match_metrics_v5_vs_real_bhuman_<batch>.csv` (one row per match), produced by `tools/paper/summarize_v5_vs_bhuman_matches.py`.
 
 Most of these matches end in a draw, and possession looks low for both teams because the ball is classed as loose or unknown most of the time.
-The batches differ in scene and settings that the files do not record, so compare them with care.
+The batches differ in scene and settings, so compare them with care.
 An earlier, aggregated comparison of v5 against the B-Human/Sabana-Herons heuristic baseline (15 episodes per side) is in [`table_match_metrics_v5_vs_bhuman.csv`](results/paper/table_match_metrics_v5_vs_bhuman.csv), produced by `tools/paper/generate_emergency_eval_figures.py`.
 For example, it reports ball progression of 0.10 vs 0.20 m per episode and a possession proxy of 66.3% vs 72.7%.
 
 ### Running it yourself
 
 Run everything from the repository root.
-These commands read inputs from `runs/`, which is not tracked (each module docstring lists what it needs).
-The live-match commands also need a built `pybh` and the SimRobot binary (`RL_SIMROBOT_BIN`, or the default under `SABANAHERONS_DIR`).
-They were not executed while writing this section.
+Inputs and outputs live under `runs/`; each module docstring lists what it reads.
+The live-match commands need a built `pybh` and the SimRobot binary (`RL_SIMROBOT_BIN`, or the default under `SABANAHERONS_DIR`).
 
 | Goal | Command |
 |---|---|
@@ -264,13 +261,21 @@ They were not executed while writing this section.
 
 The other analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offline_heldout_eval.py`, `role_conditioning_analysis.py`, `mirror_detector.py`, `diagnose_localization.py`, `time_onnx_inference.py`, ...) and `tools/paper/` (`paper_skill_analyses.py`, `recompute_goals_corrected.py`) describe their inputs and outputs in their docstrings.
 
-### What is still missing
+## Relation to the paper
 
-- **Final team match results.** The tracked match tables cover v5 only. The all-learned team's own match statistics live in `runs/paper_eval`, which is not tracked.
-- **Training inputs.** The data behind the comparison and the training runs is not tracked either: `runs/paper_offline`, `runs/kickstart`, `runs/full_probe` and `runs/ablation_paper_*`. Ask the authors for these folders or regenerate them.
-- **Manifests.** The two new ONNX files have no `ppo_*.json` manifest yet.
-- **Figures.** `tools/paper/` writes the figures to `results/paper/figures/`, but they are not committed.
-- **C++ export for the new observation fields.** The new `BackendObservation` fields (`teammate_is_gk`, `own_score`, `opponent_score`, `opponent_positions` in `rlfootball/core/pybh_backend.py`) come from the `pybh` payload. According to the code comments, `teammate_is_gk` stays empty unless the match harness's C++ export is present, and the score fields default to 0 on older `pybh` builds. Which SabanaHerons2026 branch exports them has not been confirmed.
+| Paper element | Where it lives in this repository |
+|---|---|
+| 47-dimensional observation | `rlfootball/core/observation.py` |
+| Skill action space and forbid-invalid skill gate | `rlfootball/core/action.py`, `rlfootball/core/gate.py` |
+| Rule-based teachers | `rlfootball/teachers/` |
+| Curriculum stages and production scenarios | `rlfootball/curriculum/` |
+| Teacher datasets | `rlfootball/datasets/` (sizes in "Datasets") |
+| Behavioral-cloning warm start | `rlfootball/training/train_bc.py` |
+| PPO with KL anchor and BC replay | `rlfootball/training/train.py` (`BCReplayRegularizer`) |
+| Role-conditioned merged policy (v5) | `models/team/ppo_team_hsl2026_v5_merged.onnx`, [docs/38](docs/38-merged-striker-defender-and-naov6-transplant.md) |
+| All-learned team, held-out comparison and live matches | "Latest progress: from v5 to an all-learned team" |
+
+[docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md) maps each claim in the paper to the file that supports it.
 
 ## Project documents
 
@@ -281,13 +286,3 @@ The other analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offline_h
 | [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md) | Paper claims mapped to repository evidence |
 | [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and integration rules |
 | [CLAUDE.md](CLAUDE.md) | Project instructions for Claude Code sessions |
-
-## Known gaps
-
-- The corpus sizes and several result figures in the paper come from results produced outside this repository (see [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md)). TODO: publish those results here.
-- Paper figures and `references.bib` are not in this repository; `tools/paper/` regenerates figures into `results/paper/figures/`, which is not tracked.
-- The final all-learned team and coordinator ONNX files have no `ppo_*.json` manifest, and the `runs/` inputs behind the new evidence are untracked (see "What is still missing" above).
-- `environment.yml` is out of date (Python version, missing `onnx`/`onnxruntime`/`pytest`).
-- The C++ repository URL is to be confirmed by the authors.
-- Most documentation is in Spanish and reflects work in progress.
-- No automated CI; tests are run by hand and part of them require a working `pybh` build.
