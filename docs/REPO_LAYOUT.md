@@ -38,8 +38,8 @@ Each subpackage gets an empty `__init__.py`. Import rule: absolute only,
 | `teachers` | 4 | core, curriculum |
 | `env` | 4 | core, curriculum, teachers |
 | `datasets` | 12 | core, curriculum, teachers, env |
-| `training` | 19 | core, curriculum, teachers, env, datasets |
-| `evaluation` | 8 | all above except diagnostics |
+| `training` | 23 | core, curriculum, teachers, env, datasets |
+| `evaluation` | 11 | all above except diagnostics |
 | `diagnostics` | 14 | core, curriculum, teachers, env |
 | `tests` | 8 | anything |
 
@@ -142,6 +142,32 @@ LOC = lines. Imp = importers (root modules / tools+scripts / tests).
 | `test_observation_contract.py` | `tests/test_observation_contract.py` | test | 91 | 0/0/0 | Tests for the observation contract |
 | `test_wire_audit.py` | `tests/test_wire_audit.py` | test | 99 | 0/0/0 | Tests for wire_audit |
 | `test_world_spec_contract.py` | `tests/test_world_spec_contract.py` | test | 78 | 0/0/0 | Tests for world-spec contract |
+
+## Final all-learned team (commit `30b28ac`)
+
+Commit `30b28ac` ("Final all-learned team", branch `rl-v3a-multiagent-defender`) was written on the flat layout.
+Its files were ported in four commits (`3a5f884`, `141bddd`, `bf11344`, `5fdcb98`). Old path in `30b28ac` -> new path:
+
+| Old path | New path | Note |
+|---|---|---|
+| `config.py`, `curriculum.py`, `pybh_backend.py` | `rlfootball/core/config.py`, `rlfootball/curriculum/curriculum.py`, `rlfootball/core/pybh_backend.py` | Modified in place (new env vars, extra `BackendObservation` fields) |
+| `environment.py` | `rlfootball/env/environment.py` | Modified in place |
+| `teacher_multiagent_dataset.py` | `rlfootball/datasets/teacher_multiagent_dataset.py` | Modified in place |
+| `train.py`, `train_multiagent_production.py` | `rlfootball/training/train.py`, `rlfootball/training/train_multiagent_production.py` | Modified in place |
+| `run_v5_vs_bhuman_match.py`, `run_teacher_vs_bhuman_match.py`, `run_probe_match.py` | `rlfootball/evaluation/<same name>.py` | Live match runners; `python -m rlfootball.evaluation.<name>` |
+| `tools/train_dagger_v5.py`, `tools/train_distill_hybrid.py`, `tools/kickstart_ppo.py`, `tools/learned_coordinator.py` | `rlfootball/training/<same name>.py` | Imported by other code, so library placement |
+| `tools/kickstart_gate.py` | `tools/misc/kickstart_gate.py` | |
+| `collect_bhuman_selfplay_dataset.py` | `tools/dataset/collect_bhuman_selfplay_dataset.py` | A `datasets` module may not import `evaluation`, so it is a tool |
+| `tools/ablation_offline_eval.py`, `analyze_full_probe.py`, `diagnose_localization.py`, `heldout_policy_compare.py`, `measure_teacher_duel_behavior.py`, `mirror_detector.py`, `offline_heldout_eval.py`, `paper_match_stats.py`, `role_conditioning_analysis.py`, `select_rule_setting.py`, `time_onnx_inference.py`, `verify_gc_score_wire.py`, `verify_reactive_opponents.py` | `tools/eval/<same name>.py` | |
+| `tools/paper_figures_final.py`, `paper_figures_icra.py`, `paper_figures_tutor.py`, `paper_skill_analyses.py`, `recompute_goals_corrected.py`, `summarize_v5_vs_bhuman_matches.py` | `tools/paper/<same name>.py` | New group |
+| `.docs/FIGURES/generate_emergency_eval_figures.py`, `.docs/FIGURES/generate_paper_figures.py` | `tools/paper/<same name>.py` | |
+| `.docs/FIGURES/table_match_metrics_v5_vs_*.csv` (10 files) | `results/paper/<same name>.csv` | |
+| `For the final version/results/ablation_heldout_per_checkpoint.csv` | `results/paper/ablation_heldout_per_checkpoint.csv` | Same blob |
+| `ppo_team_hsl2026_final_alllearned.onnx`, `ppo_coord_hsl2026_final_learned_coordinator.onnx` (repo root) | `models/team/<same name>.onnx` | No `.json` manifests exist |
+
+Dropped duplicates (byte-identical blobs, checked with `git rev-parse` on `30b28ac`): `For the final version/models/final_team_policy_iter12.onnx` (same as `ppo_team_hsl2026_final_alllearned.onnx`) and `For the final version/models/learned_coordinator_v2.onnx` (same as `ppo_coord_hsl2026_final_learned_coordinator.onnx`).
+
+Convention kept in the ported scripts: `tools/eval` and `tools/paper` scripts import a sibling script by bare module name (`paper_match_stats` and `select_rule_setting` import `analyze_full_probe`; `paper_figures_final` imports `paper_figures_icra`), after inserting their own directory into `sys.path`. Run them as plain scripts (`python tools/eval/paper_match_stats.py`), not with `-m`.
 
 ## Running entry points
 

@@ -28,8 +28,9 @@ It is also the reference behind the root [CLAUDE.md](../CLAUDE.md) used by Claud
 ├── tools/                 launchers and utilities, grouped by purpose
 │   ├── run/               training recipes and launchers (run_*.sh, train_merge_v5.sh)
 │   ├── export/            ONNX export (export_ppo_policy.py, ...)
-│   ├── eval/              evaluation, validation and parity probes
+│   ├── eval/              evaluation, validation and parity probes, held-out and match statistics
 │   ├── dataset/           dataset generation and audits
+│   ├── paper/             paper figures and match-metric tables (writes to results/paper/)
 │   └── misc/              small helpers
 ├── scripts/               env.sh (path setup), setup_validation_env.sh, run_with_validation_env.sh
 ├── models/                tracked policy deliverables: models/<role>/ppo_*.onnx + ppo_*.json
@@ -37,6 +38,7 @@ It is also the reference behind the root [CLAUDE.md](../CLAUDE.md) used by Claud
 ├── docs/                  numbered documents (NN-title.md), index in docs/README.md
 │   └── notes/             historical working notes
 ├── results/               small tracked result files
+│   └── paper/             CSV tables for the revised paper (held-out ablation, match metrics)
 └── runs/                  datasets, logs, checkpoints (gitignored, never committed)
 ```
 
@@ -125,6 +127,7 @@ Pickled files in `runs/`: training checkpoints are written by `rlfootball/traini
 | An evaluator or stability check | `rlfootball/evaluation/` | Same `python -m` rule |
 | A probe, GUI check or sweep | `rlfootball/diagnostics/` | |
 | A launcher or recipe | `tools/run/` (or `tools/eval/`, `tools/dataset/`, `tools/export/`, `tools/misc/`) | See below |
+| A paper figure script or a match-metric summary | `tools/paper/`; small CSV outputs in `results/paper/` | Figures go to `results/paper/figures/` (not tracked) |
 | A new exported policy | `models/<role>/` | See below |
 | A test | `tests/` | See below |
 | A document | `docs/NN-title.md` | See below |
@@ -133,6 +136,8 @@ Pickled files in `runs/`: training checkpoints are written by `rlfootball/traini
 Do not add new modules to the repository root or to `tools/` for logic that other code imports: library code belongs in `rlfootball/`, and `tools/` scripts import it.
 
 ### Launcher scripts
+
+`tools/eval/` and `tools/paper/` scripts that import a sibling script do so by bare module name after inserting their own directory into `sys.path` (`paper_match_stats` and `select_rule_setting` import `analyze_full_probe`; `paper_figures_final` imports `paper_figures_icra`). Keep that convention inside the folder and run them as plain scripts, not with `-m`.
 
 - Start with `source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"` (adjust the number of `..` to the script depth; `tools/run/run_v4_2.sh` is the reference) and use `RL_REPO_DIR` and `SABANAHERONS_DIR` afterwards.
 - Never hardcode `/home/<user>/...` paths. `scripts/env.sh` reads the optional `.env` (copy `.env.example`), falling back to the repository root and the sibling `../SabanaHerons2026`.
