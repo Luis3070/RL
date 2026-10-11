@@ -129,6 +129,20 @@ These commands could not be executed during documentation work (the authors' `py
 | Merged brain v5 | `models/team/ppo_team_hsl2026_v5_merged.{onnx,json}` |
 | Goalkeeper | `models/goalkeeper/ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
 
+## Datasets
+
+Teacher datasets used for supervised policy learning (cited in the paper).
+
+| Dataset | Purpose | Size / key positives |
+| --- | --- | --- |
+| Single-agent (26-dim) | Single-agent production replay: walk, dribble, shoot | 17,815 rows; shoot 4,212 |
+| Multi-agent attack | Attack, pass, support | 105,624 rows; 45 kept episodes; pass 2,015, shoot 1,677, dribble 8,758, walk 38,255, stand 54,919 |
+| Multi-agent cooperation and striker | Pass-rich attack overlay | 434,639 rows; pass 16,914, shoot 5,702 |
+| Multi-agent defender | Defender, block and mark | 33,999 rows; 29 kept episodes; mark 673, block 2,817 |
+| Final attack–defense merge | Striker–defender–support fine-tuning | 139,623 rows; 74 episodes; block 2,817, mark 673, pass 2,015, shoot 2,565 |
+
+In the final merge corpus, `walk` and `stand` account for 85.94% of positive labels, while `pass`, `shoot`, and `mark` together account for 3.76%.
+
 ## Project documents
 
 | Document | Content |
