@@ -41,7 +41,7 @@ Required `SabanaHerons2026` branches:
 | `rlfootball/diagnostics/` | Visible-SimRobot checks, live probes, sweeps, visualisation |
 | `tests/` | Contract tests and the bridge smoke test |
 | `tools/` | Grouped by purpose: `run/` (launchers, `run_*.sh`), `export/` (ONNX export), `eval/` (evaluation, validation, probes, held-out and match statistics), `dataset/` (dataset generation and audits), `paper/` (paper figures and match-metric tables), `misc/` |
-| `results/` | Small tracked result files; `results/paper/` holds the held-out ablation and match-metric CSVs (see "Evidence for the revised paper") |
+| `results/` | Small tracked result files; `results/paper/` holds the held-out ablation and match-metric CSVs (see "Latest progress: from v5 to an all-learned team") |
 | `scripts/` | Validation environment setup (`setup_validation_env.sh`, `run_with_validation_env.sh`) |
 | `models/` | Tracked policy deliverables and manifests (see below) |
 | `models/defender/checkpoints/` | Tracked defender PyTorch checkpoints |
@@ -146,20 +146,52 @@ Teacher datasets used for supervised policy learning (cited in the paper).
 
 In the final merge corpus, `walk` and `stand` account for 85.94% of positive labels, while `pass`, `shoot`, and `mark` together account for 3.76%.
 
-## Evidence for the revised paper
+## Latest progress: from v5 to an all-learned team
 
-The revised paper adds a seeded pipeline ablation on held-out data, match-level results against real B-Human, and a final all-learned team.
-This section summarises only what is computed from files tracked here (`results/paper/`, `models/team/`).
-The raw inputs (`runs/paper_eval`, `runs/paper_offline`, `runs/kickstart`, `runs/full_probe`) are not tracked, so the final team's own match statistics are not reproducible from this repository alone (see "Not in this repository").
+Up to v5, every policy in this repository learned from teacher datasets collected in scripted scenarios: the rule-based teacher decides, the network imitates it, and PPO fine-tunes the result.
+The latest step takes training into full matches.
+The team now learns from live 4v4 games against a stock B-Human team, using its own observations (no oracle), and the outcome is a single network that plays all three field roles plus a small learned coordinator for the support robots.
+This section explains how that was done, what the measurements show, and what is still missing.
 
-### Pipeline ablation on held-out data
+### How the new team is trained
 
-Source: [`results/paper/ablation_heldout_per_checkpoint.csv`](results/paper/ablation_heldout_per_checkpoint.csv), written by `tools/eval/ablation_offline_eval.py`.
+The pipeline has four stages, each one a module in this repository:
 
-- Held-out set: the 2026-10-03 full-probe corpus (live 4v4 matches against real B-Human, estimated observations, every field-robot step labelled by the expert = teacher + B-Human kick macro). No ablation variant trained on it (docstring of `tools/eval/ablation_offline_eval.py`; `tools/eval/heldout_policy_compare.py` states 37 matches).
-- Metrics are measured against the expert label, with the Design-A gate mask applied. Agreement = share of rows where the chosen skill equals the expert skill. Balanced accuracy = mean of per-skill recall over stand, walk, shoot, pass, dribble, block, mark. Entropy of the chosen-skill distribution near 0 means the policy collapsed to one skill.
-- Variant names are as labelled in `tools/paper/paper_figures_tutor.py`: `FULL` = warm start + BC + KL anchor; `NOKL` = without KL; `NOBC` = without BC loss (KL only); `WSONLY` = warm start + PPO (no BC, no KL); `PPO` = PPO alone from random init; `PPOLONG` = PPO alone trained to 30,000 steps.
-- Each cell is mean ± sample standard deviation over seeds (n shown), at the last saved checkpoint of the variant (10,000 steps; 30,000 for `PPOLONG`).
+1. **Probe matches.** `rlfootball/evaluation/run_probe_match.py` plays live 4v4 matches against real B-Human and records, for every step, the observation, the expert's choice (teacher plus B-Human's kick macro) and what B-Human itself would have requested.
+2. **Imitation on the student's own states.** `rlfootball/training/train_dagger_v5.py` runs DAgger rounds, letting the student play and relabelling the states it actually visits, while a KL term keeps it close to v5. `rlfootball/training/train_distill_hybrid.py` then distils one policy from the learned striker and B-Human's support behaviour (skill cross-entropy, support-position regression, KL to the starting checkpoint).
+3. **Reinforcement learning on real matches.** `rlfootball/training/kickstart_ppo.py` improves that policy with kickstarted PPO on batches of sampled live matches: the usual PPO-clip and GAE objective, plus a teacher cross-entropy term that fades out over iterations.
+4. **A safety gate between iterations.** `tools/misc/kickstart_gate.py` only accepts a new candidate when its margin over a stock-B-Human control played at the same time, and its points per match, beat the baseline.
+
+Alongside the policy, `rlfootball/training/learned_coordinator.py` trains a support coordinator that imitates where B-Human places its support robots.
+It maps the same 47-dim observation to a field target, and the policy's own residual is applied on top, so the observation and action contracts do not change.
+
+The two resulting networks are in `models/team/`:
+
+| File | What it is |
+|---|---|
+| `models/team/ppo_team_hsl2026_final_alllearned.onnx` | The all-learned team policy: one network for striker, open support and off-ball support, with the same 47-dim contract as v5. `tools/eval/heldout_policy_compare.py` identifies the final team as `runs/kickstart/loop_20261006_224436/iter_12/policy.pt`; the ONNX export step itself is not recorded in this repository |
+| `models/team/ppo_coord_hsl2026_final_learned_coordinator.onnx` | The learned support coordinator: observation in, normalised field target (x/4500, y/3000) out |
+
+### Why the warm start matters: held-out comparison
+
+A natural question is whether all of this is needed, or whether PPO alone would get there.
+To answer it, the stage-8 recipe was trained in several variants with independent seeds and scored on data none of them saw during training: the 2026-10-03 probe matches against real B-Human (37 matches according to `tools/eval/heldout_policy_compare.py`), where every field-robot step carries an expert label.
+Each policy's choice is compared with that label under the Design-A gate mask.
+
+The variants are:
+
+- `FULL`: warm start + behaviour cloning + KL anchor.
+- `NOKL`: the same without the KL anchor.
+- `NOBC`: the same without behaviour cloning (KL only).
+- `WSONLY`: warm start + PPO, with neither behaviour cloning nor KL.
+- `PPO`: PPO alone, from random initialisation.
+- `PPOLONG`: PPO alone, trained to 30,000 steps.
+
+Each cell below is the mean ± sample standard deviation over seeds, taken at the variant's last checkpoint. The metrics are:
+
+- **Agreement:** share of steps where the policy picks the expert's skill.
+- **Balanced accuracy:** the mean recall over the seven skills.
+- **Entropy:** how varied the chosen skills are. Close to 0 means the policy always does the same thing.
 
 | Variant | Final step | Seeds | Agreement | Balanced acc. | Recall pass | Recall block | Recall mark | Pred. entropy (bits) |
 |---|---:|---:|---|---|---|---|---|---|
@@ -170,18 +202,25 @@ Source: [`results/paper/ablation_heldout_per_checkpoint.csv`](results/paper/abla
 | PPO | 10000 | 6 | 0.757 ± 0.217 | 0.142 ± 0.004 | 0.006 ± 0.010 | 0.000 ± 0.000 | 0.001 ± 0.003 | 0.209 ± 0.380 |
 | PPOLONG | 30000 | 3 | 0.852 ± 0.001 | 0.143 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.010 ± 0.007 |
 
-Reading the table: PPO alone reaches the highest raw agreement but has near-zero entropy and balanced accuracy about 0.14, i.e. it collapses to a single skill (the dominant expert label) and almost never chooses pass, block or mark. All four warm-started variants keep entropy at 1.66-1.75 bits and balanced accuracy at 0.51-0.59. The warm-started variants overlap within one standard deviation on agreement, so this table alone does not rank them; `NOKL` has the highest balanced accuracy.
-At step 0 the four warm-started variants share the same checkpoint (agreement 0.531, entropy 1.739 bits). The CSV also holds one extra row for the v5 merged policy (`V5`, step `-1`: agreement 0.615, balanced accuracy 0.537, entropy 1.525 bits).
+Source: [`results/paper/ablation_heldout_per_checkpoint.csv`](results/paper/ablation_heldout_per_checkpoint.csv), produced by `tools/eval/ablation_offline_eval.py`.
 
-### Match metrics against real B-Human
+PPO alone looks good on raw agreement, but that is misleading.
+Its entropy is close to zero and its balanced accuracy is about 0.14, which means it collapses onto the most frequent expert skill and practically never passes, blocks or marks.
+Training it three times longer does not change that.
+Every warm-started variant keeps a varied repertoire (1.66 to 1.75 bits) and a balanced accuracy between 0.51 and 0.59.
+Among the warm-started variants the differences in agreement are within one standard deviation, so this comparison does not rank them; dropping the KL anchor (`NOKL`) gives the best balanced accuracy.
+For reference, all warm-started variants start from the same checkpoint (agreement 0.531, entropy 1.739 bits), and the CSV also scores the v5 policy (agreement 0.615, balanced accuracy 0.537, entropy 1.525 bits).
 
-Source: `results/paper/table_match_metrics_v5_vs_real_bhuman_<tag>.csv`, one row per live match (600 s), written by `tools/paper/summarize_v5_vs_bhuman_matches.py`.
-Important: these nine files are for the **v5 merged policy** (`run_v5_vs_bhuman_match.py`, players 2 and 3 against real B-Human), not the final all-learned team.
-Goals are the corrected count (a goal is confirmed only by the same robot that saw the crossing; `tools/paper/recompute_goals_corrected.py` documents the bug it replaces). Possession, recoveries and passes are proxies computed from ball and robot telemetry, not ground truth.
-`<tag>` is the batch name used when the file was written; the tracked sources do not describe what each `repair*` and `gt_repair*` batch changed, so they are listed without interpretation.
-Means are over all matches in the file, stalled matches included (the script's own aggregate excludes them).
+### How v5 performed in live matches against B-Human
 
-| File tag | Matches | W-D-L | Goals for-against | Stalled | Possession RL / opp. / loose+unknown (%) | Recoveries RL / opp. per match | Pass attempts per match (success) |
+Before the new pipeline, the v5 policy was played in batches of live 600-second matches against real B-Human (`rlfootball/evaluation/run_v5_vs_bhuman_match.py`, with players 2 and 3 controlled by the policy).
+These results describe **v5, not the final all-learned team**.
+Goals use the corrected count, where a goal is confirmed only by the same robot that saw the ball cross the line (`tools/paper/recompute_goals_corrected.py` explains the bug this fixes).
+Possession, recoveries and passes are estimated from ball and robot telemetry.
+Each batch keeps the name it was recorded under; the tracked files do not say what changed between the `repair*` and `gt_repair*` batches, so the table does not interpret them.
+Averages include stalled matches.
+
+| Batch | Matches | W-D-L | Goals for-against | Stalled | Possession RL / opp. / loose+unknown (%) | Recoveries RL / opp. per match | Pass attempts per match (success) |
 |---|---:|---|---|---:|---|---|---|
 | `3v3` | 10 | 2-4-4 | 3-5 | 1 | 3.0 / 8.7 / 87.6 | 4.1 / 4.6 | 0.0 (0/0) |
 | `4v4` | 10 | 1-7-2 | 2-4 | 0 | 3.4 / 7.4 / 88.5 | 7.5 / 8.0 | 4.9 (7/49) |
@@ -193,51 +232,45 @@ Means are over all matches in the file, stalled matches included (the script's o
 | `gt_repair2` | 5 | 0-5-0 | 0-0 | 2 | 2.3 / 33.8 / 61.6 | 16.2 / 15.8 | 4.2 (1/21) |
 | `gt_repair4` | 5 | 1-4-0 | 1-0 | 0 | 2.4 / 30.9 / 63.7 | 18.2 / 18.0 | 7.2 (0/36) |
 
-Most matches end level, and the shown possession shares are small for both sides because most of the time the ball is classed as loose or unknown. Compare batches with care: they differ in scene and settings that these files do not record.
-The older aggregate [`table_match_metrics_v5_vs_bhuman.csv`](results/paper/table_match_metrics_v5_vs_bhuman.csv) (15 episodes per side, v5 merged RL against the B-Human/Sabana-Herons heuristic baseline) is written by `tools/paper/generate_emergency_eval_figures.py` and has a different, aggregated format (for example ball progression 0.10 vs 0.20 m per episode, possession proxy 66.3% vs 72.7%).
+Source: `results/paper/table_match_metrics_v5_vs_real_bhuman_<batch>.csv` (one row per match), produced by `tools/paper/summarize_v5_vs_bhuman_matches.py`.
 
-### Final policies
+Most of these matches end in a draw, and possession looks low for both teams because the ball is classed as loose or unknown most of the time.
+The batches differ in scene and settings that the files do not record, so compare them with care.
+An earlier, aggregated comparison of v5 against the B-Human/Sabana-Herons heuristic baseline (15 episodes per side) is in [`table_match_metrics_v5_vs_bhuman.csv`](results/paper/table_match_metrics_v5_vs_bhuman.csv), produced by `tools/paper/generate_emergency_eval_figures.py`.
+For example, it reports ball progression of 0.10 vs 0.20 m per episode and a possession proxy of 66.3% vs 72.7%.
 
-| File | What it is |
-|---|---|
-| `models/team/ppo_team_hsl2026_final_alllearned.onnx` | Final all-learned team policy: one network for striker, open support and off-ball support, same 47-dim contract as v5. `tools/eval/heldout_policy_compare.py` lists `runs/kickstart/loop_20261006_224436/iter_12/policy.pt` as "G (final team)"; the export step to ONNX is not recorded in this repository |
-| `models/team/ppo_coord_hsl2026_final_learned_coordinator.onnx` | Learned support coordinator: maps the 47-dim observation to a normalised field target (x/4500, y/3000) for a support robot, trained to imitate B-Human support positions (`rlfootball/training/learned_coordinator.py`). The policy's residual is applied on top, so the policy contract is unchanged |
+### Running it yourself
 
-How they are trained (module docstrings):
+Run everything from the repository root.
+These commands read inputs from `runs/`, which is not tracked (each module docstring lists what it needs).
+The live-match commands also need a built `pybh` and the SimRobot binary (`RL_SIMROBOT_BIN`, or the default under `SABANAHERONS_DIR`).
+They were not executed while writing this section.
 
-1. `rlfootball/evaluation/run_probe_match.py` plays live 4v4 matches against real B-Human and logs observations, expert labels and B-Human's own skill requests.
-2. `rlfootball/training/train_dagger_v5.py` (DAgger on the student's own states, KL-anchored to v5), then `rlfootball/training/train_distill_hybrid.py` (one policy from the learned striker plus B-Human supports; skill CE, support-position MSE, KL to the init checkpoint).
-3. `rlfootball/training/kickstart_ppo.py`: kickstarted PPO on batches of sampled live matches (PPO-clip, GAE, KL anchor, a decaying teacher cross-entropy term).
-4. `tools/misc/kickstart_gate.py`: safety gate that accepts a candidate only if its margin over a concurrent stock-B-Human control and its points per match exceed the baseline's.
-
-### Reproduce or regenerate
-
-Run from the repository root. All commands need the untracked `runs/` inputs named in each docstring; the live-match commands also need a built `pybh` and the SimRobot binary (`RL_SIMROBOT_BIN` or the default under `SABANAHERONS_DIR`). None of them were executed while writing this section.
-
-| Goal | Command (source: docstring or argparse) |
+| Goal | Command |
 |---|---|
 | One live match, v5 vs B-Human | `python -m rlfootball.evaluation.run_v5_vs_bhuman_match --launch --seconds 600 --output runs/<batch>/match_1.json` |
 | One live match, teacher vs B-Human | `python -m rlfootball.evaluation.run_teacher_vs_bhuman_match --launch --seconds 600 --output runs/<batch>/match_1.json` |
-| Unified probe match (`--controller expert\|teacher\|v5\|bhuman\|dagger\|hybrid`) | `python -m rlfootball.evaluation.run_probe_match --controller v5 --launch --output runs/<dir>/match.json` |
+| Probe match (`--controller expert\|teacher\|v5\|bhuman\|dagger\|hybrid`) | `python -m rlfootball.evaluation.run_probe_match --controller v5 --launch --output runs/<dir>/match.json` |
 | B-Human-labelled self-play dataset | `python tools/dataset/collect_bhuman_selfplay_dataset.py --launch --seconds 600 --out runs/bhuman_selfplay_dataset/match_1` |
 | DAgger round | `python -m rlfootball.training.train_dagger_v5 --npz runs/.../V_*_a0.npz --out runs/dagger_v5/round1.pt` |
-| Distil hybrid team | `python -m rlfootball.training.train_distill_hybrid --json "runs/.../HD_*.json" --init runs/dagger_v5/round2.pt --out runs/distill_hybrid/round1.pt` |
+| Distil the hybrid team | `python -m rlfootball.training.train_distill_hybrid --json "runs/.../HD_*.json" --init runs/dagger_v5/round2.pt --out runs/distill_hybrid/round1.pt` |
 | Learned coordinator | `python -m rlfootball.training.learned_coordinator --json "runs/.../*.json" --out runs/learned_coord/coord_v1.pt` |
 | Kickstarted PPO iteration | `python -m rlfootball.training.kickstart_ppo --json "runs/kickstart/.../iter_003/*.json" --policy cur.pt --anchor runs/distill_hybrid/round3.pt --iteration 3 --out next.pt` |
-| Held-out ablation table | `python tools/eval/ablation_offline_eval.py` (defaults: `--runs "runs/ablation_paper_*_s*"`, `--heldout "runs/full_probe/**/*.npz"`, `--out runs/paper_offline/ablation`) |
-| Held-out policy lineage | `python tools/eval/heldout_policy_compare.py` (output `runs/paper_offline/heldout_policies/`) |
+| Held-out comparison table | `python tools/eval/ablation_offline_eval.py` (defaults: `--runs "runs/ablation_paper_*_s*"`, `--heldout "runs/full_probe/**/*.npz"`, `--out runs/paper_offline/ablation`) |
+| Held-out comparison across policy generations | `python tools/eval/heldout_policy_compare.py` (output `runs/paper_offline/heldout_policies/`) |
 | Match statistics with bootstrap CIs | `python tools/eval/paper_match_stats.py --arm "P=runs/paper_eval/block1/P_*.json" --arm "C=..." --compare P-C --out runs/paper_eval/stats` |
 | Per-match metrics CSV | `python tools/paper/summarize_v5_vs_bhuman_matches.py runs/paper_match_v5_vs_bhuman_live/batch_<stamp>` (writes `results/paper/table_match_metrics_v5_vs_real_bhuman*.csv`) |
-| Figures | `python tools/paper/paper_figures_final.py` (also `paper_figures_icra.py`, `paper_figures_tutor.py`, `generate_paper_figures.py`, `generate_emergency_eval_figures.py`); output goes to `results/paper/figures/` |
+| Figures | `python tools/paper/paper_figures_final.py` (also `paper_figures_icra.py`, `paper_figures_tutor.py`, `generate_paper_figures.py`, `generate_emergency_eval_figures.py`); output in `results/paper/figures/` |
 
-The remaining analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offline_heldout_eval.py`, `role_conditioning_analysis.py`, `mirror_detector.py`, `diagnose_localization.py`, `time_onnx_inference.py`, ...) and `tools/paper/` (`paper_skill_analyses.py`, `recompute_goals_corrected.py`) document their inputs and outputs in their module docstrings.
+The other analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offline_heldout_eval.py`, `role_conditioning_analysis.py`, `mirror_detector.py`, `diagnose_localization.py`, `time_onnx_inference.py`, ...) and `tools/paper/` (`paper_skill_analyses.py`, `recompute_goals_corrected.py`) describe their inputs and outputs in their docstrings.
 
-### Not in this repository
+### What is still missing
 
-- No `ppo_*.json` manifests for the two new ONNX files (the upstream commit did not include them; none were written here).
-- The `runs/` inputs are untracked: `runs/paper_eval`, `runs/paper_offline`, `runs/kickstart`, `runs/full_probe`, and the ablation runs `runs/ablation_paper_*`. Ask the authors for them or regenerate.
-- The final team's own match statistics are not among the tracked CSVs (they are v5 only), and `results/paper/figures/` is generated by `tools/paper/` but not tracked yet.
-- The new `BackendObservation` fields `teammate_is_gk`, `own_score`, `opponent_score` and `opponent_positions` (`rlfootball/core/pybh_backend.py`) are read from the `pybh` payload. The code comments say `teammate_is_gk` is empty unless the live match harness's C++ export is present, and that the score fields default to 0 on older `pybh` builds. Whether and where the C++ side exports them was not verified here, and no branch is named.
+- **Final team match results.** The tracked match tables cover v5 only. The all-learned team's own match statistics live in `runs/paper_eval`, which is not tracked.
+- **Training inputs.** The data behind the comparison and the training runs is not tracked either: `runs/paper_offline`, `runs/kickstart`, `runs/full_probe` and `runs/ablation_paper_*`. Ask the authors for these folders or regenerate them.
+- **Manifests.** The two new ONNX files have no `ppo_*.json` manifest yet.
+- **Figures.** `tools/paper/` writes the figures to `results/paper/figures/`, but they are not committed.
+- **C++ export for the new observation fields.** The new `BackendObservation` fields (`teammate_is_gk`, `own_score`, `opponent_score`, `opponent_positions` in `rlfootball/core/pybh_backend.py`) come from the `pybh` payload. According to the code comments, `teammate_is_gk` stays empty unless the match harness's C++ export is present, and the score fields default to 0 on older `pybh` builds. Which SabanaHerons2026 branch exports them has not been confirmed.
 
 ## Project documents
 
@@ -253,7 +286,7 @@ The remaining analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offli
 
 - The corpus sizes and several result figures in the paper come from results produced outside this repository (see [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md)). TODO: publish those results here.
 - Paper figures and `references.bib` are not in this repository; `tools/paper/` regenerates figures into `results/paper/figures/`, which is not tracked.
-- The final all-learned team and coordinator ONNX files have no `ppo_*.json` manifest, and the `runs/` inputs behind the new evidence are untracked (see "Not in this repository" above).
+- The final all-learned team and coordinator ONNX files have no `ppo_*.json` manifest, and the `runs/` inputs behind the new evidence are untracked (see "What is still missing" above).
 - `environment.yml` is out of date (Python version, missing `onnx`/`onnxruntime`/`pytest`).
 - The C++ repository URL is to be confirmed by the authors.
 - Most documentation is in Spanish and reflects work in progress.
