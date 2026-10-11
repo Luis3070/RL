@@ -1,0 +1,10 @@
+Metric,v5 merged RL,B-Human/Sabana-Herons heuristic baseline
+Episodes,15,15
+Goal proxy,0,0
+Conceded proxy,0,0
+Ball progression (m/ep.),0.10,0.20
+Pass attempts / ep.,0.00,0.00
+Possession proxy (%),66.3,72.7
+Ball recoveries / ep.,2.93,2.13
+Role co-occurrence (%),100.0,100.0
+Collision proxy (%),5.1,1.8
