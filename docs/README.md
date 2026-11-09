@@ -2,7 +2,7 @@
 
 Index of every file under `docs/` and `.docs/`. Most documents are working logs written during development; many are in Spanish (column `Lang`).
 Descriptions are derived from each file's title and opening lines.
-Related: [root README](../README.md), [branch registry](BRANCHES.md), [paper traceability](PAPER_TRACEABILITY.md).
+Related: [root README](../README.md), [paper traceability](PAPER_TRACEABILITY.md).
 
 Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `defender`, `goalkeeper`, `multiagent`, `audit` (validation, evaluation, stability).
 
