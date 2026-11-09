@@ -52,9 +52,9 @@ Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `de
 | [37-striker-v2b-to-v4.2-and-cpp-transplant.md](37-striker-v2b-to-v4.2-and-cpp-transplant.md) | Striker v2b to v4.2 and the C++ transplant of the striker agent | striker | EN |
 | [38-merged-striker-defender-and-naov6-transplant.md](38-merged-striker-defender-and-naov6-transplant.md) | Merged striker+defender policy (v5) and its NAO v6 transplant | multiagent | EN |
 | [39-goalkeeper-closedloop-and-naov6-transplant.md](39-goalkeeper-closedloop-and-naov6-transplant.md) | Goalkeeper closed-loop RL build and NAO v6 C++ transplant | goalkeeper | EN |
-| [40-obs26-stability-repair-setup.md](40-obs26-stability-repair-setup.md) | Obs-26 setup to repair the embedded PPO (renumbered from 28) | audit | ES |
-| [41-defender-obs26-pipeline-canonico.md](41-defender-obs26-pipeline-canonico.md) | Canonical obs-26 defender pipeline (renumbered from 29) | defender | ES |
-| [42-recuperacion-defender-onnx-a-pt.md](42-recuperacion-defender-onnx-a-pt.md) | Short recovery of the defender `.pt` from its ONNX (renumbered from 30) | defender | ES |
+| [40-obs26-stability-repair-setup.md](40-obs26-stability-repair-setup.md) | Obs-26 setup to repair the embedded PPO | audit | ES |
+| [41-defender-obs26-pipeline-canonico.md](41-defender-obs26-pipeline-canonico.md) | Canonical obs-26 defender pipeline | defender | ES |
+| [42-recuperacion-defender-onnx-a-pt.md](42-recuperacion-defender-onnx-a-pt.md) | Short recovery of the defender `.pt` from its ONNX | defender | ES |
 | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and rules for integrating new work | - | EN |
 | [README.md](README.md) | This index | - | EN |
 
