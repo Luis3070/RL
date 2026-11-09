@@ -65,6 +65,7 @@ Numbering notes: document 08 is absent; two files share number 25 and two share 
 | [09-production-selfplay-and-multiagent-handoff.md](../.docs/09-production-selfplay-and-multiagent-handoff.md) | Handoff: production self-play, multi-agent observation space and 4v4 wrapper-coordinated deployment | multiagent | EN |
 | [10-graph-coordination-post-production-roadmap.md](../.docs/10-graph-coordination-post-production-roadmap.md) | Graph coordination: one-week post-production sprint plan | multiagent | EN |
 | [Bhuman Logic/Bhuman-deterministic-agent-map.md](../.docs/Bhuman%20Logic/Bhuman-deterministic-agent-map.md) | Map of the B-Human deterministic agent code used as the base for the teacher policy | audit | ES |
+| `FIGURES/` | Paper figure generators (`generate_*.py`) and `table_match_metrics_v5_vs_*.csv` match tables for the final all-learned team | evidence | EN |
 
 ## Other working notes at the repository root
 

@@ -16,7 +16,7 @@ Nothing was pushed, tagged or deleted. `origin` belongs to a third-party GitHub 
 | `pybh-clean` | 9db4f46 | 2026-04-28 | 0 / 9 | Absorbed in full by fast-forward (contained in `rl-v4.2-multiagent-gk`) | tag candidate |
 | `rlsimrobot` | 0e97059 | 2026-04-22 | 0 / 1 | Absorbed in full by fast-forward (contained in `rl-v4.2-multiagent-gk`) | tag candidate |
 | `TKREADY-0.1-TKSUCC-0.9-TIME-56MS` | 4110710 | 2026-04-11 | 3 / 0 | Absorbed in full (contained in `rl-v4.2-multiagent-gk`; no commits beyond `origin/main` history) | tag candidate |
-| `rl-v3a-multiagent-defender` | 2a85d0f | 2026-06-19 | 0 / 85 | Merged (commit `ea1a71c`); contained in the consolidation branch `chore/organizar-repo-paper`, not in `rl-v4.2-multiagent-gk` | tag candidate |
+| `rl-v3a-multiagent-defender` | 30b28ac | 2026-10-10 | 0 / 87 | Merged (commits `ea1a71c` up to 2a85d0f and `3b08527` for 2f51520 and 30b28ac, the final all-learned team; two ONNX duplicates under `For the final version/models/` dropped); contained in the consolidation branch `chore/organizar-repo-paper`, not in `rl-v4.2-multiagent-gk` | tag candidate |
 | `obs-26-final` | fbe1e98 | 2026-06-12 | 0 / 65 | Merged (3 commits; docs 28-30 renumbered to 40-42); contained in `chore/organizar-repo-paper` | tag candidate |
 | `Defender-v7` | ce43438 | 2026-06-16 | 0 / 83 | Partial: only `docs/35-defender-v7-block-pass-gate-fixes.md` kept; its block-rule code is superseded by the v4.2/v5 design | archive candidate |
 | `pipeprocess` | ff1a6fa | 2026-04-14 | 2 / 5 | Partial: legacy April tools absorbed, then removed as outdated for the paper | archive candidate |
@@ -32,7 +32,7 @@ Nothing was pushed, tagged or deleted. `origin` belongs to a third-party GitHub 
 | `rl-v3b-goalkeeper` | 66177ca | 2026-06-19 | 0 / 85 | Partial: new goalkeeper scripts kept, then pruned. Not contained in any remote branch (`git branch -r --contains` returns nothing) | unpushed-at-risk |
 | `docs/organize-paper-repo` | f811ef5 | 2026-04-15 | 0 / 0 | Same commit as `main`; no unique content | archive candidate (local housekeeping) |
 
-Local `main` and `rl-v4.2-multiagent-gk`, `rl-v3a-multiagent-defender` track their `origin/*` counterparts at the same tips.
+Local `main`, `rl-v4.2-multiagent-gk` and `rl-v3a-multiagent-defender` track their `origin/*` counterparts at the same tips.
 
 ## Commands used
 

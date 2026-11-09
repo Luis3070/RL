@@ -108,6 +108,7 @@ These commands could not be executed during documentation work (the authors' `py
 | Defender | `ppo_defender_hsl2026.{onnx,json}` |
 | Team (striker v4.1, v4.2) | `ppo_team_hsl2026.*`, `ppo_team_hsl2026_v4_1.*`, `ppo_team_hsl2026_v4_2.*` |
 | Merged brain v5 | `ppo_team_hsl2026_v5_merged.{onnx,json}` |
+| Final all-learned team (no manifest) | `ppo_team_hsl2026_final_alllearned.onnx`, `ppo_coord_hsl2026_final_learned_coordinator.onnx` |
 | Goalkeeper | `ppo_goalkeeper_hsl2026*.{onnx,json}` (base, `ppo`, `ppo_validated`, and the `gk_*` variants) |
 
 ## Project documents
