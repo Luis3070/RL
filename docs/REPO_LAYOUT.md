@@ -148,6 +148,8 @@ LOC = lines. Imp = importers (root modules / tools+scripts / tests).
 Commit `30b28ac` ("Final all-learned team", branch `rl-v3a-multiagent-defender`) was written on the flat layout.
 Its files were ported in four commits (`3a5f884`, `141bddd`, `bf11344`, `5fdcb98`). Old path in `30b28ac` -> new path:
 
+`chore/organizar-repo-paper` absorbs `30b28ac` (and `2f51520`, the docs 37 and 38 edits) in the flat layout through merge `3b08527`. When this branch merges that one, the flat copies are removed and the ported versions below win; the `.docs/FIGURES/*` generators and tables went to `tools/paper/` and `results/paper/`.
+
 | Old path | New path | Note |
 |---|---|---|
 | `config.py`, `curriculum.py`, `pybh_backend.py` | `rlfootball/core/config.py`, `rlfootball/curriculum/curriculum.py`, `rlfootball/core/pybh_backend.py` | Modified in place (new env vars, extra `BackendObservation` fields) |
