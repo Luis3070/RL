@@ -56,7 +56,7 @@ Para evitar confusion, estos son los scripts que hoy se usan y su responsabilida
 Comando:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 python3 diag_n6_slots.py
 ```
 
@@ -134,7 +134,7 @@ Que valida:
 Comando sugerido:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python \
+PYTHONPATH=/Make/Python \
 .venv/bin/python train.py --backend simrobot_visible --mode smoke --smoke-steps 4
 ```
 

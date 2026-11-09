@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# v4.4 = v4.3 + DENSE navigate-to-slot shaping. The env-only v4.3 attempt left triangle_hold ~0
+# because the hold reward is BINARY (no gradient to WALK to the slot) and BC is open-loop. Corpus
+# diagnostic proved the triangle target is reachable (teacher off_ball sits median 300mm from it,
+# every standing frame within 600mm) -> the gap is purely closed-loop navigation. NEW lever:
+# RL_MA_SUPPORT_APPROACH_BONUS adds a continuous reward rising as the support nears its EMA slot
+# (env-gated; default 0.0 OFF so all prior runs unaffected). Carries v4.3's other knobs:
+# CONTINGENT_HOLD=0 + lifted hold bonuses + triangle-forcing pool. Warm-start v4.2@12000 (+KL anchor)
+# preserves pass 99.9% + 5/5 shot discipline.
+set -u
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../scripts/env.sh"
+REPO="$RL_REPO_DIR"
+export PYTHONPATH="$REPO:$SABANAHERONS_DIR/Make/Python"
+export DISPLAY="${DISPLAY:-:1}"
+export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
+export RL_MA_TEACHER_VISIBLE_SCENE_NAME=RL1v0_3D_visible
+export RL_VISIBLE_RESET_MAX_ATTEMPTS=8
+export RL_MA_SHOOT_THRESHOLD=0.30
+# --- triangle-hold fix: dense navigation gradient (NEW) + v4.3 reward knobs ---
+export RL_MA_SUPPORT_APPROACH_BONUS=0.06
+export RL_MA_SUPPORT_APPROACH_RANGE_MM=2500
+export RL_MA_CONTINGENT_HOLD=0
+export RL_MA_SUPPORT_TRIANGLE_HOLD_BONUS=0.20
+export RL_MA_SUPPORT_OPEN_HOLD_BONUS=0.10
+PY="${PY:-$HOME/anaconda3/envs/RLNAO/bin/python}"
+TM=runs/teacher_multiagent_dataset
+FINAL="$TM/dataset_v4_backbone_plus_overlay"
+cd "$REPO"
+
+# Triangle-forcing pool (same as v4.3): support_striker_live 31% / 3v3 23% / pass 15% / preshoot 15%
+# / giveandgo 8% / support_far 8%. preshoot keeps shot discipline; pass/giveandgo keep the pass.
+export RL_PRODUCTION_SCENARIO_SET="team,eval"
+export RL_PRODUCTION_SCENARIO_WEIGHTS="support_striker_live:4,team_3v3_full_dynamic:3,pass_forcing:2,preshoot_bad_angle_boundary:2,giveandgo_outlet_present:1,support_striker_far:1,team_2v0_clean_band:0,team_2v0_static_blocker:0,team_3v0_clean:0,team_3v0_static_pinch:0,team_3v0_dynamic:0,giveandgo_outlet_absent:0,finish_band_2p5_3m_clean:0,finish_band_2p5_3m_static_lane:0,dynamic_full_field_pressure:0,blocked_corridor_repair:0"
+
+RL_MA_PROD_TRAIN_STEPS=12000 RL_MA_PROD_MAX_EPISODE_STEPS=800 \
+RL_MA_PROD_EVAL_INTERVAL=3000 RL_MA_PROD_CHECKPOINT_INTERVAL=3000 \
+RL_MA_PROD_EXPERIMENT_NAME=multiagent_v4_4 \
+RL_MA_PROD_BC_BETA_MAX=0.30 RL_MA_PROD_BC_BETA_MIN=0.05 \
+RL_MA_PROD_BC_HALF_LIFE_EVALS=3 RL_MA_PROD_BC_REPLAY_UPDATES=4 \
+RL_MA_BC_DECISION_WINDOW_ONLY=1 RL_MA_BC_STRIKER_PASS_FRAC=0.30 \
+"$PY" -m rlfootball.training.train_multiagent_production --stage-id 7 \
+  --checkpoint runs/multiagent_v4_2/checkpoint_stage7_step12000.pt \
+  --dataset "$FINAL/samples.npz"

@@ -196,8 +196,8 @@ aunque SimRobot estuviera avanzando.
 Comando validado para inspeccion manual:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 live_simrobot_probe.py \
+cd 
+PYTHONPATH=/Make/Python python3 live_simrobot_probe.py \
   --launch \
   --policy heuristic \
   --simrobot-profile 3d \
@@ -219,19 +219,19 @@ Resultado esperado:
 Validaciones Python:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 -m py_compile \
+PYTHONPATH=/Make/Python python3 -m py_compile \
   observation.py pybh_backend.py environment.py reward.py train.py live_simrobot_probe.py test_observation_contract.py
 ```
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Make/Python python3 -u -c \
+PYTHONPATH=/Make/Python python3 -u -c \
   'import test_observation_contract as t; t.test_observation_contract_size_and_reward_indices(); print("observation_contract_ok")'
 ```
 
 Validacion B-Human:
 
 ```bash
-cmake --build /home/rafael/Documentos/Robocup2026/SabanaHerons2026/Build/Linux/CMake/Develop \
+cmake --build /Build/Linux/CMake/Develop \
   --target PythonController SimulatedNao
 ```
 

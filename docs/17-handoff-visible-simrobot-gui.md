@@ -12,10 +12,10 @@ existe soporte real para:
 
 La superficie principal está en:
 
-- [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py)
-- [Module.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/Python/Controller/Module.cpp)
-- [LocalConsole.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/SimulatedNao/LocalConsole.cpp)
-- [SimulatedRobot.cpp](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Src/Libs/SimulatedNao/SimulatedRobot.cpp)
+- [pybh_backend.py](/pybh_backend.py)
+- [Module.cpp](/Src/Libs/Python/Controller/Module.cpp)
+- [LocalConsole.cpp](/Src/Libs/SimulatedNao/LocalConsole.cpp)
+- [SimulatedRobot.cpp](/Src/Libs/SimulatedNao/SimulatedRobot.cpp)
 
 ## Qué hay implementado
 
@@ -28,7 +28,7 @@ En modo `simrobot_visible`, `PyBHBackend.reset(...)` hace:
 3. manda `stand`
 4. espera una observación nueva alineada con la pose pedida
 
-Eso está en [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py:367) y las esperas viven en [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py:613).
+Eso está en [pybh_backend.py](/pybh_backend.py:367) y las esperas viven en [pybh_backend.py](/pybh_backend.py:613).
 
 ### 2. Dynamic world visible
 
@@ -37,18 +37,18 @@ Existe `PyBHBackend.set_dynamic_world(...)`, que en visible usa:
 - `pybh.rl_set_dynamic_world(...)`
 - `pybh.rl_get_world_status(...)`
 
-Ver [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py:414).
+Ver [pybh_backend.py](/pybh_backend.py:414).
 
 ### 3. Escenas visibles dedicadas
 
 Se agregaron escenas específicas para visible con robots extra reales:
 
-- [RLFull.ros2d](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RLFull.ros2d)
-- [RLFull.con](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RLFull.con)
-- [RLFull_3D.ros2](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RLFull_3D.ros2)
-- [RLFull_3D.con](/home/rafael/Documentos/Robocup2026/SabanaHerons2026/Config/Scenes/RLFull_3D.con)
+- [RLFull.ros2d](/Config/Scenes/RLFull.ros2d)
+- [RLFull.con](/Config/Scenes/RLFull.con)
+- [RLFull_3D.ros2](/Config/Scenes/RLFull_3D.ros2)
+- [RLFull_3D.con](/Config/Scenes/RLFull_3D.con)
 
-Y `simrobot_visible` ya usa esas escenas por defecto desde [config.py](/home/rafael/Documentos/Robocup2026/RL/config.py:54).
+Y `simrobot_visible` ya usa esas escenas por defecto desde [config.py](/config.py:54).
 
 ## Problemas encontrados y resueltos
 
@@ -110,8 +110,8 @@ La razón principal es estructural: el reset visible espera dos hitos:
 
 Ver:
 
-- [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py:367)
-- [pybh_backend.py](/home/rafael/Documentos/Robocup2026/RL/pybh_backend.py:636)
+- [pybh_backend.py](/pybh_backend.py:367)
+- [pybh_backend.py](/pybh_backend.py:636)
 
 No está claro todavía si la lentitud residual es:
 
@@ -137,10 +137,10 @@ Pero falta cerrar evidencia limpia de:
 
 Se agregaron estos scripts:
 
-- [gui_visible_reset_extended_check.py](/home/rafael/Documentos/Robocup2026/RL/gui_visible_reset_extended_check.py)
-- [gui_visible_invalid_slot_check.py](/home/rafael/Documentos/Robocup2026/RL/gui_visible_invalid_slot_check.py)
-- [gui_visible_dynamic_world_check.py](/home/rafael/Documentos/Robocup2026/RL/gui_visible_dynamic_world_check.py)
-- [gui_visible_suite.py](/home/rafael/Documentos/Robocup2026/RL/gui_visible_suite.py)
+- [gui_visible_reset_extended_check.py](/gui_visible_reset_extended_check.py)
+- [gui_visible_invalid_slot_check.py](/gui_visible_invalid_slot_check.py)
+- [gui_visible_dynamic_world_check.py](/gui_visible_dynamic_world_check.py)
+- [gui_visible_suite.py](/gui_visible_suite.py)
 
 Estado de estos scripts:
 

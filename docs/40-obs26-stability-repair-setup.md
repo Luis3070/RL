@@ -97,7 +97,7 @@ runs/production_readiness_v2/checkpoint_stage4_step10000.pt
 Luego `checkpoint_stage4_step5000.pt` fue exportado a ONNX con:
 
 ```text
-tools/export_ppo_policy.py
+tools/export/export_ppo_policy.py
 ```
 
 ## Entorno local
@@ -150,8 +150,8 @@ Para reparar el problema actual de `stand`, no relanzar desde el checkpoint
 historico si se quiere conservar el comportamiento vigente. Usar:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/RL/.deps/SabanaHerons2026/Make/Python \
+cd /.deps/obs26-base
+PYTHONPATH=/.deps/SabanaHerons2026/Make/Python \
 .venv/bin/python train_stability_repair.py \
   --checkpoint runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt
 ```
@@ -174,10 +174,10 @@ Se agrego `train_stand_repair.py` para hacer una reparacion local de politica,
 sin tocar el obs space y sin cambiar Sabana:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+cd /.deps/obs26-base
 .venv/bin/python train_stand_repair.py
-PYTHONPATH=/home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base \
-.venv/bin/python tools/export_ppo_policy.py \
+PYTHONPATH=/.deps/obs26-base \
+.venv/bin/python tools/export/export_ppo_policy.py \
   --checkpoint runs/production_stand_repair_v1/checkpoint_stage4_stand_repair.pt \
   --output runs/production_stand_repair_v1/ppo_striker_hsl2026_stand_repair.onnx
 ```
@@ -242,7 +242,7 @@ Se agrego `train_param_repair.py` para partir del checkpoint con `stand`
 reparado y ajustar solo `param_head`:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+cd /.deps/obs26-base
 .venv/bin/python train_param_repair.py --steps 1600 --export-compat
 ```
 
@@ -301,7 +301,7 @@ runs/production_param_repair_v1/checkpoint_stage4_param_repair.pt
 Comando usado:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL/.deps/obs26-base
+cd /.deps/obs26-base
 .venv/bin/python behavioral_evaluator.py \
   --checkpoint runs/production_param_repair_v1/checkpoint_stage4_param_repair.pt \
   --episodes 4 \

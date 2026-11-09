@@ -10,8 +10,8 @@ El proyecto se divide en dos repos hermanos:
 La ruta esperada es:
 
 ```text
-/home/rafael/Documentos/Robocup2026/RL
-/home/rafael/Documentos/Robocup2026/SabanaHerons2026
+
+
 ```
 
 ## Objetivo actual

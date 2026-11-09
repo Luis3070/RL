@@ -241,14 +241,14 @@ embeddedPPOStandWatchdogMs = 0;
 Compilar SimRobot:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026
+cd 
 Make/Linux/compile Develop SimRobot
 ```
 
 Si aparece el error de PCH en `Nao`, limpiar solo el build de `Nao`:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/SabanaHerons2026
+cd 
 cmake --build Build/Linux/CMake/Develop/Nao-prefix/src/Nao-build --target clean
 Make/Linux/compile Develop Nao
 ```
@@ -284,7 +284,7 @@ runs/production_preshoot_repair_v1/checkpoint_stage4_step12000.pt
 Antes de reemplazar el ONNX de SabanaHerons por otro candidato, conviene correr:
 
 ```bash
-cd /home/rafael/Documentos/Robocup2026/RL
+cd 
 python3 behavioral_evaluator.py --checkpoint runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt
 python3 behavioral_stability_probe.py --checkpoint runs/production_stability_repair_v1/checkpoint_stage4_step5000.pt
 ```

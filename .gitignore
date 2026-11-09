@@ -28,5 +28,6 @@ openspec/
 /dev/shm/
 runs/tmp_*/
 *.partial.npz
-# ONNX weights, policy manifests (ppo_*.json) and run scripts (tools/*.sh) are tracked.
-# NOTE: ppo_*.onnx (weights) at repo ROOT ARE deliverables — tracked, not ignored.
+# ONNX weights, policy manifests (ppo_*.json) and run scripts (tools/**/*.sh) are tracked.
+# NOTE: models/**/ppo_*.onnx (weights) under models/ ARE deliverables — tracked, not ignored.
+odd/

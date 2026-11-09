@@ -33,18 +33,18 @@ escape); off_ball_support/defender = walk/block/mark(+dribble escape). `stand`/`
    `obs[21]` comes from real vision**; the obs *contract* is identical, only the training-time source
    differs. The defense regime is close-range (mark gate < 1.5 m), exactly where real vision works
    (validated: roomy single-slot real-vision opponent perception 0.43; mark gate arms correctly).
-2. **Defense BC corpus:** `tools/collect_defense_gt.sh` over the 5 stable stage-8 scenarios
+2. **Defense BC corpus:** `tools/dataset/collect_defense_gt.sh` over the 5 stable stage-8 scenarios
    (`defense_3v3_full` EXCLUDED — it crashes the visible sim) → `dataset_stage8_20260618_211245`
    (33 999 rows, mark 673 / block 2817, roles balanced).
 3. **Merge:** `merge_multiagent_teacher_datasets.py` UNION attack corpus
    `dataset_stage7_20260611_182346` (105 624 rows, pass 2015 / shoot 1677) → `dataset_merged_v5_20260618`
    (139 623 rows, ~76:24 attack:defense).
-4. **Fine-tune:** `tools/train_merge_v5.sh` = `train_multiagent_production.py --stage-id 8`,
+4. **Fine-tune:** `tools/run/train_merge_v5.sh` = `train_multiagent_production.py --stage-id 8`,
    **warm-start AND KL anchor = v4.2 step12000** (the KL ref is the warm-start ckpt, `train.py:2102`),
    dataset = merged_v5, BC β 0.08→0.02, **single slot** (stage-8 default = stable; 3-slot starves),
    PPO scenario weights exclude `defense_3v3_full`, 10 000 steps → `checkpoint_stage8_step10000.pt`.
-5. **Export:** `tools/export_ppo_policy_team.py --active-skills stand,walk,dribble,shoot,pass,block,mark
-   --specialization merged --output ppo_team_hsl2026_v5_merged.onnx`.
+5. **Export:** `tools/export/export_ppo_policy_team.py --active-skills stand,walk,dribble,shoot,pass,block,mark
+   --specialization merged --output models/team/ppo_team_hsl2026_v5_merged.onnx`.
 
 ## 3. Results (how it was validated — the visible 3-slot eval is unusable, so OFFLINE + single-slot)
 

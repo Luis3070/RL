@@ -6,7 +6,7 @@ Autor del contrato: línea multi-agente (Luis + Claude). Referencia Python canó
 
 ## Por qué
 
-El ONNX multi-agente (deliverable del sábado, `tools/export_ppo_policy_team.py`) tiene
+El ONNX multi-agente (deliverable del sábado, `tools/export/export_ppo_policy_team.py`) tiene
 entrada de **47 floats**. El encoder embebido actual produce 26. Las 21 dimensiones
 nuevas son: bloque de teammates (6), team ball (3), engagement (3), consensus (1),
 goal vector (2), gate bits nuevos (3), role one-hot (3). Todos los campos wire ya

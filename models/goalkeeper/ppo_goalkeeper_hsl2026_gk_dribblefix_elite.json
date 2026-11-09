@@ -1,0 +1,25 @@
+{
+  "bridge_note": "intercept_* actions require the GK C++ SkillRequest bridge for native execution",
+  "checkpoint": "runs/goalkeeper_ppo/ppo_gk_20260619_021627/checkpoint_gk_ppo_step180000.pt",
+  "checkpoint_sha256": "a7cd297718ce8fd0637982141ddad983fc4546119ad679003ab9599e0b55138b",
+  "format": "onnx",
+  "obs_size_contract": 64,
+  "obs_size_input": 64,
+  "onnx_sha256": "dc78689bbf0c469a099639da7d0e8a3f4a7af2b585aa2a9077de89f1b14c5cb7",
+  "skill_order": [
+    "stand",
+    "walk_goalie_pose",
+    "observe",
+    "intercept_center",
+    "intercept_lateral",
+    "intercept_low_left",
+    "intercept_low_right",
+    "intercept_jump_left",
+    "intercept_jump_right",
+    "clear",
+    "pass",
+    "dribble_out"
+  ],
+  "slow_corner_dribble_head": "boosts walk_goalie_pose/clear for slow fresh corner-bound dribble threats; obs/action contract unchanged",
+  "specialization": "goalkeeper"
+}

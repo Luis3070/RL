@@ -55,7 +55,7 @@ el defender exista. Este doc sólo garantiza que nada de lo entrenado lo bloquee
 | Teacher framework | `multiagent_teacher.py` |
 | Trainers | `train_multiagent_production.py` → `train_multiagent.py` |
 | Env de equipo (training) | `team_parallel_environment.py` + hooks en `environment.py` |
-| Probe de estabilidad chunked | `tools/run_stability_chunked.sh` (un freeze = un seed perdido, no el run) |
+| Probe de estabilidad chunked | `tools/run/run_stability_chunked.sh` (un freeze = un seed perdido, no el run) |
 | Spec encoder C++ 26→47 (prerequisito del deploy, no del fine-tune) | `docs/29-embedded-encoder-26-to-47-spec.md` |
 
 ### 1.2 Lo de Rafael (rama `obs-26-final`, commit `fbe1e98`)
@@ -148,7 +148,7 @@ defectos observados** y **tres violaciones de contrato** que NO se portan:
    Si el diagnóstico del §3.5 cae: subir el bucket de ataque, no alargar el PPO.
 7. **Sims**: UNA sesión a la vez; máx 4 slots visibles; todo chunked (un freeze
    = un chunk perdido). `pkill -f SimRobot; pkill -f Xvfb` entre chunks y
-   `PYBH_RL_SHM_NAME` fresco por chunk (patrón de `tools/run_stability_chunked.sh`).
+   `PYBH_RL_SHM_NAME` fresco por chunk (patrón de `tools/run/run_stability_chunked.sh`).
 8. **`reward.py`, `gate.py` (campos legacy), `train_production.py`: intocables.**
    La única edición permitida en `train.py` es la regla de block del §5.2, y
    requiere aprobación explícita de Luis antes de commitear.
@@ -349,7 +349,7 @@ Presupuesto de episodio: `RL_MA_TEACHER_MAX_STEPS=600`. Los guards existentes
 ```bash
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 export RL_MA_TEACHER_COLLISION_SUSTAIN_STEPS=16
-export PYTHONPATH=/home/luis/GitHub/RL
+export PYTHONPATH=
 
 # Chunked: 3 chunks × 8 episodios. Un freeze = un chunk perdido.
 for i in 1 2 3; do
@@ -430,8 +430,8 @@ python train_multiagent_production.py --stage-id 8 \
 | d | **Anti-freeze** (el defecto obs26, medible): episodios con balón propio stale + team ball válido → `policy_stand_rate` del defender | < 0.10 |
 | e | Block engagement: ventanas defensivas con `dribble_armed=1` en rol off_ball donde ejecuta block | ≥ 50% |
 | f | Goles encajados en `defense_3v3_full` vs baseline (trío v2b@7500 SIN fine-tune defensivo, mismos seeds) | estrictamente menor |
-| g | Estabilidad multi-seed DEFENSIVA: eval `defense_3v3_full` chunked en los 6 stable seeds (11,23,37,51,67,83 — patrón de `tools/run_stability_chunked.sh`: shm fresco + pkill por seed); reportar goles encajados y cover por seed | (f) se sostiene en ≥ 4/6 seeds |
-| h | Export: `tools/export_ppo_policy_team.py --output ppo_defender_hsl2026.onnx` → ONNX propio + manifest (gate_config + role indices + `"specialization": "defender"`) | sha documentado |
+| g | Estabilidad multi-seed DEFENSIVA: eval `defense_3v3_full` chunked en los 6 stable seeds (11,23,37,51,67,83 — patrón de `tools/run/run_stability_chunked.sh`: shm fresco + pkill por seed); reportar goles encajados y cover por seed | (f) se sostiene en ≥ 4/6 seeds |
+| h | Export: `tools/export/export_ppo_policy_team.py --output models/defender/ppo_defender_hsl2026.onnx` → ONNX propio + manifest (gate_config + role indices + `"specialization": "defender"`) | sha documentado |
 
 El probe de ataque (`run_stability_chunked.sh` sobre los 5 escenarios
 single-agent) ya NO es gate para el defender — correrlo una vez como

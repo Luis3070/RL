@@ -1,8 +1,9 @@
 # Documentation index
 
-Index of every file under `docs/` and `.docs/`. Most documents are working logs written during development; many are in Spanish (column `Lang`).
+Index of every file under `docs/` (working notes live in `docs/notes/`). Most documents are working logs written during development; many are in Spanish (column `Lang`).
 Descriptions are derived from each file's title and opening lines.
-Related: [root README](../README.md), [paper traceability](PAPER_TRACEABILITY.md).
+Most documents refer to modules by their pre-refactor flat names (for example `train.py`); the old-to-new table is in [REPO_LAYOUT.md](REPO_LAYOUT.md).
+Related: [root README](../README.md), [project structure and integration guide](PROJECT_STRUCTURE.md), [paper traceability](PAPER_TRACEABILITY.md).
 
 Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `defender`, `goalkeeper`, `multiagent`, `audit` (validation, evaluation, stability).
 
@@ -54,23 +55,23 @@ Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `de
 | [40-obs26-stability-repair-setup.md](40-obs26-stability-repair-setup.md) | Obs-26 setup to repair the embedded PPO | audit | ES |
 | [41-defender-obs26-pipeline-canonico.md](41-defender-obs26-pipeline-canonico.md) | Canonical obs-26 defender pipeline | defender | ES |
 | [42-recuperacion-defender-onnx-a-pt.md](42-recuperacion-defender-onnx-a-pt.md) | Short recovery of the defender `.pt` from its ONNX | defender | ES |
+| [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and rules for integrating new work | - | EN |
 | [README.md](README.md) | This index | - | EN |
 
 Numbering notes: document 08 is absent; two files share number 25 and two share number 35.
 
-## .docs/
+## docs/notes/
 
 | File | Description | Topic | Lang |
 |---|---|---|---|
-| [09-production-selfplay-and-multiagent-handoff.md](../.docs/09-production-selfplay-and-multiagent-handoff.md) | Handoff: production self-play, multi-agent observation space and 4v4 wrapper-coordinated deployment | multiagent | EN |
-| [10-graph-coordination-post-production-roadmap.md](../.docs/10-graph-coordination-post-production-roadmap.md) | Graph coordination: one-week post-production sprint plan | multiagent | EN |
-| [Bhuman Logic/Bhuman-deterministic-agent-map.md](../.docs/Bhuman%20Logic/Bhuman-deterministic-agent-map.md) | Map of the B-Human deterministic agent code used as the base for the teacher policy | audit | ES |
-| `FIGURES/` | Paper figure generators (`generate_*.py`) and `table_match_metrics_v5_vs_*.csv` match tables for the final all-learned team | evidence | EN |
+| [notes/09-production-selfplay-and-multiagent-handoff.md](notes/09-production-selfplay-and-multiagent-handoff.md) | Handoff: production self-play, multi-agent observation space and 4v4 wrapper-coordinated deployment | multiagent | EN |
+| [notes/10-graph-coordination-post-production-roadmap.md](notes/10-graph-coordination-post-production-roadmap.md) | Graph coordination: one-week post-production sprint plan | multiagent | EN |
+| [notes/bhuman-logic/Bhuman-deterministic-agent-map.md](notes/bhuman-logic/Bhuman-deterministic-agent-map.md) | Map of the B-Human deterministic agent code used as the base for the teacher policy | audit | ES |
 
-## Other working notes at the repository root
+## Other working notes (formerly at the repository root)
 
 | File | Description | Lang |
 |---|---|---|
-| [HANDOFF.md](../HANDOFF.md) | Defender v2 (doc 34) validation in SimRobot/Linux, 2026-06-15 | ES |
-| [CODEX_OFFBALL_PERCEPTION_HANDOFF.md](../CODEX_OFFBALL_PERCEPTION_HANDOFF.md) | Task note: fix off-ball defender opponent perception (head/gaze) in the multi-agent scene | EN |
-| [cambios_para_produccion.md](../cambios_para_produccion.md) | Historical note: changes to reach 4/5 evaluation criteria for the production PPO | ES |
+| [notes/HANDOFF.md](notes/HANDOFF.md) | Defender v2 (doc 34) validation in SimRobot/Linux, 2026-06-15 | ES |
+| [notes/CODEX_OFFBALL_PERCEPTION_HANDOFF.md](notes/CODEX_OFFBALL_PERCEPTION_HANDOFF.md) | Task note: fix off-ball defender opponent perception (head/gaze) in the multi-agent scene | EN |
+| [notes/cambios_para_produccion.md](notes/cambios_para_produccion.md) | Historical note: changes to reach 4/5 evaluation criteria for the production PPO | ES |

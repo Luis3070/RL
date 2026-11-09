@@ -35,7 +35,7 @@ validación: validamos pase-de-salida + conducir-fuera como la conducta de despe
 ## Requisitos de entorno
 
 - Pasos de **dataset/entrenamiento/sim**: Linux con `pybh` compilado
-  (`PYTHONPATH=/home/luis/GitHub/SabanaHerons2026/Make/Python`), conda `RLNAO`, `DISPLAY`
+  (`PYTHONPATH=/Make/Python`), conda `RLNAO`, `DISPLAY`
   activo. UNA sola sesión de sims, máx 4 slots, todo *chunked* (un freeze = un chunk).
 - Paso **offline** (semáforo): tu `offline_team_eval.py` sobre el ONNX exportado — corre
   en Windows sin pybh, como hiciste con v2b.
@@ -49,7 +49,7 @@ Incluye automáticamente el escenario nuevo `defense_recovery_clear` (ya está e
 `team_defense_scenarios` y en `DEFAULT_STAGE8_SCENARIO_WEIGHTS`).
 
 ```bash
-export PYTHONPATH=/home/luis/GitHub/RL:/home/luis/GitHub/SabanaHerons2026/Make/Python
+export PYTHONPATH=:/Make/Python
 export RL_GATE_SHOOT_OPEN_ENTER=0.30 RL_GATE_SHOOT_OPEN_EXIT=0.20
 export RL_MA_TEACHER_COLLISION_SUSTAIN_STEPS=16
 
@@ -144,16 +144,16 @@ python behavioral_evaluator.py \
 ## Paso 7 — Estabilidad multi-seed (sim, chunked)
 
 ```bash
-tools/run_stability_chunked.sh \
+tools/run/run_stability_chunked.sh \
   runs/defender_47_v2/checkpoint_stage8_step<MEJOR>.pt 11 23 37 51 67 83
 ```
 
 ## Paso 8 — Exportar ONNX del defender (familia per-role)
 
 ```bash
-python tools/export_ppo_policy_team.py \
+python tools/export/export_ppo_policy_team.py \
   --checkpoint runs/defender_47_v2/checkpoint_stage8_step<MEJOR>.pt \
-  --output ppo_defender_hsl2026.onnx \
+  --output models/defender/ppo_defender_hsl2026.onnx \
   --active-skills stand,walk,dribble,shoot,pass,block
 ```
 

@@ -50,7 +50,7 @@ recompilados en la misma rama:
 Comandos usados:
 
 ```bash
-cd /home/rafael/Documentos/HSL/SabanaHerons2026
+cd 
 env CCACHE_DIR=/tmp/ccache-hsl cmake --build Build/Linux/CMake/Develop --target SimRobot SimulatedNao -j2
 env CCACHE_DIR=/tmp/ccache-hsl cmake --build Build/Linux/Python --target PythonController -j2
 cp Build/Linux/Python/Release/controller.cpython-312-x86_64-linux-gnu.so Make/Python/pybh/controller.cpython-312-x86_64-linux-gnu.so
@@ -112,11 +112,11 @@ fisica independiente por slot.
 ## Comando base
 
 ```bash
-cd /home/rafael/Documentos/HSL/RL
+cd 
 source .venv/bin/activate
 
-PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL \
-LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
+PYTHONPATH=/Make/Python: \
+LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_TEACHER_STAGE=8 \
@@ -146,8 +146,8 @@ El log correcto debe decir:
 Para smoke rapido:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL \
-LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
+PYTHONPATH=/Make/Python: \
+LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_TEACHER_STAGE=8 \
@@ -162,8 +162,8 @@ Para validar que el pipeline escribe filas sin que los filtros de calidad tapen
 el resultado:
 
 ```bash
-PYTHONPATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Make/Python:/home/rafael/Documentos/HSL/RL \
-LD_LIBRARY_PATH=/home/rafael/Documentos/HSL/SabanaHerons2026/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
+PYTHONPATH=/Make/Python: \
+LD_LIBRARY_PATH=/Util/onnxruntime/lib/Linux:$LD_LIBRARY_PATH \
 RL_GATE_SHOOT_OPEN_ENTER=0.30 \
 RL_GATE_SHOOT_OPEN_EXIT=0.20 \
 RL_MA_TEACHER_STAGE=8 \

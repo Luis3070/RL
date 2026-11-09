@@ -63,7 +63,7 @@ Si se porta solo la red y se omiten 2, 3 o 4, el robot no reproducirá el compor
 ### Documentación operativa relevante
 
 - `docs/25-guia-transplante-ppo-bhuman.md`
-- `cambios_para_produccion.md`
+- `docs/notes/cambios_para_produccion.md`
 - `docs/23-plan-transplante-ppo-naov6-hsl2026.md`
 - `FOR_TRAIN_PRODUCTION.md` [removed from this branch; available on rl-v4.2-multiagent-gk]
 
