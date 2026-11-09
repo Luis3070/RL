@@ -68,6 +68,32 @@ normalization, same residual→absolute math). The merged ONNX only differs in t
 and the role-conditioned gate. Below is **what doc 37 did not cover** and is mandatory for the merged
 multi-agent deployment.
 
+### 4.0 The complete per-frame inference loop (read this first)
+Run this **once per cognition frame, per RL field robot** (the GK runs its own separate policy,
+§4.6). `obs_raw` = the existing B-Human world model (pose, ball, obstacles, team comm).
+```
+# --- once per frame, shared across the 3 RL robots (team-level) ---
+team_state  = update_team_state(all_rl_teammate_poses, team_ball)      # team ball + histories
+roles       = assign_roles(team_state, agent_obs, history)             # §4.2  -> {robot: role}
+coord_tgts  = coordination_targets(roles, team_state)                  # §4.3  EMA open-lane/triangle/cover
+
+# --- per robot ---
+role      = roles[this_robot];  coord = coord_tgts[this_robot]
+gate_bits = SkillGate.step(obs_raw)             # §4.4  arming -> shoot/dribble/pass armed + progress
+obs47     = encode(obs_raw, gate_bits, onehot(role), coord)            # §4.1 + doc 29  (47 floats)
+logits, residual = ONNX.run(obs47)                                     # skill_logits[8], param_mean[4]
+mask      = gate_skill_mask_from_obs(obs47)                            # §4.4  role-conditioned forbid-invalid
+skill     = argmax(logits + (mask - 1)*1e9)                            # deterministic gated argmax
+skill     = block_priority_override(skill, mask, obs47)   # §4.8  OPTIONAL (recommended ON)
+absolute  = decode_residual(skill, residual, obs_raw, role, coord)     # §4.3  role-aware anchor + residual
+absolute  = project_action(absolute, active_skills)                   # §4.9 step 2
+absolute  = repair_targets(absolute, obs_raw, role, coord)            # §4.9 step 3  (LOAD-BEARING)
+absolute  = collision_avoid(absolute, obs_raw)            # §4.8  OPTIONAL
+emit SkillRequest(skill, absolute)                                     # §4.5
+```
+Every box maps to a section below. Skip none. The two `OPTIONAL` boxes are wrappers (§4.8);
+everything else is mandatory.
+
 ### 4.1 ONNX
 `ppo_team_hsl2026_v5_merged.onnx`, onnx sha256 `abee6a5cff3966d6…`, ckpt sha256 `81e5555c4d49303e…`
 (manifest `ppo_team_hsl2026_v5_merged.json`). Same I/O as v4.2 (`obs[1,47]`→`skill_logits[1,8]`,
@@ -180,6 +206,22 @@ of ported, treat it as a transplant risk and parity-check it explicitly.
 `multiagent_teacher.py` (assign_roles + coordination anchors), `action.py` +
 `environment.py::_decode_residual_policy_action` (residual→absolute, param masks, ranges). Doc 29 =
 the 26→47 encoder plumbing.
+
+## 5b. Common transplant pitfalls (every one of these has bitten us)
+- **Forgot the gate bits in the obs** (`obs[23:25]`, `obs[41:43]` left 0): the policy was *trained*
+  with them; zeros → it never shoots/passes. They are encoder outputs, not optional.
+- **Applied argmax without the mask:** the GK case proved this — raw argmax collapses to one skill
+  (intercept_center). Always `logits + (mask-1)*1e9` then argmax.
+- **Decoded support/defender walk ball-anchored:** §4.3 — must use `build_open_lane_anchor(obs, coord)`,
+  else the robot walks at the ball / freezes (triangle_hold=0).
+- **Skipped `repair_targets`:** §4.9 — drifted targets never snap back → supports stall.
+- **`residual_x_range` treated as nonzero:** it is **0.0**. `target_x` comes entirely from the anchor.
+- **Role one-hot all-zero or two-hot:** exactly one bit set per RL robot. All-zero triggers the
+  single-agent fallback gate (wrong for a field robot). The GK is all-zero *on purpose* (it's not this policy).
+- **Wrong ONNX file:** use `ppo_team_hsl2026_v5_merged.onnx` (sha `abee6a5c…`). Verify the sha256.
+- **Coordinator not run / run per-robot inconsistently:** `assign_roles` must run once on shared team
+  state so the 3 robots see a consistent role assignment (no two strikers).
+- **Angle wrap:** `target_theta` must be wrapped to (-π, π] (`_wrap_angle`).
 
 ## 6. Parity checklist (gate before trusting hardware)
 Same 4 checks as doc 37 §B.7, **per role**: run each of the 3 roles through (encoder→ONNX→gate→argmax
