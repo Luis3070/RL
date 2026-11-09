@@ -1503,6 +1503,8 @@ class BCReplayRegularizer:
         self.updates_per_rollout = int(updates_per_rollout)
         self.current_beta = self.beta_max
         self.rng = np.random.default_rng(seed)
+        # Ablation knob: weight of the KL-to-warm-start anchor inside the replay loss (default 1.0).
+        self.kl_scale = float(os.environ.get("RL_BC_KL_SCALE", "1.0"))
         self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=self.base_learning_rate, weight_decay=1e-5)
         self.observations = torch.as_tensor(observations, dtype=torch.float32, device=device)
         self.actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
@@ -1611,7 +1613,7 @@ class BCReplayRegularizer:
         param_loss = (param_loss_per_sample * normalized_weights * param_active).sum() / torch.clamp(
             (normalized_weights * param_active).sum(), min=1.0
         )
-        loss = kl_loss + self.skill_loss_scale * skill_loss + self.param_loss_scale * param_loss
+        loss = self.kl_scale * kl_loss + self.skill_loss_scale * skill_loss + self.param_loss_scale * param_loss
         with torch.no_grad():
             predictions = torch.argmax(masked_logits, dim=-1)
             accuracy = (predictions == skill_targets).to(dtype=torch.float32)
@@ -2343,6 +2345,12 @@ def run_training(
 
 
 def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
+    # Independent-run seed (ablations): seeds torch/numpy and the training-env resets.
+    # Evaluation resets keep TRAIN.seed so every run is scored on the same episodes.
+    run_seed = os.environ.get("RL_SEED")
+    if run_seed is not None:
+        torch.manual_seed(int(run_seed))
+        np.random.seed(int(run_seed))
     effective_train = replace(
         TRAIN,
         experiment_name=run_cfg.experiment_name,
@@ -2356,6 +2364,7 @@ def main(run_cfg: ScriptRunConfig = IDE_RUN) -> None:
     )
     effective_env = replace(
         ENV,
+        seed=int(run_seed) if run_seed is not None else ENV.seed,
         max_episode_steps=run_cfg.max_episode_steps,
         parallel_player_numbers=run_cfg.parallel_player_numbers,
         diverse_stage_resets=run_cfg.diverse_stage_resets,

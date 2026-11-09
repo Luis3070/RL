@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from action import DEFAULT_TRAIN_SKILLS, SKILL_ORDER
 
 ROOT_DIR = Path(__file__).resolve().parent
 BHUMAN_DIR = (ROOT_DIR.parent / "SabanaHerons2026").resolve()
-SIMROBOT_BIN = BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot"
+SIMROBOT_BIN = Path(os.environ.get("RL_SIMROBOT_BIN", str(BHUMAN_DIR / "Build/Linux/SimRobot/Develop/SimRobot")))
 
 TEAM_NUMBER = 24
 PLAYER_NUMBER = 1

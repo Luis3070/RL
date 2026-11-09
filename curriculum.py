@@ -917,7 +917,18 @@ def get_dynamic_world_update(
     dynamic_state: DynamicWorldState | None = None,
 ) -> Dict[str, object] | None:
     stage = get_stage_spec(stage_id)
-    if stage_id == 8 and os.getenv("RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES", "1") in {"0", "false", "False", "no", "NO"}:
+    _off = {"0", "false", "False", "no", "NO"}
+    if stage_id == 8 and os.getenv("RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES", "1") in _off:
+        return None
+    # Stage-agnostic switch. Scripted opponent motion (_static_obstacles never moves;
+    # _dynamic_obstacles is a closed-form sin/cos wobble) is teleported onto the field
+    # here every `dynamic_update_interval_steps`, which OVERRIDES the opponents' own
+    # B-Human behaviour. The multi-robot RLMAStage*_3D scenes spawn opponents as real
+    # Nao bodies on team 70 under `gc playing`, so suppressing these updates lets them
+    # play genuine reactive football (verified: tools/verify_reactive_opponents.py --
+    # 7350mm of travel, closed to 5mm of the ball). That is the only way the teacher can
+    # demonstrate winning a contested duel, which no scripted-opponent corpus contains.
+    if os.getenv("RL_MA_DYNAMIC_WORLD_UPDATES", "1") in _off:
         return None
     if stage.obstacle_mode != "dynamic":
         return None
