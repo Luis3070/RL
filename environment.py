@@ -1,2061 +1,306 @@
-"""
-environment.py — NaoSoccerEnv: entorno de simulación 2D para MAPPO NAO Soccer.
-
-Alineado con contrato BHuman 4v4 Scaled:
-  - Campo 4v4 Scaled (2813 x 1875 mm)
-  - Tácticas t121_4v4_scaled / t13_4v4_scaled
-  - Handoff/takeover flow: RL posiciona → BHuman ejecuta
-  - Macrostate tracking para reward/metrics
-  - NO usa física local como fuente de verdad de kick/dribble
-
-Flujo de step():
-  1. rl_control_step: agentes RL se mueven según acciones
-  2. handoff_check: evalúa handoff_ready para agente activo
-  3. bhuman_takeover_rollout: simula ejecución BHuman si handoff_ready
-  4. post_takeover_update: registra resultado de takeover
-  5. Oponentes, física del balón, gol check, reward
-"""
-
 from __future__ import annotations
 
 import math
-import random
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+import os
+import time
+from collections import defaultdict
+from dataclasses import asdict, replace
+from typing import Dict, Mapping, Optional
 
+import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
-from config import (
-    FIELD, AGENT, BALL, OBSTACLE, FOV, SIM,
-    OBS, ACTION, GLOBAL_STATE, NORM,
-    CURRICULUM, CurriculumStageConfig, ROLES, TACTIC_NAMES,
-    ACTION_SMOOTHING, CONTRACT, EXECUTION_MODE,
+from action import (
+    SKILL_ORDER,
+    SkillType,
+    StructuredSkillAction,
+    action_from_mapping,
+    action_from_numpy,
+    action_param_mask,
+    skill_mask,
 )
-from bhuman_cfg_parser import (
-    get_home_poses, MACRO_TYPES, MACRO_END_REASONS, TAKEOVER_SKILLS,
+from config import ACTION, ENV, GOAL_X
+from curriculum import (
+    get_dynamic_world_update,
+    get_stage_spec,
+    init_dynamic_world_state,
+    sample_finish_sequence_world_spec,
+    sample_finish_world_spec,
+    sample_preshoot_dribble_world_spec,
+    sample_stage_world_spec_with_options,
+    stage_skill_mask,
+)
+from gate import GateConfig, SkillGate
+from observation import OBS_FEATURE_NAMES, OBS_SIZE
+from pybh_backend import BackendObservation, PyBHBackend, WorldSpec
+from production_curriculum import (
+    ProductionScenario,
+    production_scenarios,
+    production_topup_scenarios,
+    team_defense_scenarios,
+    team_production_scenarios,
+)
+from reward import (
+    TAKEOVER_GRACE_STEPS,
+    StepContext,
+    StepEvaluation,
+    build_fallback_action_targets,
+    evaluate_step,
+    features_from_obs,
+    goal_scored,
+    is_geometric_takeover,
 )
 
-TAKEOVER_MACRO_TYPES = frozenset(mt for mt in MACRO_TYPES if mt != "none")
-TAKEOVER_SUCCESS_METRIC_TYPES = (
-    "playBall_dribble",
-    "playBall_duel",
-    "playBall_shoot",
-    "playBall_pass",
-)
-TAKEOVER_END_REASONS = (
-    "timeout",
-    "skill_request_cleared",
-    "active_agent_changed",
-    "out",
-    "goal",
-    "game_state_changed",
-    "other",
-)
-
-
-def _new_takeover_reason_counts() -> Dict[str, int]:
-    return {reason: 0 for reason in TAKEOVER_END_REASONS}
-
-
-def _new_takeover_type_counts() -> Dict[str, int]:
-    return {macro_type: 0 for macro_type in TAKEOVER_SUCCESS_METRIC_TYPES}
-
-
-def _effective_sidecar_macro_type(skill_request: Any,
-                                  macro_type: Any,
-                                  motion_request: Any) -> str:
-    """
-    Resolve the operational play-ball macro from BHuman outputs.
-
-    The bridge can transiently keep a low-level dribble / walkToBallAndKick
-    motion while the high-level skill has already committed to shoot / pass.
-    For takeover semantics we preserve the higher-level BHuman intent first,
-    then fall back to the reported play-ball macro, and only then to the
-    motion request.
-    """
-    skill = str(skill_request or "none")
-    macro = str(macro_type or "none")
-    motion = str(motion_request or "none")
-
-    if macro == "playBall_duel":
-        return "playBall_duel"
-    if skill == "shoot":
-        return "playBall_shoot"
-    if skill == "pass":
-        return "playBall_pass"
-    if skill == "dribble":
-        return "playBall_dribble"
-    if macro in TAKEOVER_MACRO_TYPES:
-        return macro
-    if motion == "dribble":
-        return "playBall_dribble"
-    return "none"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ESTADOS INTERNOS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class BallState:
-    pos: np.ndarray   # [x, y] mm
-    vel: np.ndarray   # [vx, vy] mm/s
-    last_touched_by: Optional[str] = None
-    seen_age_ms: float = 0.0  # ms since last seen
-
-
-@dataclass
-class AgentState:
-    agent_id:       str
-    pos:            np.ndarray  # [x, y] mm
-    theta:          float       # rad
-    vel:            np.ndarray  # [vx, vy] mm/s
-    omega:          float       # rad/s
-    role:           str         # "defenderL", "defenderR", "forwardL", "forwardR"
-    is_upright:     bool = True
-    recovery_steps: int  = 0
-    battery:        float = 1.0
-    walk_target:    np.ndarray = field(default_factory=lambda: np.zeros(2))
-    speed_scalar:   float = 0.0
-    is_active:      bool = False   # True if this is the active (closest to ball) agent
-
-
-@dataclass
-class OpponentState:
-    opp_id:   str
-    pos:      np.ndarray
-    theta:    float
-    vel:      np.ndarray
-    is_upright: bool = True
-    home_pos: np.ndarray = field(default_factory=lambda: np.zeros(2))
-
-
-@dataclass
-class StaticObstacle:
-    obstacle_id: str
-    pos: np.ndarray
-    radius: float
-
-
-@dataclass
-class GameState:
-    own_score:    int   = 0
-    opp_score:    int   = 0
-    step_count:   int   = 0
-    is_playing:   bool  = True
-    time_elapsed: float = 0.0  # seconds
-
-
-@dataclass
-class MacroState:
-    """Tracks BHuman macro-action execution."""
-    macro_active: bool = False
-    macro_type: str = "none"
-    macro_owner: Optional[str] = None     # agent_id
-    macro_start_frame: int = 0
-    macro_duration_frames: int = 0
-    macro_end_reason: str = "none"
-    macro_success: Optional[bool] = None
-    # Takeover tracking
-    handoff_ready: bool = False
-    takeover_active: bool = False
-    takeover_grace_counter: int = 0
-    event_recorded: bool = False
-    takeover_start_ball_pos: Optional[np.ndarray] = None
-    takeover_last_ball_pos: Optional[np.ndarray] = None
-    takeover_control_frames: int = 0
-    takeover_progress_frames: int = 0
-    takeover_ball_progress_mm: float = 0.0
-    takeover_ball_progress_along_target_mm: float = 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHYSICS — Ball (sim-only, NOT source of truth for kick)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class BallPhysics:
-    """Ball physics for training simulation. BHuman handles real kicks."""
-
-    def step(self, ball: BallState, dt: float) -> Tuple[BallState, bool]:
-        new_pos = ball.pos + ball.vel * dt
-        new_vel = ball.vel * BALL.friction
-
-        new_pos, new_vel, ball_out = self._handle_boundaries(new_pos, new_vel)
-
-        if np.linalg.norm(new_vel) < BALL.min_speed:
-            new_vel = np.zeros(2)
-
-        if not np.all(np.isfinite(new_pos)) or not np.all(np.isfinite(new_vel)):
-            new_pos = np.zeros(2, dtype=np.float32)
-            new_vel = np.zeros(2, dtype=np.float32)
-
-        return BallState(
-            pos=new_pos, vel=new_vel,
-            last_touched_by=ball.last_touched_by,
-            seen_age_ms=ball.seen_age_ms,
-        ), ball_out
-
-    def _handle_boundaries(self, pos: np.ndarray,
-                           vel: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
-        x, y = pos
-        ball_out = False
-
-        if y > FIELD.y_left_sideline or y < FIELD.y_right_sideline:
-            ball_out = True
-        in_goal_y = FIELD.y_right_goal < y < FIELD.y_left_goal
-        if x > FIELD.x_opponent_ground and not in_goal_y:
-            ball_out = True
-        elif x < FIELD.x_own_ground and not in_goal_y:
-            ball_out = True
-
-        if ball_out:
-            x = float(np.clip(x, FIELD.x_own_ground + 50.0, FIELD.x_opponent_ground - 50.0))
-            y = float(np.clip(y, FIELD.y_right_sideline + 50.0, FIELD.y_left_sideline - 50.0))
-            return np.array([x, y]), np.zeros(2), True
-
-        return np.array([x, y]), vel, False
-
-    def check_goal(self, ball: BallState) -> Optional[str]:
-        x, y = ball.pos
-        in_goal_y = FIELD.y_right_goal < y < FIELD.y_left_goal
-        if x > FIELD.x_opponent_ground and in_goal_y:
-            return "own"
-        if x < FIELD.x_own_ground and in_goal_y:
-            return "opp"
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MOVEMENT MODEL
-# ─────────────────────────────────────────────────────────────────────────────
-
-class NaoMovementModel:
-    ROTATION_THRESHOLD = 0.5   # rad (~28.6°)
-
-    def __init__(self):
-        self.rotation_threshold = float(self.ROTATION_THRESHOLD)
-
-    def configure(self, stage_cfg) -> None:
-        self.rotation_threshold = float(
-            getattr(stage_cfg, "rotation_threshold_rad", self.ROTATION_THRESHOLD)
-        )
-
-    def step(self, agent: AgentState, target_pos: np.ndarray,
-             target_theta: float, dt: float) -> AgentState:
-        if not agent.is_upright:
-            return self._handle_fallen(agent, dt)
-
-        new_pos, new_theta, new_vel, new_omega = self._compute_motion(
-            agent.pos, agent.theta, target_pos, target_theta, dt
-        )
-
-        speed = float(np.linalg.norm(new_vel))
-        is_upright, recovery = self._check_fall(speed, agent.is_upright, agent.recovery_steps)
-
-        walk_target = target_pos.copy()
-        speed_scalar = min(float(np.linalg.norm(new_vel)), AGENT.max_forward_speed)
-
-        new_state = AgentState(
-            agent_id=agent.agent_id, pos=new_pos, theta=new_theta,
-            vel=new_vel, omega=new_omega, role=agent.role,
-            is_upright=is_upright, recovery_steps=recovery,
-            battery=max(0.0, agent.battery - 0.00001),
-            walk_target=walk_target, speed_scalar=speed_scalar,
-            is_active=agent.is_active,
-        )
-
-        if not math.isfinite(new_state.theta):
-            new_state.theta = agent.theta
-        if not np.all(np.isfinite(new_state.vel)):
-            new_state.vel = np.zeros(2)
-        if not math.isfinite(new_state.omega):
-            new_state.omega = 0.0
-
-        return new_state
-
-    def _compute_motion(self, pos, theta, target_pos, target_theta, dt):
-        dx = target_pos[0] - pos[0]
-        dy = target_pos[1] - pos[1]
-        dist = math.hypot(dx, dy)
-
-        if dist < 10.0:
-            dtheta = _normalize_angle(target_theta - theta)
-            omega = np.clip(dtheta / dt, -AGENT.max_rotation_speed, AGENT.max_rotation_speed)
-            new_theta = theta + omega * dt
-            return pos.copy(), new_theta, np.zeros(2), omega
-
-        angle_to_target = math.atan2(dy, dx)
-        dtheta = _normalize_angle(angle_to_target - theta)
-
-        if abs(dtheta) > self.rotation_threshold:
-            omega = np.clip(dtheta / dt, -AGENT.max_rotation_speed, AGENT.max_rotation_speed)
-            new_theta = _normalize_angle(theta + omega * dt)
-            return pos.copy(), new_theta, np.zeros(2), omega
-
-        omega = np.clip(dtheta / dt, -AGENT.max_rotation_speed, AGENT.max_rotation_speed)
-        new_theta = _normalize_angle(theta + omega * dt)
-
-        speed = min(dist / dt, AGENT.max_forward_speed)
-        vx_robot = speed * math.cos(dtheta)
-        vy_robot = speed * math.sin(dtheta)
-        vx_robot = np.clip(vx_robot, -AGENT.max_backward_speed, AGENT.max_forward_speed)
-        vy_robot = np.clip(vy_robot, -AGENT.max_sideways_speed, AGENT.max_sideways_speed)
-
-        cos_t, sin_t = math.cos(theta), math.sin(theta)
-        vx_field = vx_robot * cos_t - vy_robot * sin_t
-        vy_field = vx_robot * sin_t + vy_robot * cos_t
-        vel_field = np.array([vx_field, vy_field])
-        new_pos = pos + vel_field * dt
-
-        if not np.all(np.isfinite(new_pos)):
-            new_pos = pos.copy()
-            vel_field = np.zeros(2)
-
-        new_pos[0] = np.clip(new_pos[0], FIELD.x_own_ground - 500.0, FIELD.x_opponent_ground + 500.0)
-        new_pos[1] = np.clip(new_pos[1], FIELD.y_right_sideline - 500.0, FIELD.y_left_sideline + 500.0)
-
-        return new_pos, new_theta, vel_field, omega
-
-    def _check_fall(self, speed, was_upright, recovery):
-        if not was_upright:
-            new_recovery = recovery - 1
-            return (new_recovery <= 0, max(0, new_recovery))
-        if speed > AGENT.fall_speed_thresh and random.random() < AGENT.fall_probability:
-            return False, AGENT.recovery_steps
-        return True, 0
-
-    def _handle_fallen(self, agent, dt):
-        new_recovery = agent.recovery_steps - 1
-        return AgentState(
-            agent_id=agent.agent_id, pos=agent.pos.copy(), theta=agent.theta,
-            vel=np.zeros(2), omega=0.0, role=agent.role,
-            is_upright=(new_recovery <= 0), recovery_steps=max(0, new_recovery),
-            battery=agent.battery, walk_target=agent.walk_target.copy(),
-            speed_scalar=0.0, is_active=agent.is_active,
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FOV FILTER
-# ─────────────────────────────────────────────────────────────────────────────
-
-class FOVFilter:
-    def __init__(self, use_fov: bool = True):
-        self.use_fov = use_fov
-        self._memory: Dict[str, Dict[str, int]] = {}
-
-    def reset(self, agent_ids):
-        self._memory = {aid: {} for aid in agent_ids}
-
-    def get_visible_opponents(self, agent_id, agent_pos, agent_theta, opponents):
-        if not self.use_fov:
-            return [opp for opp in opponents if opp.is_upright]
-
-        memory = self._memory.setdefault(agent_id, {})
-        visible = []
-        seen_ids = set()
-
-        for opp in opponents:
-            if not opp.is_upright:
-                continue
-            if self._is_in_fov(agent_pos, agent_theta, opp.pos):
-                if random.random() < FOV.detection_prob:
-                    visible.append(opp)
-                    seen_ids.add(opp.opp_id)
-                    memory[opp.opp_id] = FOV.memory_steps
-
-        for opp in opponents:
-            if opp.opp_id in memory and opp.opp_id not in seen_ids:
-                visible.append(opp)
-
-        expired = [oid for oid, steps in memory.items() if steps <= 0]
-        for oid in expired:
-            del memory[oid]
-        for oid in list(memory.keys()):
-            if oid not in expired:
-                memory[oid] -= 1
-
-        return visible
-
-    def _is_in_fov(self, agent_pos, agent_theta, target_pos):
-        dx = target_pos[0] - agent_pos[0]
-        dy = target_pos[1] - agent_pos[1]
-        dist = math.hypot(dx, dy)
-        if dist > FOV.max_distance or dist < 1e-6:
-            return False
-        angle_to = math.atan2(dy, dx)
-        angle_diff = abs(_normalize_angle(angle_to - agent_theta))
-        return angle_diff < FOV.half_angle
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SCRIPTED OPPONENTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ScriptedOpponent:
-    def __init__(self, movement_model):
-        self._movement = movement_model
-
-    def decide_and_move(self, opp, ball_pos, is_nearest_to_ball, dt):
-        if not opp.is_upright:
-            tmp = AgentState(
-                agent_id=opp.opp_id, pos=opp.pos, theta=opp.theta,
-                vel=opp.vel, omega=0.0, role="forward",
-                is_upright=False, recovery_steps=10,
-            )
-            updated = self._movement._handle_fallen(tmp, dt)
-            return OpponentState(
-                opp_id=opp.opp_id, pos=updated.pos, theta=updated.theta,
-                vel=updated.vel, is_upright=updated.is_upright, home_pos=opp.home_pos,
-            )
-
-        if is_nearest_to_ball:
-            target_pos = ball_pos
-            target_theta = math.atan2(ball_pos[1] - opp.pos[1], ball_pos[0] - opp.pos[0])
-        else:
-            target_pos = opp.home_pos
-            target_theta = math.atan2(ball_pos[1] - opp.pos[1], ball_pos[0] - opp.pos[0])
-
-        tmp = AgentState(
-            agent_id=opp.opp_id, pos=opp.pos, theta=opp.theta,
-            vel=opp.vel, omega=0.0, role="forward", is_upright=True,
-        )
-        updated = self._movement.step(tmp, target_pos, target_theta, dt)
-
-        return OpponentState(
-            opp_id=opp.opp_id, pos=updated.pos, theta=updated.theta,
-            vel=updated.vel, is_upright=updated.is_upright, home_pos=opp.home_pos,
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OBSERVATION BUILDER — 60 floats per agent
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ObservationBuilder:
-    def build(self, agent, all_agents, ball, visible_opponents,
-              game, current_tactic):
-        obs = np.zeros(OBS.total, dtype=np.float32)
-        idx = 0
-        idx = self._write_self(obs, idx, agent)
-        idx = self._write_ball(obs, idx, ball, agent)
-        idx = self._write_teammates(obs, idx, agent, all_agents)
-        idx = self._write_opponents(obs, idx, visible_opponents)
-        idx = self._write_game(obs, idx, game)
-        idx = self._write_tactic(obs, idx, current_tactic)
-        assert idx == OBS.total, f"ObsBuilder: idx={idx} != {OBS.total}"
-        return obs
-
-    def _write_self(self, obs, idx, agent):
-        obs[idx]     = agent.pos[0] / NORM.pos_x
-        obs[idx + 1] = agent.pos[1] / NORM.pos_y
-        obs[idx + 2] = agent.theta  / NORM.theta
-        obs[idx + 3] = agent.vel[0] / NORM.vel_xy
-        obs[idx + 4] = agent.vel[1] / NORM.vel_xy
-        obs[idx + 5] = agent.omega  / NORM.vel_theta
-        obs[idx + 6] = 1.0 if agent.is_upright else 0.0
-        obs[idx + 7] = agent.battery
-        # Role one-hot (4 roles: defenderL, defenderR, forwardL, forwardR)
-        role_idx = ROLES.index(agent.role) if agent.role in ROLES else 0
-        obs[idx + 8 + role_idx] = 1.0
-        # Active agent flag
-        obs[idx + 12] = 1.0 if agent.is_active else 0.0
-        # Goal info
-        pos = agent.pos
-        obs[idx + 13] = _goal_opening_angle(pos) / NORM.theta
-        obs[idx + 14] = _goal_relative_angle(pos, agent.theta) / NORM.theta
-        return idx + OBS.self_total  # +15
-
-    def _write_ball(self, obs, idx, ball, agent):
-        obs[idx]     = ball.pos[0] / NORM.pos_x
-        obs[idx + 1] = ball.pos[1] / NORM.pos_y
-        obs[idx + 2] = ball.vel[0] / NORM.vel_xy
-        obs[idx + 3] = ball.vel[1] / NORM.vel_xy
-        obs[idx + 4] = min(ball.seen_age_ms / NORM.ball_age, 1.0)
-        obs[idx + 5] = 0.0   # using_team_ball
-        return idx + OBS.ball_size  # +6
-
-    def _write_teammates(self, obs, idx, agent, all_agents):
-        teammates = [a for a in all_agents if a.agent_id != agent.agent_id]
-        for slot in range(OBS.tm_slots):
-            base = idx + slot * OBS.tm_features
-            if slot < len(teammates):
-                tm = teammates[slot]
-                obs[base]     = tm.pos[0] / NORM.pos_x
-                obs[base + 1] = tm.pos[1] / NORM.pos_y
-                dx = tm.walk_target[0] - agent.pos[0]
-                dy = tm.walk_target[1] - agent.pos[1]
-                obs[base + 2] = dx / NORM.pos_x
-                obs[base + 3] = dy / NORM.pos_y
-                obs[base + 4] = tm.speed_scalar / NORM.speed
-                obs[base + 5] = 1.0 if tm.is_active else 0.0
-                obs[base + 6] = 1.0  # exists
-        return idx + OBS.tm_total  # +21
-
-    def _write_opponents(self, obs, idx, visible_opponents):
-        for slot in range(OBS.opp_slots):
-            base = idx + slot * OBS.opp_features
-            if slot < len(visible_opponents):
-                opp = visible_opponents[slot]
-                obs[base]     = opp.pos[0] / NORM.pos_x
-                obs[base + 1] = opp.pos[1] / NORM.pos_y
-                obs[base + 2] = 1.0  # exists
-        return idx + OBS.opp_total  # +12
-
-    def _write_game(self, obs, idx, game):
-        obs[idx]     = 1.0 if game.is_playing else 0.0
-        obs[idx + 1] = game.own_score / NORM.score
-        obs[idx + 2] = game.opp_score / NORM.score
-        time_remaining = max(0.0, 600.0 - game.time_elapsed)
-        obs[idx + 3] = time_remaining / NORM.time
-        return idx + OBS.game_size  # +4
-
-    def _write_tactic(self, obs, idx, tactic):
-        if tactic in TACTIC_NAMES:
-            tactic_idx = TACTIC_NAMES.index(tactic)
-            obs[idx + tactic_idx] = 1.0
-        return idx + OBS.tactic_size  # +2
-
-
-def build_global_state(agents, ball, opponents, game, static_obstacles=None):
-    state = np.zeros(GLOBAL_STATE.total, dtype=np.float32)
-    idx = 0
-    for i in range(4):
-        if i < len(agents):
-            a = agents[i]
-            state[idx]     = a.pos[0] / NORM.pos_x
-            state[idx + 1] = a.pos[1] / NORM.pos_y
-            state[idx + 2] = a.theta  / NORM.theta
-        idx += 3
-    for i in range(4):
-        if i < len(agents):
-            state[idx] = 1.0 if agents[i].is_upright else 0.0
-        idx += 1
-    state[idx]     = ball.pos[0] / NORM.pos_x
-    state[idx + 1] = ball.pos[1] / NORM.pos_y
-    state[idx + 2] = ball.vel[0] / NORM.vel_xy
-    state[idx + 3] = ball.vel[1] / NORM.vel_xy
-    idx += 4
-    obstacle_list = static_obstacles or []
-    opponent_like = list(opponents[:4])
-    remaining = max(0, 4 - len(opponent_like))
-    opponent_like.extend(obstacle_list[:remaining])
-    for i in range(4):
-        if i < len(opponent_like):
-            state[idx]     = opponent_like[i].pos[0] / NORM.pos_x
-            state[idx + 1] = opponent_like[i].pos[1] / NORM.pos_y
-        idx += 2
-    state[idx]     = game.own_score / NORM.score
-    state[idx + 1] = game.opp_score / NORM.score
-    state[idx + 2] = max(0.0, 600.0 - game.time_elapsed) / NORM.time
-    idx += 3
-    assert idx == GLOBAL_STATE.total
-    return state
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HANDOFF / TAKEOVER LOGIC
-# ─────────────────────────────────────────────────────────────────────────────
-
-class HandoffTakeoverManager:
-    """
-    Manages the handoff_ready / takeover_active lifecycle.
-
-    Flow:
-      1. Each frame, check if any RL agent satisfies handoff_ready conditions
-      2. If handoff_ready and agent is closest to ball → activate takeover
-      3. During takeover, BHuman "executes" (simulated as macro-action)
-      4. Track macro duration, success/failure, end reason
-    """
-
-    def __init__(self, contract: "AllConfigs"):
-        self._handoff_cfg = contract.handoff
-        self._kick_info = contract.kick_info
-        self._takeover_timeout_frames = contract.handoff.takeover_timeout_frames
-        self.macro = MacroState()
-
-    def reset(self):
-        self.macro = MacroState()
-
-    def set_takeover_timeout_frames(self, frames: int) -> None:
-        self._takeover_timeout_frames = max(1, int(frames))
-
-    def force_end(self, reason: str, success: bool) -> None:
-        self._end_macro(reason, success)
-
-    def compute_handoff_ready(self, agent: AgentState,
-                              ball: BallState,
-                              game: GameState) -> bool:
-        """
-        Evaluate handoff_ready for a specific agent.
-        Conditions from BHUMANPARSER_GUIDE 2.2.
-        """
-        if not game.is_playing:
-            return False
-        if not agent.is_upright:
-            return False
-
-        # Ball relative to agent
-        dx = ball.pos[0] - agent.pos[0]
-        dy = ball.pos[1] - agent.pos[1]
-        dist = math.hypot(dx, dy)
-
-        # Ball must be in front and reachable
-        # Rotate to agent frame
-        cos_t = math.cos(-agent.theta)
-        sin_t = math.sin(-agent.theta)
-        rel_x = dx * cos_t - dy * sin_t
-        rel_y = dx * sin_t + dy * cos_t
-
-        if rel_x < self._handoff_cfg.ball_rel_x_min:
-            return False
-        if rel_x > self._handoff_cfg.ball_rel_x_max:
-            return False
-        if abs(rel_y) > self._handoff_cfg.ball_rel_y_abs_max:
-            return False
-
-        # Angle to ball
-        angle_to_ball = math.atan2(dy, dx)
-        angle_diff = abs(_normalize_angle(angle_to_ball - agent.theta))
-        if math.degrees(angle_diff) > self._handoff_cfg.angle_to_ball_abs_max:
-            return False
-
-        # Ball visibility (seen_age)
-        if ball.seen_age_ms > self._handoff_cfg.ball_seen_age_max:
-            return False
-
+BALL_VEL_NORM = 3000.0
+TIME_NORM_MS = 5000.0
+PASS_COUNT_NORM = 5.0
+TEAMMATE_STALE_THRESHOLD_MS = 1000.0
+TEAM_BALL_CONSENSUS_MM = 800.0
+ENGAGING_DISTANCE_MM = 700.0
+TEAMMATE_ACTIVITY_IDLE = 0
+TEAMMATE_ACTIVITY_GOING_TO_BALL = 1
+TEAMMATE_ACTIVITY_DRIBBLING = 2
+TEAMMATE_ACTIVITY_KICKING = 3
+UPRIGHT_MAX_FALL_STATE = 2
+BALL_VISIBLE_SEEN_PCT_MIN = 5.0
+BALL_VISIBLE_MAX_AGE_MS = 1200.0
+# BALL_TRUSTED_SEEN_PCT_MIN: removed — with ci 30 the seenPercentage window (60
+# frames) contains only 2 image frames, capping the achievable value at 3.3%.
+# The 20% threshold could never be met regardless of detection quality.
+# Trust is now based on natural_time_since_ball_seen (Option B).
+BALL_TRUSTED_MAX_AGE_MS = 600.0
+BALL_SEMI_TRUSTED_MAX_AGE_MS = 1000.0
+
+_STEP_PROFILE = os.getenv("RL_PROFILE_STEP", "0") == "1"
+_PROFILE_INTERVAL = int(os.getenv("RL_PROFILE_INTERVAL", "256"))
+POSE_JUMP_WARNING_MM = 350.0
+FALLEN_STUCK_MIN_STAGE = int(os.getenv("RL_FALLEN_STUCK_MIN_STAGE", "3"))
+FALLEN_STUCK_TERMINATE_STEPS = max(0, int(os.getenv("RL_FALLEN_STUCK_TERMINATE_STEPS", "24")))
+
+_DEFAULT_PRODUCTION_SCENARIO_WEIGHTS = {
+    "finish_band_2p5_3m_clean": 3.0,
+    "finish_band_2p5_3m_static_lane": 3.0,
+    "preshoot_bad_angle_boundary": 2.0,
+    "dynamic_full_field_pressure": 1.0,
+    "blocked_corridor_repair": 2.0,
+    "finish_near_arm_clean_topup": 3.0,
+    "finish_bridge_clean_topup": 4.0,
+    "finish_bridge_static_topup": 3.0,
+    "blocked_corridor_finish_topup": 2.0,
+    "dynamic_finish_pressure_topup": 3.0,
+}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_csv_env(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+# v4.5: off-ball coordination residual (Version-B graph-coordination, inference-only).
+# Diagnosis (2026-06-16) proved triangle_hold=0.000 is a CLOSED-LOOP navigation gap: the
+# off_ball_support never traverses to its triangle slot (median 2.3m away in sim) even though
+# `walk` is anchored on the coordination target and the reward/metric are ready. This override
+# commits the off-ball support to walk-to-slot when it's far, with hysteresis, then releases
+# control to the policy once inside so it can settle/hold. Env-gated (default OFF) — single-agent
+# and all prior validated paths are untouched. Decode already anchors a support walk on the
+# coordination target, so a zero-residual walk lands exactly on triangle_ema.
+OFFBALL_COORD = _env_flag("RL_MA_OFFBALL_COORD", False)
+OFFBALL_COORD_ENTER_MM = float(os.getenv("RL_MA_OFFBALL_COORD_ENTER_MM", "800.0"))
+OFFBALL_COORD_EXIT_MM = float(os.getenv("RL_MA_OFFBALL_COORD_EXIT_MM", "450.0"))
+
+# Merged-ONNX defense signal (TRAINING-ONLY, NOT a deployment path). When set, the
+# opponent-distance obs slots (obs[18] nearest_opponent_dist, obs[21]
+# nearest_opponent_front_dist) are populated from the env's GROUND-TRUTH opponent
+# positions instead of the perceived ObstacleModel. This unblocks block/mark learning
+# where in-sim off-ball perception is ~0 (gaze/detector-range limited — see
+# CODEX_OFFBALL_PERCEPTION_HANDOFF.md). Deployment ALWAYS runs with this OFF and fills
+# obs[21] from real vision; the obs CONTRACT is identical, only the training-time SOURCE
+# differs. The staged plan validates that GT-trained mark also fires on real perception
+# (GT off, roomy scene) so there is no sim2real gap. `opponent_seen_rate` deliberately
+# stays perception-based (tracker reads obs.nearest_opponent_dist) so it remains an honest
+# perception metric even while this flag feeds GT into the policy obs. Default OFF.
+GT_OPPONENT_OBS = _env_flag("RL_TRAIN_GT_OPPONENT_OBS", False)
+
+
+def _parse_production_weights() -> dict[str, float]:
+    weights = dict(_DEFAULT_PRODUCTION_SCENARIO_WEIGHTS)
+    raw = os.getenv("RL_PRODUCTION_SCENARIO_WEIGHTS", "")
+    for item in raw.split(","):
+        if not item.strip() or ":" not in item:
+            continue
+        name, value = item.split(":", 1)
+        name = name.strip()
+        try:
+            weights[name] = max(0.0, float(value.strip()))
+        except ValueError:
+            continue
+    return weights
+
+
+def _ball_observation_masks(obs: BackendObservation) -> Dict[str, object]:
+    seen_pct = float(obs.ball_seen_percentage)
+    time_since_seen = float(obs.time_since_ball_seen)
+    rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
+    visible = bool(seen_pct > BALL_VISIBLE_SEEN_PCT_MIN or time_since_seen <= BALL_VISIBLE_MAX_AGE_MS)
+    trusted = bool(
+        (not rescued)
+        and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS
+    )
+    semi_trusted = bool(
+        (not rescued)
+        and seen_pct > 0.0
+        and time_since_seen <= BALL_SEMI_TRUSTED_MAX_AGE_MS
+    )
+    lost = bool((not rescued) and seen_pct <= 0.0 and time_since_seen > BALL_SEMI_TRUSTED_MAX_AGE_MS)
+    degraded = bool((not rescued) and visible and (not trusted))
+    confidence = 0.0
+    if visible:
+        seen_term = float(np.clip(seen_pct / 100.0, 0.0, 1.0))
+        age_term = float(np.clip(1.0 - (time_since_seen / BALL_VISIBLE_MAX_AGE_MS), 0.0, 1.0))
+        confidence = 0.5 * seen_term + 0.5 * age_term
+        if rescued:
+            confidence *= 0.25
+
+    if rescued:
+        regime = "rescued"
+    elif trusted:
+        regime = "trusted"
+    elif semi_trusted:
+        regime = "semi_trusted"
+    elif degraded:
+        regime = "degraded"
+    else:
+        regime = "lost"
+
+    return {
+        "ball_visible_mask": visible,
+        "ball_trusted_mask": trusted,
+        "ball_semi_trusted_mask": semi_trusted,
+        "ball_degraded_mask": degraded,
+        "ball_rescued_mask": rescued,
+        "ball_lost_mask": lost,
+        "ball_confidence_score": float(confidence),
+        "ball_regime": regime,
+    }
+
+
+def _teammate_activity_is_engaging(
+    activity: int,
+    *,
+    teammate_x: float,
+    teammate_y: float,
+    team_ball_x: float,
+    team_ball_y: float,
+    team_ball_valid: bool,
+) -> bool:
+    if activity in {TEAMMATE_ACTIVITY_DRIBBLING, TEAMMATE_ACTIVITY_KICKING}:
         return True
+    if activity != TEAMMATE_ACTIVITY_GOING_TO_BALL or not team_ball_valid:
+        return False
+    return math.hypot(teammate_x - team_ball_x, teammate_y - team_ball_y) < ENGAGING_DISTANCE_MM
 
-    def update(self, agents: Dict[str, AgentState],
-               ball: BallState, game: GameState,
-               active_agent_id: Optional[str],
-               goal_scored: bool, goal_conceded: bool,
-               ball_out: bool,
-               sidecar_macro_type: str = "none") -> MacroState:
-        """
-        Update macro state for this frame.
-        Returns updated MacroState.
-        """
-        # If macro is active, check termination
-        if self.macro.macro_active:
-            self.macro.macro_duration_frames += 1
 
-            # Timeout
-            if self.macro.macro_duration_frames >= self._takeover_timeout_frames:
-                self._end_macro("timeout", False)
-                return self.macro
+class RealSimRobotEnv(ParallelEnv):
+    metadata = {"name": "real-simrobot-skillrequest-v2"}
 
-            # Goal scored during macro → success
-            if goal_scored:
-                self._end_macro("goal", True)
-                return self.macro
-
-            # Goal conceded → failure
-            if goal_conceded:
-                self._end_macro("goal", False)
-                return self.macro
-
-            # Ball out → failure
-            if ball_out:
-                self._end_macro("out", False)
-                return self.macro
-
-            # Game state change
-            if not game.is_playing:
-                self._end_macro("game_state_changed", False)
-                return self.macro
-
-            # Active agent changed
-            if self.macro.macro_owner != active_agent_id:
-                self._end_macro("active_agent_changed", False)
-                return self.macro
-
-            # Check if owner is still in handoff envelope (soft exit)
-            if self.macro.macro_owner in agents:
-                owner = agents[self.macro.macro_owner]
-                still_ready = self.compute_handoff_ready(owner, ball, game)
-                if not still_ready:
-                    self.macro.takeover_grace_counter += 1
-                    if self.macro.takeover_grace_counter >= self._handoff_cfg.takeover_grace_frames:
-                        self._end_macro("skill_request_cleared", False)
-                        return self.macro
-                else:
-                    self.macro.takeover_grace_counter = 0
-
-            return self.macro
-
-        # If macro is not active, check for new handoff
-        if active_agent_id and active_agent_id in agents:
-            agent = agents[active_agent_id]
-            ready = self.compute_handoff_ready(agent, ball, game)
-            self.macro.handoff_ready = ready
-
-            if ready and sidecar_macro_type in TAKEOVER_MACRO_TYPES:
-                self._start_macro(active_agent_id, game.step_count,
-                                  macro_type=sidecar_macro_type)
-
-        return self.macro
-
-    def _start_macro(self, agent_id: str, frame: int,
-                     macro_type: str = "none"):
-        self.macro.macro_active = True
-        self.macro.takeover_active = True
-        self.macro.handoff_ready = True
-        self.macro.macro_owner = agent_id
-        self.macro.macro_start_frame = frame
-        self.macro.macro_duration_frames = 0
-        self.macro.macro_type = macro_type  # real type from sidecar; "none" if stub
-        self.macro.macro_end_reason = "none"
-        self.macro.macro_success = None
-        self.macro.takeover_grace_counter = 0
-        self.macro.event_recorded = False
-        self.macro.takeover_start_ball_pos = None
-        self.macro.takeover_last_ball_pos = None
-        self.macro.takeover_control_frames = 0
-        self.macro.takeover_progress_frames = 0
-        self.macro.takeover_ball_progress_mm = 0.0
-        self.macro.takeover_ball_progress_along_target_mm = 0.0
-
-    def _end_macro(self, reason: str, success: bool):
-        self.macro.macro_active = False
-        self.macro.takeover_active = False
-        self.macro.handoff_ready = False
-        self.macro.macro_end_reason = reason
-        self.macro.macro_success = success
-        self.macro.event_recorded = False
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BHUMAN TAKEOVER SIMULATOR
-# ─────────────────────────────────────────────────────────────────────────────
-
-class BHumanTakeoverSimulator:
-    """
-    Simulates BHuman skill execution during takeover.
-
-    During takeover, the active agent is controlled by BHuman (simulated).
-    The agent moves toward the ball and executes a kick/pass/dribble.
-    This is NOT the source of truth — it approximates what BHuman would do
-    so the RL agent can learn the interface quality.
-    """
-
-    def __init__(self, movement: NaoMovementModel, contract: "AllConfigs"):
-        self._movement = movement
-        self._kick_info = contract.kick_info
-        self._smash_or_pass = contract.smash_or_pass
-
-    def simulate_step(self, agent: AgentState, ball: BallState,
-                      dt: float) -> Tuple[AgentState, BallState, bool]:
-        """
-        Simulate one step of BHuman execution.
-
-        Returns: (updated_agent, updated_ball, kick_executed)
-        """
-        if not agent.is_upright:
-            return agent, ball, False
-
-        # BHuman moves toward ball
-        dx = ball.pos[0] - agent.pos[0]
-        dy = ball.pos[1] - agent.pos[1]
-        dist = math.hypot(dx, dy)
-
-        target_theta = math.atan2(dy, dx)
-        updated_agent = self._movement.step(agent, ball.pos, target_theta, dt)
-
-        # Check if close enough to kick
-        new_dist = float(np.linalg.norm(updated_agent.pos - ball.pos))
-        kick_executed = False
-
-        if new_dist < AGENT.ball_interaction_range * 0.7:  # 350mm
-            # Angle check
-            angle_to_ball = math.atan2(
-                ball.pos[1] - updated_agent.pos[1],
-                ball.pos[0] - updated_agent.pos[0],
-            )
-            angle_diff = abs(_normalize_angle(angle_to_ball - updated_agent.theta))
-            if angle_diff < math.radians(45):
-                # Execute kick toward opponent goal
-                kick_dir = np.array([
-                    math.cos(updated_agent.theta),
-                    math.sin(updated_agent.theta),
-                ])
-                kick_speed = self._kick_info.ball_velocity_max  # 1800 mm/s
-                ball = BallState(
-                    pos=updated_agent.pos + kick_dir * (AGENT.min_robot_distance + 50),
-                    vel=kick_dir * kick_speed,
-                    last_touched_by=updated_agent.agent_id,
-                )
-                kick_executed = True
-
-        return updated_agent, ball, kick_executed
-
-
-class RealSidecarPhysicsExecutor:
-    """
-    Applies physical effects from the real sidecar output without inventing
-    a separate decision policy.
-
-    Decision semantics come from the real bridge. Python only rolls those
-    semantics forward inside the 2D training world.
-    """
-
-    def __init__(self, movement: NaoMovementModel, contract: "AllConfigs"):
-        self._movement = movement
-        self._kick_info = contract.kick_info
-        self._kick_entries = {
-            entry.kick_type: entry for entry in contract.kick_info.kicks
-        }
-        self._last_kick_timestamps: Dict[str, int] = {}
-        self._pending_kick_hold_frames: Dict[str, int] = {}
-        self._pending_kick_hold_limit = 6
-        self._pending_kick_ready_frames: Dict[str, int] = {}
-        self._pending_kick_ready_limit = 2
-        self._failed_kick_cooldown_frames: Dict[str, int] = {}
-        self._failed_kick_cooldown_limit = 6
-        self._post_kick_release_frames: Dict[str, int] = {}
-        self._post_kick_release_limit = 5
-        self._release_pose_cache: Dict[str, Tuple[np.ndarray, float]] = {}
-        self._pre_kick_pose_cache: Dict[str, Tuple[np.ndarray, float]] = {}
-        self._smoothed_motion_targets: Dict[str, np.ndarray] = {}
-        self._smoothed_motion_thetas: Dict[str, float] = {}
-        self._motion_target_alpha = 0.38
-        self._motion_theta_alpha = 0.34
-        self._motion_target_max_shift = 320.0
-        self._motion_theta_max_shift = 0.28
-        self._motion_target_snap_distance = 130.0
-        self._motion_theta_snap_error = 0.14
-
-    def reset(self) -> None:
-        self._last_kick_timestamps.clear()
-        self._pending_kick_hold_frames.clear()
-        self._pending_kick_ready_frames.clear()
-        self._failed_kick_cooldown_frames.clear()
-        self._post_kick_release_frames.clear()
-        self._release_pose_cache.clear()
-        self._pre_kick_pose_cache.clear()
-        self._smoothed_motion_targets.clear()
-        self._smoothed_motion_thetas.clear()
-
-    def apply(self,
-              agent: AgentState,
-              ball: BallState,
-              output: Any,
-              agents: Dict[str, AgentState],
-              dt: float) -> Tuple[AgentState, BallState, bool, bool, bool, int]:
-        if not agent.is_upright:
-            return agent, ball, False, False, False, 0
-
-        post_kick_release = max(
-            0,
-            self._post_kick_release_frames.get(agent.agent_id, 0) - 1,
-        )
-        self._post_kick_release_frames[agent.agent_id] = post_kick_release
-        failed_kick_cooldown = max(
-            0,
-            self._failed_kick_cooldown_frames.get(agent.agent_id, 0) - 1,
-        )
-        self._failed_kick_cooldown_frames[agent.agent_id] = failed_kick_cooldown
-        pending_kick_hold = False
-        pending_kick_hold_frames = 0
-        if post_kick_release > 0:
-            updated_agent = self._apply_post_kick_release_motion(
-                agent,
-                ball,
-                output,
-                agents,
-                dt,
-            )
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._failed_kick_cooldown_frames[agent.agent_id] = max(
-                self._failed_kick_cooldown_frames.get(agent.agent_id, 0),
-                1,
-            )
-            return updated_agent, ball, False, False, False, 0
-
-        kick_intent_active = (
-            post_kick_release <= 0
-            and failed_kick_cooldown <= 0
-            and self._is_kick_intent_active(output)
-        )
-
-        if kick_intent_active:
-            updated_agent, pending_kick_hold = self._stabilize_pre_kick_pose(
-                agent,
-                ball,
-                output,
-                dt,
-            )
-            if pending_kick_hold:
-                pending_kick_hold_frames = self._pending_kick_hold_frames.get(agent.agent_id, 0) + 1
-                self._pending_kick_hold_frames[agent.agent_id] = pending_kick_hold_frames
-                self._pending_kick_ready_frames[agent.agent_id] = 0
-            else:
-                self._pending_kick_hold_frames[agent.agent_id] = 0
-                self._pending_kick_ready_frames[agent.agent_id] = (
-                    self._pending_kick_ready_frames.get(agent.agent_id, 0) + 1
-                )
-        else:
-            updated_agent = self._apply_agent_motion(agent, ball, output, dt)
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._failed_kick_cooldown_frames[agent.agent_id] = 0
-            self._release_pose_cache.pop(agent.agent_id, None)
-            self._pre_kick_pose_cache.pop(agent.agent_id, None)
-
-        if self._has_new_kick(agent.agent_id, output):
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._failed_kick_cooldown_frames[agent.agent_id] = 0
-            self._post_kick_release_frames[agent.agent_id] = self._post_kick_release_limit
-            self._seed_release_pose(updated_agent, ball, output, agents)
-            self._pre_kick_pose_cache.pop(agent.agent_id, None)
-            self._clear_motion_smoothing(agent.agent_id)
-            return updated_agent, self._apply_kick(updated_agent, ball, output, agents), True, False, False, 0
-
-        if kick_intent_active and self._is_ready_for_guided_kick(updated_agent, ball, output, agents):
-            touch_ball, touch_progress = self._apply_guided_pre_kick_touch(
-                updated_agent,
-                ball,
-                output,
-                agents,
-            )
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._pre_kick_pose_cache.pop(agent.agent_id, None)
-            if touch_progress:
-                self._failed_kick_cooldown_frames[agent.agent_id] = 0
-                self._post_kick_release_frames[agent.agent_id] = self._post_kick_release_limit
-                self._seed_release_pose(updated_agent, ball, output, agents)
-                self._clear_motion_smoothing(agent.agent_id)
-                return updated_agent, touch_ball, False, True, False, 0
-
-        if kick_intent_active and (
-            (pending_kick_hold and pending_kick_hold_frames >= self._pending_kick_hold_limit)
-            or self._pending_kick_ready_frames.get(agent.agent_id, 0) >= self._pending_kick_ready_limit
-        ):
-            touch_ball, touch_progress = self._apply_guided_pre_kick_touch(
-                updated_agent,
-                ball,
-                output,
-                agents,
-            )
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._pre_kick_pose_cache.pop(agent.agent_id, None)
-            if touch_progress:
-                self._failed_kick_cooldown_frames[agent.agent_id] = 0
-                self._post_kick_release_frames[agent.agent_id] = self._post_kick_release_limit
-                self._seed_release_pose(updated_agent, ball, output, agents)
-                self._clear_motion_smoothing(agent.agent_id)
-                return updated_agent, touch_ball, False, True, False, pending_kick_hold_frames
-            self._failed_kick_cooldown_frames[agent.agent_id] = self._failed_kick_cooldown_limit
-            self._release_pose_cache.pop(agent.agent_id, None)
-            self._clear_motion_smoothing(agent.agent_id)
-            return updated_agent, ball, False, False, False, pending_kick_hold_frames
-
-        if output.motion_request == "dribble" and post_kick_release <= 0:
-            dribble_ball, dribble_progress = self._apply_dribble(updated_agent, ball, output)
-            self._pending_kick_hold_frames[agent.agent_id] = 0
-            self._pending_kick_ready_frames[agent.agent_id] = 0
-            self._failed_kick_cooldown_frames[agent.agent_id] = 0
-            self._release_pose_cache.pop(agent.agent_id, None)
-            self._pre_kick_pose_cache.pop(agent.agent_id, None)
-            return updated_agent, dribble_ball, False, dribble_progress, False, 0
-
-        return updated_agent, ball, False, False, pending_kick_hold, pending_kick_hold_frames
-
-    def _apply_agent_motion(self,
-                            agent: AgentState,
-                            ball: BallState,
-                            output: Any,
-                            dt: float) -> AgentState:
-        raw_target_pos, raw_target_theta = self._resolve_motion_target(agent, ball, output, dt)
-        target_pos, target_theta = self._smooth_motion_target(
-            agent,
-            raw_target_pos,
-            raw_target_theta,
-            dt,
-        )
-        return self._movement.step(agent, target_pos, target_theta, dt)
-
-    def _clear_motion_smoothing(self, agent_id: str) -> None:
-        self._smoothed_motion_targets.pop(agent_id, None)
-        self._smoothed_motion_thetas.pop(agent_id, None)
-
-    def _seed_release_pose(self,
-                           agent: AgentState,
-                           ball: BallState,
-                           output: Any,
-                           agents: Dict[str, AgentState]) -> None:
-        kick_dir = self._resolve_kick_direction(agent, ball, output, agents)
-        theta = math.atan2(float(kick_dir[1]), float(kick_dir[0]))
-        follow_distance = 90.0
-        follow_pos = self._clip_field_point(
-            agent.pos + kick_dir * follow_distance,
-            margin=60.0,
-        )
-        self._release_pose_cache[agent.agent_id] = (
-            follow_pos.astype(np.float32),
-            _normalize_angle(theta),
-        )
-
-    def _apply_post_kick_release_motion(self,
-                                        agent: AgentState,
-                                        ball: BallState,
-                                        output: Any,
-                                        agents: Dict[str, AgentState],
-                                        dt: float) -> AgentState:
-        release_pose = self._release_pose_cache.get(agent.agent_id)
-        if release_pose is None:
-            self._seed_release_pose(agent, ball, output, agents)
-            release_pose = self._release_pose_cache.get(agent.agent_id)
-        if release_pose is None:
-            return agent
-
-        target_pos, target_theta = release_pose
-        target_pos, target_theta = self._smooth_motion_target(
-            agent,
-            np.asarray(target_pos, dtype=np.float32),
-            float(target_theta),
-            dt,
-        )
-        updated = self._movement.step(agent, target_pos, target_theta, dt)
-        self._release_pose_cache[agent.agent_id] = (
-            target_pos.astype(np.float32),
-            float(target_theta),
-        )
-        return updated
-
-    def _smooth_motion_target(self,
-                              agent: AgentState,
-                              target_pos: np.ndarray,
-                              target_theta: float,
-                              dt: float) -> Tuple[np.ndarray, float]:
-        agent_id = agent.agent_id
-        raw_target = np.asarray(target_pos, dtype=np.float32)
-        raw_theta = _normalize_angle(float(target_theta))
-        prev_target = self._smoothed_motion_targets.get(agent_id)
-        prev_theta = self._smoothed_motion_thetas.get(agent_id)
-
-        if prev_target is None or prev_theta is None:
-            self._smoothed_motion_targets[agent_id] = raw_target.copy()
-            self._smoothed_motion_thetas[agent_id] = raw_theta
-            return raw_target, raw_theta
-
-        target_delta = raw_target - prev_target
-        target_delta_norm = float(np.linalg.norm(target_delta))
-        max_shift = max(
-            self._motion_target_max_shift,
-            AGENT.max_forward_speed * max(dt, 1e-3) * 18.0,
-        )
-        bounded_target = raw_target.copy()
-        if target_delta_norm > max_shift and target_delta_norm > 1e-6:
-            bounded_target = (
-                prev_target + (target_delta / target_delta_norm) * max_shift
-            ).astype(np.float32)
-
-        dist_from_agent = float(np.linalg.norm(raw_target - agent.pos))
-        if dist_from_agent <= self._motion_target_snap_distance:
-            smooth_target = raw_target
-        else:
-            smooth_target = (
-                prev_target + self._motion_target_alpha * (bounded_target - prev_target)
-            ).astype(np.float32)
-
-        theta_error = _normalize_angle(raw_theta - float(prev_theta))
-        bounded_theta_error = float(np.clip(
-            theta_error,
-            -self._motion_theta_max_shift,
-            self._motion_theta_max_shift,
-        ))
-        if abs(theta_error) <= self._motion_theta_snap_error:
-            smooth_theta = raw_theta
-        else:
-            smooth_theta = _normalize_angle(
-                float(prev_theta) + self._motion_theta_alpha * bounded_theta_error
-            )
-
-        self._smoothed_motion_targets[agent_id] = smooth_target.copy()
-        self._smoothed_motion_thetas[agent_id] = smooth_theta
-        return smooth_target, smooth_theta
-
-    def _is_kick_intent_active(self, output: Any) -> bool:
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(output, "macro_type", "none"),
-            motion_request,
-        )
-        if macro_type not in {"playBall_shoot", "playBall_pass"}:
-            return False
-        return motion_request in {"walkToBallAndKick", "stand", "dribble"}
-
-    def _is_pending_kick_intent(self, output: Any) -> bool:
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        return (
-            skill_request in {"shoot", "pass"}
-            and motion_request == "walkToBallAndKick"
-        )
-
-    def _stabilize_pre_kick_pose(self,
-                                 agent: AgentState,
-                                 ball: BallState,
-                                 output: Any,
-                                 dt: float) -> Tuple[AgentState, bool]:
-        desired_pos, desired_theta = self._resolve_playball_body_target(agent, ball, output)
-        cached_pose = self._pre_kick_pose_cache.get(agent.agent_id)
-        if cached_pose is not None:
-            cached_pos, cached_theta = cached_pose
-            desired_pos = (
-                0.7 * np.asarray(cached_pos, dtype=np.float32)
-                + 0.3 * desired_pos.astype(np.float32)
-            ).astype(np.float32)
-            desired_theta = _normalize_angle(
-                float(cached_theta) + 0.3 * _normalize_angle(desired_theta - float(cached_theta))
-            )
-        self._pre_kick_pose_cache[agent.agent_id] = (desired_pos.copy(), float(desired_theta))
-
-        desired_delta = desired_pos - agent.pos
-        desired_dist = float(np.linalg.norm(desired_delta))
-        ball_dist = float(np.linalg.norm(agent.pos - ball.pos))
-        min_clearance = AGENT.radius + BALL.radius + 8.0
-        theta_error = _normalize_angle(desired_theta - agent.theta)
-
-        if ball_dist >= min_clearance and desired_dist <= 25.0 and abs(theta_error) <= 0.15:
-            return agent, False
-
-        max_translation_step = max(70.0, AGENT.max_forward_speed * max(dt, 1e-3) * 8.0)
-        if desired_dist > max_translation_step and desired_dist > 1e-6:
-            corrected_pos = (
-                agent.pos + (desired_delta / desired_dist) * max_translation_step
-            ).astype(np.float32)
-        else:
-            corrected_pos = desired_pos.astype(np.float32)
-
-        corrected_ball_dist = float(np.linalg.norm(corrected_pos - ball.pos))
-        if corrected_ball_dist < min_clearance:
-            safe_dir = corrected_pos - ball.pos
-            safe_norm = float(np.linalg.norm(safe_dir))
-            if safe_norm <= 1e-6:
-                safe_dir = np.array([math.cos(desired_theta), math.sin(desired_theta)], dtype=np.float32)
-                safe_norm = 1.0
-            corrected_pos = (ball.pos + (safe_dir / safe_norm) * min_clearance).astype(np.float32)
-
-        max_theta_step = max(0.16, AGENT.max_rotation_speed * max(dt, 1e-3) * 2.0)
-        corrected_theta = _normalize_angle(
-            agent.theta + float(np.clip(theta_error, -max_theta_step, max_theta_step))
-        )
-        corrected_pos, corrected_theta = self._smooth_motion_target(
-            agent,
-            corrected_pos,
-            corrected_theta,
-            dt,
-        )
-        corrected_vel = (corrected_pos - agent.pos) / max(dt, 1e-3)
-        corrected_speed = float(np.linalg.norm(corrected_vel))
-        return AgentState(
-            agent_id=agent.agent_id,
-            pos=corrected_pos,
-            theta=corrected_theta,
-            vel=corrected_vel,
-            omega=float(np.clip(theta_error / max(dt, 1e-3), -AGENT.max_rotation_speed, AGENT.max_rotation_speed)),
-            role=agent.role,
-            is_upright=agent.is_upright,
-            recovery_steps=agent.recovery_steps,
-            battery=agent.battery,
-            walk_target=desired_pos.copy(),
-            speed_scalar=min(corrected_speed, AGENT.max_forward_speed),
-            is_active=agent.is_active,
-        ), True
-
-    def _apply_guided_pre_kick_touch(self,
-                                     agent: AgentState,
-                                     ball: BallState,
-                                     output: Any,
-                                     agents: Dict[str, AgentState]) -> Tuple[BallState, bool]:
-        distance = float(np.linalg.norm(agent.pos - ball.pos))
-        contact_window = AGENT.radius + BALL.radius + 45.0
-        if distance > contact_window:
-            return ball, False
-
-        # When BHuman is already in shoot/pass intent and we have reached the
-        # execution pose, release the ball with a kick-like signature instead
-        # of a tiny "nudge". That keeps the 2D executor aligned with the
-        # semantic intent of walkToBallAndKick.
-        kick_ball = self._apply_kick(agent, ball, output, agents)
-        kick_speed = float(np.linalg.norm(kick_ball.vel))
-        min_proxy_speed = max(
-            420.0,
-            min(float(self._kick_info.ball_velocity_max) * 0.32, self._kick_speed(output) * 0.55),
-        )
-        if kick_speed < min_proxy_speed:
-            direction = kick_ball.vel / max(kick_speed, 1e-6)
-            kick_ball = BallState(
-                pos=kick_ball.pos.copy(),
-                vel=direction * min_proxy_speed,
-                last_touched_by=kick_ball.last_touched_by,
-                seen_age_ms=kick_ball.seen_age_ms,
-            )
-        return kick_ball, True
-
-    def _is_ready_for_guided_kick(self,
-                                  agent: AgentState,
-                                  ball: BallState,
-                                  output: Any,
-                                  agents: Dict[str, AgentState]) -> bool:
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        if motion_request not in {"stand", "walkToBallAndKick"}:
-            return False
-
-        distance = float(np.linalg.norm(agent.pos - ball.pos))
-        contact_window = AGENT.radius + BALL.radius + 45.0
-        if distance > contact_window:
-            return False
-
-        desired_pos, desired_theta = self._resolve_playball_body_target(agent, ball, output)
-        desired_dist = float(np.linalg.norm(desired_pos - agent.pos))
-        desired_theta_error = abs(_normalize_angle(desired_theta - agent.theta))
-        if desired_dist <= 42.0 and desired_theta_error <= math.radians(24.0):
-            return True
-
-        kick_dir = self._resolve_kick_direction(agent, ball, output, agents)
-        kick_theta = math.atan2(float(kick_dir[1]), float(kick_dir[0]))
-        theta_error = abs(_normalize_angle(kick_theta - agent.theta))
-        if theta_error > math.radians(42.0):
-            return False
-
-        angle_to_ball = math.atan2(
-            float(ball.pos[1] - agent.pos[1]),
-            float(ball.pos[0] - agent.pos[0]),
-        )
-        ball_theta_error = abs(_normalize_angle(angle_to_ball - agent.theta))
-        return ball_theta_error <= math.radians(58.0)
-
-    def _target_array(self, value: Any) -> Optional[np.ndarray]:
-        if value is None:
-            return None
-        if isinstance(value, np.ndarray):
-            if value.size < 2:
-                return None
-            target = value[:2].astype(np.float32, copy=True)
-            if not np.all(np.isfinite(target)):
-                return None
-            return target
-        if isinstance(value, (list, tuple)) and len(value) >= 2:
-            target = np.array([value[0], value[1]], dtype=np.float32)
-            if not np.all(np.isfinite(target)):
-                return None
-            return target
-        return None
-
-    def _sanitize_angle(self, value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            angle = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(angle):
-            return None
-        if abs(angle) > math.pi + 0.25:
-            return None
-        return angle
-
-    def _sanitize_kick_length(self, value: Any) -> float:
-        try:
-            kick_length = float(value or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-        if not math.isfinite(kick_length):
-            return 0.0
-        max_reasonable = max(
-            float(getattr(self._kick_info, "forward_fast_max", 0.0) or 0.0),
-            float(FIELD.length),
-        ) * 1.1
-        if kick_length > max_reasonable:
-            return 0.0
-        return float(np.clip(kick_length, 0.0, max_reasonable))
-
-    def _clip_field_point(self,
-                          target: np.ndarray,
-                          *,
-                          margin: float = 80.0) -> np.ndarray:
-        clipped = np.array(target, dtype=np.float32, copy=True)
-        clipped[0] = float(np.clip(
-            clipped[0],
-            FIELD.x_own_ground + margin,
-            FIELD.x_opponent_ground - margin,
-        ))
-        clipped[1] = float(np.clip(
-            clipped[1],
-            FIELD.y_right_sideline + margin,
-            FIELD.y_left_sideline - margin,
-        ))
-        return clipped
-
-    def _sanitize_macro_ball_target(self, raw_target: np.ndarray) -> np.ndarray:
-        # Keep BHuman's operational intent intact. Only reject impossible or
-        # out-of-bounds targets; do not reproject them into a handcrafted cone.
-        return self._clip_field_point(raw_target).astype(np.float32)
-
-    def _max_support_offset(self,
-                            contact_point: np.ndarray,
-                            direction: np.ndarray,
-                            *,
-                            margin: float) -> float:
-        max_offset = float("inf")
-        x_min = FIELD.x_own_ground + margin
-        x_max = FIELD.x_opponent_ground - margin
-        y_min = FIELD.y_right_sideline + margin
-        y_max = FIELD.y_left_sideline - margin
-
-        for point_value, axis_dir, lower, upper in (
-            (float(contact_point[0]), float(direction[0]), x_min, x_max),
-            (float(contact_point[1]), float(direction[1]), y_min, y_max),
-        ):
-            if axis_dir > 1e-6:
-                max_offset = min(max_offset, (point_value - lower) / axis_dir)
-            elif axis_dir < -1e-6:
-                max_offset = min(max_offset, (upper - point_value) / (-axis_dir))
-
-        if not math.isfinite(max_offset):
-            return float("inf")
-        return max(0.0, float(max_offset))
-
-    def _side_support_pose(self,
-                           agent: AgentState,
-                           contact_point: np.ndarray,
-                           direction: np.ndarray,
-                           *,
-                           margin: float,
-                           preferred_offset: float) -> np.ndarray:
-        tangent = np.array([-direction[1], direction[0]], dtype=np.float32)
-        tangent_norm = float(np.linalg.norm(tangent))
-        if tangent_norm <= 1e-6:
-            tangent = np.array([
-                -math.sin(agent.theta),
-                math.cos(agent.theta),
-            ], dtype=np.float32)
-            tangent_norm = max(1e-6, float(np.linalg.norm(tangent)))
-        tangent /= tangent_norm
-
-        agent_delta = agent.pos - contact_point
-        tangent_sign = 1.0 if float(np.dot(agent_delta, tangent)) >= 0.0 else -1.0
-        lateral_offset = min(preferred_offset, 140.0)
-
-        side_pose = contact_point + tangent * (tangent_sign * lateral_offset)
-        side_pose = self._clip_field_point(side_pose, margin=margin)
-
-        # Keep a small backward bias so the robot still approaches from behind
-        # the ball instead of cutting directly across it at the goal line.
-        backward_cap = self._max_support_offset(contact_point, direction, margin=margin)
-        backward_offset = min(max(18.0, preferred_offset * 0.18), backward_cap)
-        if backward_offset > 1e-6:
-            side_pose = self._clip_field_point(
-                side_pose - direction * backward_offset,
-                margin=margin,
-            )
-        return side_pose.astype(np.float32)
-
-    def _bridge_field_target(self,
-                             value: Any,
-                             ball: Optional[BallState] = None,
-                             *,
-                             allow_origin: bool = False) -> Optional[np.ndarray]:
-        target = self._target_array(value)
-        if target is None:
-            return None
-        if (
-            not allow_origin
-            and ball is not None
-            and float(np.linalg.norm(target)) <= 1.0
-            and float(np.linalg.norm(ball.pos)) > 250.0
-        ):
-            return None
-        return self._clip_field_point(target)
-
-    def _sanitize_sidecar_target(self,
-                                 value: Any,
-                                 ball: BallState,
-                                 *,
-                                 allow_origin: bool = False) -> Optional[np.ndarray]:
-        target = self._target_array(value)
-        if target is None:
-            return None
-        if allow_origin:
-            return target
-
-        # The bridge occasionally publishes (0, 0) as a placeholder for
-        # optional targets. When the ball is far from midfield, treating that
-        # as a real target makes the robot drift diagonally toward nowhere.
-        if (
-            float(np.linalg.norm(target)) <= 1.0
-            and float(np.linalg.norm(ball.pos)) > 250.0
-        ):
-            return None
-        return target
-
-    def _operational_robot_pose(self,
-                                agent: AgentState,
-                                output: Optional[Any] = None) -> Tuple[np.ndarray, float]:
-        if output is not None:
-            pose = getattr(output, "robot_pose_field", None)
-            if isinstance(pose, (list, tuple)) and len(pose) >= 3:
-                try:
-                    px = float(pose[0])
-                    py = float(pose[1])
-                    ptheta = float(pose[2])
-                except (TypeError, ValueError):
-                    pass
-                else:
-                    if math.isfinite(px) and math.isfinite(py) and math.isfinite(ptheta):
-                        return np.array([px, py], dtype=np.float32), _normalize_angle(ptheta)
-        return agent.pos.copy(), float(agent.theta)
-
-    def _operational_ball_position(self,
-                                   ball: BallState,
-                                   output: Optional[Any] = None,
-                                   *,
-                                   prefer_intercepted: bool = False) -> np.ndarray:
-        if output is not None:
-            attrs = (
-                ("field_ball_intercepted_position", "field_ball_position")
-                if prefer_intercepted
-                else ("field_ball_position", "field_ball_intercepted_position")
-            )
-            for attr in attrs:
-                target = self._target_array(getattr(output, attr, None))
-                if target is not None:
-                    return target.astype(np.float32)
-        return ball.pos.copy()
-
-    def _robot_relative_target_to_field(self,
-                                        agent: AgentState,
-                                        value: Any,
-                                        output: Optional[Any] = None) -> Optional[np.ndarray]:
-        target = self._target_array(value)
-        if target is None:
-            return None
-        if float(np.linalg.norm(target)) <= 1.0:
-            return None
-        origin, theta = self._operational_robot_pose(agent, output)
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        dx = float(target[0]) * cos_t - float(target[1]) * sin_t
-        dy = float(target[0]) * sin_t + float(target[1]) * cos_t
-        return np.array([origin[0] + dx, origin[1] + dy], dtype=np.float32)
-
-    def _motion_walk_target_to_field(self,
-                                     agent: AgentState,
-                                     value: Any,
-                                     output: Optional[Any] = None) -> Optional[Tuple[np.ndarray, float]]:
-        if not isinstance(value, (list, tuple)) or len(value) < 3:
-            return None
-        pos = self._robot_relative_target_to_field(agent, value[:2], output)
-        if pos is None:
-            return None
-        _, base_theta = self._operational_robot_pose(agent, output)
-        theta = _normalize_angle(base_theta + float(value[2]))
-        return pos, theta
-
-    def _resolve_playball_ball_target(self,
-                                      agent: AgentState,
-                                      ball: BallState,
-                                      output: Any) -> Optional[np.ndarray]:
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(output, "macro_type", "none"),
-            motion_request,
-        )
-        operational_ball = self._operational_ball_position(
-            ball,
-            output,
-            prefer_intercepted=True,
-        )
-        _, operational_theta = self._operational_robot_pose(agent, output)
-
-        bridge_ball_target = self._bridge_field_target(
-            getattr(output, "motion_ball_target_field", None),
-            ball,
-        )
-        if bridge_ball_target is not None:
-            return self._sanitize_macro_ball_target(bridge_ball_target)
-
-        shoot_target_field = self._robot_relative_target_to_field(agent, output.behavior_shooting_to, output)
-        if shoot_target_field is not None:
-            return self._sanitize_macro_ball_target(shoot_target_field)
-
-        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
-        skill_target_dir = self._sanitize_angle(getattr(output, "skill_target_direction", None))
-        motion_target_dir = self._sanitize_angle(getattr(output, "motion_target_direction", None))
-        kick_length = self._sanitize_kick_length(getattr(output, "kick_length", 0.0))
-
-        if skill_request in {"walk", "block", "mark", "observe"} and skill_target is not None:
-            return self._clip_field_point(skill_target)
-
-        if macro_type in {"playBall_shoot", "playBall_pass"}:
-            fallback_dir = self._fallback_playball_direction(agent, ball, output)
-            fallback_length = kick_length
-            if skill_request == "pass" or macro_type == "playBall_pass":
-                fallback_length = max(
-                    700.0,
-                    min(1800.0, fallback_length if fallback_length > 0.0 else 1100.0),
-                )
-            else:
-                fallback_length = max(
-                    950.0,
-                    min(FIELD.length * 0.45, fallback_length if fallback_length > 0.0 else 1450.0),
-                )
-            target = (
-                operational_ball + fallback_dir * fallback_length
-            ).astype(np.float32)
-            return self._sanitize_macro_ball_target(target)
-
-        if macro_type == "playBall_dribble" and motion_request in {"walkToBallAndKick", "dribble"} and motion_target_dir is not None:
-            target_theta = _normalize_angle(operational_theta + float(motion_target_dir))
-            target_length = kick_length
-            if motion_request == "dribble":
-                target_length = max(450.0, min(700.0, target_length if target_length > 0.0 else 550.0))
-            else:
-                target_length = max(850.0, min(FIELD.length * 0.42, target_length if target_length > 0.0 else 1250.0))
-            target = (
-                operational_ball
-                + np.array(
-                    [math.cos(target_theta), math.sin(target_theta)],
-                    dtype=np.float32,
-                ) * target_length
-            ).astype(np.float32)
-            return self._sanitize_macro_ball_target(target)
-
-        if skill_request == "dribble" and skill_target_dir is not None:
-            target_theta = float(skill_target_dir)
-            target = (
-                ball.pos
-                + np.array(
-                    [math.cos(target_theta), math.sin(target_theta)],
-                    dtype=np.float32,
-                ) * 600.0
-            ).astype(np.float32)
-            return self._sanitize_macro_ball_target(target)
-
-        return None
-
-    def _fallback_playball_direction(self,
-                                     agent: AgentState,
-                                     ball: BallState,
-                                     output: Any) -> np.ndarray:
-        operational_ball = self._operational_ball_position(
-            ball,
-            output,
-            prefer_intercepted=False,
-        )
-        _, operational_theta = self._operational_robot_pose(agent, output)
-
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(output, "macro_type", "none"),
-            motion_request,
-        )
-        motion_target_dir = self._sanitize_angle(getattr(output, "motion_target_direction", None))
-        if motion_target_dir is not None:
-            if macro_type == "playBall_dribble":
-                theta = _normalize_angle(operational_theta + float(motion_target_dir))
-                return np.array([math.cos(theta), math.sin(theta)], dtype=np.float32)
-
-        skill_target_dir = self._sanitize_angle(getattr(output, "skill_target_direction", None))
-        if skill_target_dir is not None:
-            if macro_type in {"playBall_shoot", "playBall_pass"} or skill_request == "dribble":
-                return np.array([math.cos(skill_target_dir), math.sin(skill_target_dir)], dtype=np.float32)
-
-        for target in (
-            self._robot_relative_target_to_field(agent, output.behavior_shooting_to, output),
-            self._robot_relative_target_to_field(agent, output.behavior_walking_to, output),
-            self._bridge_field_target(getattr(output, "motion_ball_target_field", None), ball),
-        ):
-            if target is None:
-                continue
-            delta = target - operational_ball
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return (delta / norm).astype(np.float32)
-
-        return np.array(
-            [math.cos(operational_theta), math.sin(operational_theta)],
-            dtype=np.float32,
-        )
-
-    def _resolve_playball_body_target(self,
-                                      agent: AgentState,
-                                      ball: BallState,
-                                      output: Any) -> Tuple[np.ndarray, float]:
-        operational_ball = self._operational_ball_position(
-            ball,
-            output,
-            prefer_intercepted=False,
-        )
-        bridge_contact_point = self._bridge_field_target(
-            getattr(output, "motion_contact_point_field", None),
-            ball,
-        )
-        if bridge_contact_point is not None:
-            bridge_gap = float(np.linalg.norm(bridge_contact_point - operational_ball))
-            if bridge_gap > 260.0:
-                bridge_contact_point = None
-        ball_target = self._resolve_playball_ball_target(agent, ball, output)
-        contact_point = bridge_contact_point if bridge_contact_point is not None else operational_ball
-        if ball_target is None:
-            direction = self._fallback_playball_direction(agent, ball, output)
-        else:
-            direction = ball_target - contact_point
-            norm = float(np.linalg.norm(direction))
-            if norm <= 1e-6:
-                direction = self._fallback_playball_direction(agent, ball, output)
-            else:
-                direction = direction / norm
-        contact_offset = AGENT.radius + BALL.radius + 35.0
-        margin = 80.0
-        max_offset = self._max_support_offset(contact_point, direction, margin=margin)
-        support_offset = min(contact_offset, max_offset)
-
-        if support_offset >= contact_offset * 0.72:
-            body_target = contact_point - direction * support_offset
-            body_target = self._clip_field_point(body_target, margin=margin)
-        else:
-            body_target = self._side_support_pose(
-                agent,
-                contact_point,
-                direction,
-                margin=margin,
-                preferred_offset=contact_offset,
-            )
-        target_theta = math.atan2(direction[1], direction[0])
-        return body_target.astype(np.float32), target_theta
-
-    def _resolve_reference_target(self,
-                                  agent: AgentState,
-                                  ball: BallState,
-                                  output: Any) -> Optional[np.ndarray]:
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(output, "macro_type", "none"),
-            motion_request,
-        )
-        in_playball = macro_type.startswith("playBall_")
-        shoot_target = self._robot_relative_target_to_field(agent, output.behavior_shooting_to, output)
-        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
-        walk_target = self._robot_relative_target_to_field(agent, output.behavior_walking_to, output)
-        motion_walk_target = self._motion_walk_target_to_field(agent, output.motion_walk_target, output)
-
-        # During real takeover/playBall the strategic walk target can still be
-        # populated by BHuman, but it should not override the local execution
-        # target. Use the ball-direction semantics that BHuman actually emits.
-        if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
-            target_pos, _ = self._resolve_playball_body_target(agent, ball, output)
-            return target_pos
-
-        if skill_target is not None:
-            return skill_target
-        if walk_target is not None:
-            return walk_target
-        if motion_walk_target is not None:
-            return motion_walk_target[0]
-        if shoot_target is not None:
-            return shoot_target
-        if motion_request in {"walkToBallAndKick", "dribble"}:
-            return ball.pos.copy()
-        return None
-
-    def _resolve_motion_target(self,
-                               agent: AgentState,
-                               ball: BallState,
-                               output: Any,
-                               dt: float) -> Tuple[np.ndarray, float]:
-        skill_request = str(getattr(output, "skill_request", "none") or "none")
-        motion_request = str(getattr(output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(output, "macro_type", "none"),
-            motion_request,
-        )
-        in_playball = macro_type.startswith("playBall_")
-        target_pos = self._resolve_reference_target(agent, ball, output)
-        if target_pos is None:
-            vx, vy, _ = output.motion_speed
-            if abs(vx) > 1e-6 or abs(vy) > 1e-6:
-                cos_t = math.cos(agent.theta)
-                sin_t = math.sin(agent.theta)
-                vx_field = vx * cos_t - vy * sin_t
-                vy_field = vx * sin_t + vy * cos_t
-                target_pos = agent.pos + np.array([vx_field, vy_field], dtype=np.float32) * max(dt, 0.2)
-            else:
-                target_pos = agent.pos.copy()
-
-        if in_playball or skill_request in {"shoot", "pass", "dribble"} or motion_request in {"walkToBallAndKick", "dribble"}:
-            target_pos, target_theta = self._resolve_playball_body_target(agent, ball, output)
-        elif output.motion_walk_target is not None:
-            motion_walk_target = self._motion_walk_target_to_field(agent, output.motion_walk_target, output)
-            if motion_walk_target is not None:
-                target_theta = motion_walk_target[1]
-            else:
-                target_theta = agent.theta
-        else:
-            motion_target_dir = self._sanitize_angle(output.motion_target_direction)
-            skill_target_dir = self._sanitize_angle(output.skill_target_direction)
-            _, operational_theta = self._operational_robot_pose(agent, output)
-            if motion_target_dir is not None:
-                target_theta = _normalize_angle(operational_theta + motion_target_dir)
-            elif skill_target_dir is not None:
-                target_theta = float(skill_target_dir)
-            elif output.behavior_shooting_to is not None:
-                shoot_to = self._robot_relative_target_to_field(agent, output.behavior_shooting_to, output)
-                if shoot_to is None:
-                    shoot_to = agent.pos.copy()
-                target_theta = math.atan2(shoot_to[1] - agent.pos[1], shoot_to[0] - agent.pos[0])
-            else:
-                delta = target_pos - agent.pos
-                if float(np.linalg.norm(delta)) > 1e-6:
-                    target_theta = math.atan2(delta[1], delta[0])
-                else:
-                    target_theta = agent.theta
-
-        return target_pos, target_theta
-
-    def _has_new_kick(self, agent_id: str, output: Any) -> bool:
-        if output.last_kick_type in (None, "", "none", "unavailable"):
-            return False
-        timestamp = int(output.last_kick_timestamp or 0)
-        if timestamp <= 0:
-            return False
-        last_timestamp = self._last_kick_timestamps.get(agent_id, -1)
-        if timestamp <= last_timestamp:
-            return False
-        self._last_kick_timestamps[agent_id] = timestamp
-        return True
-
-    def _apply_kick(self,
-                    agent: AgentState,
-                    ball: BallState,
-                    output: Any,
-                    agents: Dict[str, AgentState]) -> BallState:
-        contact_offset = AGENT.min_robot_distance + BALL.radius + 25.0
-        direction = self._resolve_kick_direction(agent, ball, output, agents)
-        direction = self._constrain_contact_direction(agent, direction, contact_offset)
-        speed = self._kick_speed(output)
-        return BallState(
-            pos=agent.pos + direction * contact_offset,
-            vel=direction * speed,
-            last_touched_by=agent.agent_id,
-            seen_age_ms=0.0,
-        )
-
-    def _apply_dribble(self,
-                       agent: AgentState,
-                       ball: BallState,
-                       output: Any) -> Tuple[BallState, bool]:
-        distance = float(np.linalg.norm(agent.pos - ball.pos))
-        dribble_capture_distance = AGENT.radius + BALL.radius + 35.0
-        if distance > dribble_capture_distance:
-            return ball, False
-
-        contact_offset = AGENT.radius + BALL.radius + 10.0
-        direction = self._dribble_direction(agent, ball, output)
-        direction = self._constrain_contact_direction(agent, direction, contact_offset)
-        dribble_speed = max(
-            150.0,
-            min(self._kick_info.ball_velocity_max * 0.45,
-                max(agent.speed_scalar, output.behavior_speed, 180.0)),
-        )
-        next_pos = agent.pos + direction * contact_offset
-        dribble_ball = BallState(
-            pos=next_pos,
-            vel=direction * dribble_speed,
-            last_touched_by=agent.agent_id,
-            seen_age_ms=0.0,
-        )
-        progress = float(np.dot(next_pos - ball.pos, direction)) > 25.0
-        return dribble_ball, progress
-
-    def _dribble_direction(self,
-                           agent: AgentState,
-                           ball: BallState,
-                           output: Any) -> np.ndarray:
-        forward = np.array(
-            [math.cos(agent.theta), math.sin(agent.theta)],
-            dtype=np.float32,
-        )
-        target_dir = self._direction_from_agent(agent, ball, output)
-        dot = float(np.dot(forward, target_dir))
-
-        if dot >= 0.85:
-            return forward
-        if dot <= 0.0:
-            return forward
-
-        blended = 0.78 * forward + 0.22 * target_dir
-        norm = float(np.linalg.norm(blended))
-        if norm > 1e-6:
-            return blended / norm
-        return forward
-
-    def _resolve_kick_direction(self,
-                                agent: AgentState,
-                                ball: BallState,
-                                output: Any,
-                                agents: Dict[str, AgentState]) -> np.ndarray:
-        if output.pass_target_player_number is not None:
-            target_agent = self._agent_from_player_number(output.pass_target_player_number, agents)
-            if target_agent is not None:
-                delta = target_agent.pos - agent.pos
-                norm = float(np.linalg.norm(delta))
-                if norm > 1e-6:
-                    return delta / norm
-
-        ball_target = self._resolve_playball_ball_target(agent, ball, output)
-        if ball_target is not None:
-            delta = ball_target - ball.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return delta / norm
-
-        skill_target = self._sanitize_sidecar_target(output.skill_target, ball)
-        if skill_target is not None:
-            target = skill_target
-            delta = target - agent.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return delta / norm
-
-        return self._direction_from_agent(agent, ball=ball, output=output)
-
-    def _constrain_contact_direction(self,
-                                     agent: AgentState,
-                                     direction: np.ndarray,
-                                     contact_offset: float) -> np.ndarray:
-        candidate = agent.pos + direction * contact_offset
-        margin = BALL.radius + 50.0
-        safe_x = float(np.clip(
-            candidate[0],
-            FIELD.x_own_ground + margin,
-            FIELD.x_opponent_ground - margin,
-        ))
-        safe_y = float(np.clip(
-            candidate[1],
-            FIELD.y_right_sideline + margin,
-            FIELD.y_left_sideline - margin,
-        ))
-        safe_delta = np.array([safe_x, safe_y], dtype=np.float32) - agent.pos
-        norm = float(np.linalg.norm(safe_delta))
-        if norm > 1e-6:
-            return safe_delta / norm
-        return direction
-
-    def _direction_from_agent(self,
-                              agent: AgentState,
-                              ball: Optional[BallState],
-                              output: Any) -> np.ndarray:
-        reference = self._resolve_reference_target(
-            agent,
-            ball if ball is not None else BallState(
-                pos=agent.pos.copy(),
-                vel=np.zeros(2, dtype=np.float32),
-            ),
-            output,
-        )
-        if reference is not None:
-            delta = reference - agent.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return delta / norm
-
-        ball_target = self._resolve_playball_ball_target(agent, ball if ball is not None else BallState(
-            pos=agent.pos.copy(),
-            vel=np.zeros(2, dtype=np.float32),
-        ), output)
-        if ball is not None and ball_target is not None:
-            delta = ball_target - ball.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return delta / norm
-
-        if ball is not None:
-            delta = ball.pos - agent.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return delta / norm
-
-        motion_target_dir = self._sanitize_angle(output.motion_target_direction)
-        skill_target_dir = self._sanitize_angle(output.skill_target_direction)
-        if motion_target_dir is not None:
-            _, operational_theta = self._operational_robot_pose(agent, output)
-            theta = _normalize_angle(operational_theta + motion_target_dir)
-        elif skill_target_dir is not None:
-            theta = float(skill_target_dir)
-        else:
-            theta = agent.theta
-        return np.array([math.cos(theta), math.sin(theta)], dtype=np.float32)
-
-    def _agent_from_player_number(self,
-                                  player_number: Any,
-                                  agents: Dict[str, AgentState]) -> Optional[AgentState]:
-        try:
-            index = int(player_number) - 1
-        except (TypeError, ValueError):
-            return None
-
-        ordered_ids = sorted(
-            agents.keys(),
-            key=lambda aid: int(aid.rsplit("_", 1)[-1]) if "_" in aid else 10_000,
-        )
-        if 0 <= index < len(ordered_ids):
-            return agents.get(ordered_ids[index])
-        return None
-
-    def _kick_speed(self, output: Any) -> float:
-        kick_key = output.last_kick_type
-        if kick_key in (None, "", "none", "unavailable"):
-            kick_key = output.kick_type
-
-        entry = self._kick_entries.get(str(kick_key))
-        kick_length = self._sanitize_kick_length(output.kick_length)
-        if entry is not None:
-            span = max(1.0, entry.range_max - entry.range_min)
-            alpha = float(np.clip((kick_length - entry.range_min) / span, 0.0, 1.0))
-            return float(entry.ball_velocity_min + alpha * (entry.ball_velocity_max - entry.ball_velocity_min))
-
-        if kick_length <= 0.0:
-            return float(self._kick_info.ball_velocity_max)
-
-        ratio = float(np.clip(kick_length / max(1.0, self._kick_info.forward_fast_max), 0.35, 1.0))
-        return ratio * float(self._kick_info.ball_velocity_max)
-
-    def post_kick_release_frames(self, agent_id: Optional[str]) -> int:
-        if not agent_id:
-            return 0
-        return int(self._post_kick_release_frames.get(agent_id, 0))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN ENVIRONMENT
-# ─────────────────────────────────────────────────────────────────────────────
-
-class NaoSoccerEnv(ParallelEnv):
-    """
-    Entorno 2D para MAPPO NAO Soccer, alineado con contrato BHuman 4v4 Scaled.
-
-    Handoff/takeover flow:
-      - RL agents output positioning actions (NOT kick/dribble)
-      - When handoff_ready, BHuman takes over for skill execution
-      - Reward based on quality of handoff state and BHuman outcome
-    """
-
-    metadata = {"render_modes": ["human"], "name": "nao_soccer_v0"}
-
-    def __init__(self, stage_cfg: CurriculumStageConfig,
-                 use_fov: bool = True,
-                 seed: Optional[int] = None):
+    def __init__(self, env_cfg=ENV):
         super().__init__()
-
-        self._stage = stage_cfg
-        self._use_fov = use_fov
-        self._rng = np.random.default_rng(seed)
-        random.seed(seed)
-
-        # Components
-        self._ball_physics = BallPhysics()
-        self._movement     = NaoMovementModel()
-        self._movement.configure(self._stage)
-        self._fov_filter   = FOVFilter(use_fov=use_fov)
-        self._scripted_ai  = ScriptedOpponent(self._movement)
-        self._obs_builder  = ObservationBuilder()
-        self._handoff_mgr  = HandoffTakeoverManager(CONTRACT)
-        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
-
-        # Execution mode
-        self._execution_mode = EXECUTION_MODE
-        self._sidecar = None
-
-        # Takeover simulator: ONLY for python_stub_smoke_only mode.
-        # In bhuman_sidecar mode, the takeover simulator is NOT used.
-        self._takeover_sim = None
-        self._sidecar_physics = None
-        if EXECUTION_MODE == "python_stub_smoke_only":
-            self._takeover_sim = BHumanTakeoverSimulator(self._movement, CONTRACT)
-
-        # Sidecar: BHuman decision chain
-        if EXECUTION_MODE == "bhuman_sidecar":
-            from bhuman_sidecar import BHumanDecisionSidecar
-            self._sidecar = BHumanDecisionSidecar(CONTRACT,
-                                                   execution_mode=EXECUTION_MODE)
-            self._sidecar_physics = RealSidecarPhysicsExecutor(self._movement, CONTRACT)
-
-        # PettingZoo
-        self.possible_agents = [f"agent_{i}" for i in range(SIM.num_agents)]
+        self.cfg = env_cfg
+        self.stage_spec = get_stage_spec(self.cfg.stage_id)
+        self.possible_agents = ["player_1"]
+        self.agents = list(self.possible_agents)
+        self.backend = PyBHBackend(
+            mode=self.cfg.backend.mode,
+            obs_mode=self.cfg.backend.obs_mode,
+            player_number=self.cfg.backend.player_number,
+            frames_per_step=self.cfg.backend.frames_per_step,
+            obs_timeout_ms=self.cfg.backend.obs_timeout_ms,
+            simrobot_profile=self.cfg.backend.simrobot_profile,
+            simrobot_scene_path=self.cfg.backend.simrobot_scene_path,
+            simrobot_robot_name=self.cfg.backend.simrobot_robot_name,
+            simrobot_theta_offset=self.cfg.backend.simrobot_theta_offset,
+            simrobot_launch=self.cfg.backend.simrobot_launch,
+            embedded_qt_platform=self.cfg.backend.embedded_qt_platform,
+            embedded_3d_preflight=self.cfg.backend.embedded_3d_preflight,
+            simrobot_bin=self.cfg.backend.simrobot_bin,
+        )
         self.observation_spaces = {
-            aid: spaces.Box(low=-np.inf, high=np.inf,
-                            shape=(OBS.total,), dtype=np.float32)
-            for aid in self.possible_agents
+            "player_1": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
         }
         self.action_spaces = {
-            aid: spaces.Box(low=-1.0, high=1.0,
-                            shape=(ACTION.size,), dtype=np.float32)
-            for aid in self.possible_agents
+            "player_1": gym.spaces.Box(
+                low=np.asarray([0.0, -1.0, -1.0, -1.0, 0.0], dtype=np.float32),
+                high=np.asarray(
+                    [
+                        float(len(SKILL_ORDER) - 1),
+                        1.0,
+                        1.0,
+                        1.0,
+                        float(ACTION.max_pass_target),
+                    ],
+                    dtype=np.float32,
+                ),
+                shape=(5,),
+                dtype=np.float32,
+            )
         }
+        self.state_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(OBS_SIZE,), dtype=np.float32)
+        self.state_spaces = {"player_1": self.state_space}
+        self._rng = np.random.default_rng(self.cfg.seed)
+        self._last_obs: Optional[np.ndarray] = None
+        self._last_backend_obs: Optional[BackendObservation] = None
+        self._last_evaluation: Optional[StepEvaluation] = None
+        # Unified skill gate: its armed flags are baked into the obs vector so the
+        # policy's per-step forbid-invalid mask is a pure function of the stored obs.
+        self._skill_gate = SkillGate(GateConfig.from_env())
+        self._gate_decision = None
+        # Multi-agent team hook (None for single-agent — zero behavior change).
+        # Set by TeamSlotSimRobotEnv: callable(env, obs, base_decision) ->
+        # (injected_obs, team_decision). The hook owns cross-sim teammate
+        # injection and the team-augmented gate bits (obs[41:47]).
+        self._team_hook = None
+        # Current role + coordination target for this slot (set via the hook);
+        # drive role-aware residual anchor decoding for support walk actions.
+        self._team_role: str | None = None
+        self._team_coordination_target: tuple[float, float] | None = None
+        self._episode_step = 0
+        self._skill_history: list[str] = []
+        self._trusted_takeover_grace = 0
+        self._post_takeover_finishing_steps = 0
+        self._fallen_consecutive_steps = 0
+        self._episode_stage_id = self.stage_spec.stage_id
+        self._episode_stage_spec = self.stage_spec
+        self._current_world_spec = None
+        self._production_scenarios, self._production_scenario_weights = self._build_production_scenario_distribution()
+        self._pending_production_scenario: ProductionScenario | None = None
+        self._current_production_scenario: ProductionScenario | None = None
+        self._dynamic_world_state = None
+        self._episode_tracker: Dict[str, object] = {}
+        if _STEP_PROFILE:
+            self._prof_acc: Dict[str, float] = defaultdict(float)
+            self._prof_count = 0
+        if self._production_scenarios and int(self.cfg.backend.player_number) == 1:
+            raw_weight_map = _parse_production_weights()
+            scenario_text = ", ".join(
+                f"{scenario.name}:{raw_weight_map.get(scenario.name, 1.0):g}"
+                for scenario in self._production_scenarios
+            )
+            print(f"[production-resets] enabled scenarios={scenario_text}", flush=True)
 
-        # State (initialized in reset)
-        self._agents_state: Dict[str, AgentState] = {}
-        self._opponents_state: List[OpponentState] = []
-        self._static_obstacles: List[StaticObstacle] = []
-        self._ball: BallState = BallState(np.zeros(2), np.zeros(2))
-        self._game: GameState = GameState()
-        self._prev_ball_pos: np.ndarray = np.zeros(2)
-        self._prev_ball_speed: float = 0.0
-        self._prev_ball_dists: Dict[str, float] = {}
-        self._current_tactic: str = "t121_4v4_scaled"
-        self._active_agent_id: Optional[str] = None
-        self._ball_collision_skip_agent_id: Optional[str] = None
-
-        # Smoothing and tracking
-        self._prev_actions: Dict[str, np.ndarray] = {}
-        self._ema_actions: Dict[str, np.ndarray] = {}
-        self._prev_thetas: Dict[str, float] = {}
-        self._prev_targets: Dict[str, np.ndarray] = {}
-        self._curr_targets: Dict[str, np.ndarray] = {}
-        self._prev_omegas: Dict[str, float] = {}
-        self._prev_face_thetas: Dict[str, float] = {}
-
-        # Episode tracking
-        self._ball_out_this_step = False
-        self._takeover_events: List[Dict] = []  # for metrics
-        self._episode_takeover_count = 0
-        self._episode_takeover_success = 0
-        self._episode_takeover_count_by_type = _new_takeover_type_counts()
-        self._episode_takeover_success_by_type = _new_takeover_type_counts()
-        self._episode_handoff_achieved = False  # True if handoff_ready was ever True
-        self._episode_handoff_ready_frames = 0
-        self._episode_tkready_achieved = False
-        self._episode_tkready_frames = 0
-        self._episode_playball_entry_count = 0
-        self._episode_playball_achieved = False
-        self._episode_ready_but_walk_frames = 0
-        self._episode_ready_touch_but_walk_frames = 0
-        self._episode_takeover_reason_counts: Dict[str, int] = _new_takeover_reason_counts()
-        self._last_macro_end_reason: str = "none"
-        self._prev_playball_frame = False
-        self._prev_handoff_ready = False
-        self._tkready_streak = 0
-
-        self.agents: List[str] = []
+    @property
+    def last_gate_decision(self):
+        """Skill-gate decision for the most recently produced observation. The teacher
+        reads this during collection so its label is consistent with the armed flags
+        baked into the recorded observation (single gate owner = no divergence)."""
+        return self._gate_decision
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -2066,1591 +311,1681 @@ class NaoSoccerEnv(ParallelEnv):
     def reset(self, seed=None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        self.agents = list(self.possible_agents)
+        self._episode_step = 0
+        self._skill_history = []
+        self._trusted_takeover_grace = 0
+        self._post_takeover_finishing_steps = 0
+        self._fallen_consecutive_steps = 0
+        self._last_evaluation = None
+        options = options or {}
+        self._pending_production_scenario = None
+        self._current_production_scenario = None
+        if (
+            self._production_scenarios
+            and "stage_id" not in options
+            and "world_spec" not in options
+        ):
+            self._pending_production_scenario = self._sample_production_scenario()
+        self._episode_stage_id = self._sample_episode_stage_id(options)
+        self._episode_stage_spec = get_stage_spec(self._episode_stage_id)
+        try:
+            self._current_world_spec = options.get("world_spec") or self._sample_episode_world_spec()
+        finally:
+            self._pending_production_scenario = None
+        self._dynamic_world_state = init_dynamic_world_state(self._episode_stage_id, self._current_world_spec, self._rng)
+        obs = self.backend.reset(world_spec=self._current_world_spec)
+        self._skill_gate.reset()
+        self._gate_decision = self._skill_gate.step(obs)
+        if self._team_hook is not None:
+            obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
+        encoded = self._encode_obs(obs)
+        self._last_obs = encoded
+        self._last_backend_obs = obs
+        self._reset_episode_tracker()
+        info = self._build_info(
+            obs=obs,
+            policy_action=None,
+            executed_action=None,
+            evaluation=None,
+            projection_applied=False,
+            dynamic_update_applied=False,
+            done=False,
+        )
+        return {"player_1": encoded}, {"player_1": info}
 
-        n_rl = self._stage.num_rl_agents
-        self.agents = self.possible_agents[:n_rl]
+    def _sample_episode_stage_id(self, options: Mapping[str, object]) -> int:
+        if "stage_id" in options:
+            return int(options["stage_id"])
+        if self._pending_production_scenario is not None:
+            return int(self._pending_production_scenario.stage_id)
+        probability = float(np.clip(self.cfg.stage0_finish_interleave_probability, 0.0, 1.0))
+        if self.stage_spec.stage_id == 0 and probability > 0.0 and float(self._rng.random()) < probability:
+            return 1
+        return self.stage_spec.stage_id
 
-        self._game = GameState()
-        self._agents_state = self._spawn_agents(self.agents)
-        self._opponents_state = self._spawn_opponents(self._stage.num_opponents)
-        self._ball = self._spawn_ball()
-        self._prev_ball_pos = self._ball.pos.copy()
-        self._prev_ball_speed = 0.0
-        self._current_tactic = "t121_4v4_scaled"
+    def _sample_episode_world_spec(self) -> WorldSpec:
+        if self._pending_production_scenario is not None:
+            self._current_production_scenario = self._pending_production_scenario
+            return self._pending_production_scenario.world_fn(self._rng)
+        finish_probability = {
+            1: float(getattr(self.cfg, "stage1_finish_interleave_probability", 0.0)),
+            2: float(getattr(self.cfg, "stage2_finish_interleave_probability", 0.0)),
+            3: float(getattr(self.cfg, "stage3_finish_interleave_probability", 0.0)),
+        }.get(self._episode_stage_id, 0.0)
+        if finish_probability > 0.0 and float(self._rng.random()) < float(np.clip(finish_probability, 0.0, 1.0)):
+            draw = float(self._rng.random())
+            if draw < 0.60:
+                return sample_finish_sequence_world_spec(self._episode_stage_id, self._rng)
+            if draw < 0.85:
+                return sample_preshoot_dribble_world_spec(self._episode_stage_id, self._rng)
+            return sample_finish_world_spec(self._episode_stage_id, self._rng)
+        return sample_stage_world_spec_with_options(
+            self._episode_stage_id,
+            self._rng,
+            diverse_resets=bool(self.cfg.diverse_stage_resets),
+        )
 
-        # Select active agent (closest to ball)
-        self._select_active_agent()
-        self._static_obstacles = self._spawn_static_obstacles()
+    def _build_production_scenario_distribution(self) -> tuple[list[ProductionScenario], np.ndarray]:
+        if not _env_flag("RL_PRODUCTION_SCENARIO_RESETS", False):
+            return [], np.asarray([], dtype=np.float64)
 
-        # Init distances
-        self._prev_ball_dists = {
-            aid: float(np.linalg.norm(self._agents_state[aid].pos - self._ball.pos))
-            for aid in self.agents
-        }
+        scenario_set = os.getenv("RL_PRODUCTION_SCENARIO_SET", "all").strip().lower()
+        set_tokens = {token.strip() for token in scenario_set.replace("+", ",").split(",") if token.strip()}
+        if not set_tokens or "all" in set_tokens or "eval_plus_topup" in set_tokens:
+            set_tokens = {"eval", "topup"}
 
-        self._fov_filter.reset(self.agents)
-        self._handoff_mgr.reset()
-        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
-        if self._sidecar is not None:
-            # Reset the real bridge / sidecar state at episode boundaries.
-            self._sidecar.reset()
-        if self._sidecar_physics is not None:
-            self._sidecar_physics.reset()
+        scenarios: list[ProductionScenario] = []
+        if {"eval", "production", "grader"} & set_tokens:
+            scenarios.extend(production_scenarios(1))
+        if {"topup", "repair", "bridge"} & set_tokens:
+            scenarios.extend(production_topup_scenarios(1))
+        if {"team", "multiagent"} & set_tokens:
+            # Stage 6/7 multi-agent team scenarios (train_multiagent_production.py
+            # sets RL_PRODUCTION_SCENARIO_SET=team).
+            scenarios.extend(team_production_scenarios(1))
+        if {"defense", "defender"} & set_tokens:
+            scenarios.extend(team_defense_scenarios(1))
+        if not scenarios:
+            raise ValueError(f"RL_PRODUCTION_SCENARIO_SET={scenario_set!r} did not select any scenarios")
 
-        # Init smoothing
-        self._prev_actions = {aid: np.zeros(ACTION.size, dtype=np.float32) for aid in self.agents}
-        self._ema_actions = {aid: np.zeros(ACTION.size, dtype=np.float32) for aid in self.agents}
-        self._prev_thetas = {aid: self._agents_state[aid].theta for aid in self.agents}
-        self._prev_targets = {aid: self._agents_state[aid].pos.copy() for aid in self.agents}
-        self._curr_targets = {}
-        self._prev_omegas = {aid: 0.0 for aid in self.agents}
-        self._prev_face_thetas = {aid: self._agents_state[aid].theta for aid in self.agents}
+        requested_names = _split_csv_env("RL_PRODUCTION_SCENARIOS")
+        if requested_names:
+            scenarios = [scenario for scenario in scenarios if scenario.name in requested_names]
+            if not scenarios:
+                raise ValueError(f"RL_PRODUCTION_SCENARIOS selected no known scenarios: {sorted(requested_names)}")
 
-        # Episode metrics
-        self._ball_out_this_step = False
-        self._takeover_events = []
-        self._episode_takeover_count = 0
-        self._episode_takeover_success = 0
-        self._episode_takeover_count_by_type = _new_takeover_type_counts()
-        self._episode_takeover_success_by_type = _new_takeover_type_counts()
-        self._episode_handoff_achieved = False
-        self._episode_handoff_ready_frames = 0
-        self._episode_tkready_achieved = False
-        self._episode_tkready_frames = 0
-        self._episode_playball_entry_count = 0
-        self._episode_playball_achieved = False
-        self._episode_ready_but_walk_frames = 0
-        self._episode_ready_touch_but_walk_frames = 0
-        self._episode_takeover_reason_counts = _new_takeover_reason_counts()
-        self._last_macro_end_reason = "none"
-        self._prev_playball_frame = False
-        self._prev_handoff_ready = False
-        self._tkready_streak = 0
-        self._ball_collision_skip_agent_id = None
+        weight_map = _parse_production_weights()
+        weights = np.asarray([weight_map.get(scenario.name, 1.0) for scenario in scenarios], dtype=np.float64)
+        if not np.isfinite(weights).all() or float(weights.sum()) <= 0.0:
+            raise ValueError("Production scenario weights must contain at least one positive finite value")
+        weights = weights / float(weights.sum())
+        return scenarios, weights
 
-        observations = self._build_observations()
-        infos = {aid: {} for aid in self.agents}
-        return observations, infos
+    def _sample_production_scenario(self) -> ProductionScenario:
+        if not self._production_scenarios:
+            raise RuntimeError("production scenario sampling requested without a scenario pool")
+        index = int(self._rng.choice(len(self._production_scenarios), p=self._production_scenario_weights))
+        return self._production_scenarios[index]
 
     def step(self, actions):
-        assert self.agents, "step() called without active agents. Call reset() first."
-
-        self._ball_out_this_step = False
-        # Pulso (1 frame) del final de macro para reward/telemetría.
-        # Evita reward leak si `macro_end_reason` quedaba pegado varios frames.
-        self._macro_end_pulse_reason = "none"
-        self._macro_end_pulse_success = None
-
-        # Save previous state for reward
-        self._prev_ball_pos = self._ball.pos.copy()
-        self._prev_ball_speed = float(np.linalg.norm(self._ball.vel))
-        prev_ball_dists = {
-            aid: float(np.linalg.norm(self._agents_state[aid].pos - self._ball.pos))
-            for aid in self.agents
-        }
-
-        # ═══════════════════════════════════════════════════════════════
-        # 1. RL CONTROL STEP — agents move according to actions
-        # ═══════════════════════════════════════════════════════════════
-        current_targets = {}
-        for aid in self.agents:
-            if aid not in actions:
-                continue
-
-            raw_action = actions[aid]
-            if not np.all(np.isfinite(raw_action)):
-                raw_action = self._prev_actions.get(aid, np.zeros(ACTION.size, dtype=np.float32))
-
-            # EMA smoothing
-            if ACTION_SMOOTHING.enabled:
-                stage_alpha = getattr(self._stage, "ema_alpha", ACTION_SMOOTHING.alpha)
-                prev = self._prev_actions.get(aid, np.zeros(ACTION.size, dtype=np.float32))
-                action_to_use = stage_alpha * raw_action + (1.0 - stage_alpha) * prev
-            else:
-                action_to_use = raw_action
-
-            self._prev_actions[aid] = action_to_use.copy()
-
-            agent_state = self._agents_state[aid]
-            target_pos, target_theta = self._decode_action(action_to_use, agent_state, aid)
-
-            # Local horizon
-            local_horizon = getattr(self._stage, "local_horizon", 0.0)
-            if local_horizon > 0.0:
-                agent_pos = agent_state.pos
-                dist_to_target = float(np.linalg.norm(target_pos - agent_pos))
-                if dist_to_target > local_horizon:
-                    direction = (target_pos - agent_pos) / max(dist_to_target, 1e-8)
-                    target_pos = agent_pos + local_horizon * direction
-
-            current_targets[aid] = target_pos.copy()
-
-            self._agents_state[aid] = self._movement.step(
-                agent_state, target_pos, target_theta, SIM.dt
-            )
-
-        self._resolve_agent_obstacle_collisions()
-
-        # ═══════════════════════════════════════════════════════════════
-        # 2. SELECT ACTIVE AGENT + SIDECAR DECISION
-        # ═══════════════════════════════════════════════════════════════
-        sidecar_output = None
-        if self._sidecar is not None:
-            sidecar_output = self._sidecar.decide(
-                agents=self._agents_state,
-                ball=self._ball,
-                opponents=self._opponents_state,
-                game=self._game,
-                active_agent_hint=self._active_agent_id,
-                prefer_single_bridge_fast_path=True,
-                real_agent_count=len(self.agents),
-            )
-            # Sidecar decides active_agent — use it
-            if sidecar_output.active_agent in self._agents_state:
-                self._active_agent_id = sidecar_output.active_agent
-                for aid, agent in self._agents_state.items():
-                    agent.is_active = (aid == self._active_agent_id)
-            elif sidecar_output.active_agent is not None:
-                # Ignore padded / non-trainable teammates as env owners.
-                self._select_active_agent()
-            elif sidecar_output.backend == "real" and self._active_agent_id in self._agents_state:
-                for aid, agent in self._agents_state.items():
-                    agent.is_active = (aid == self._active_agent_id)
-            else:
-                self._select_active_agent()
+        if not self.agents:
+            raise RuntimeError("step() called on terminated environment")
+        action_payload = actions["player_1"]
+        policy_skill_raw = 0.0
+        policy_skill_probs = {name: 0.0 for name in SKILL_ORDER}
+        policy_skill_entropy = 0.0
+        policy_param_std_mean = 0.0
+        policy_residual_x = 0.0
+        policy_residual_y = 0.0
+        policy_residual_theta = 0.0
+        if isinstance(action_payload, dict):
+            policy_skill_raw = float(action_payload.get("policy_skill_raw", action_payload.get("skill_type", 0.0)))
+            policy_skill_entropy = float(action_payload.get("policy_skill_entropy", 0.0))
+            policy_param_std_mean = float(action_payload.get("policy_param_std_mean", 0.0))
+            for name in SKILL_ORDER:
+                policy_skill_probs[name] = float(action_payload.get(f"policy_skill_prob_{name}", 0.0))
+            policy_action = action_from_mapping(action_payload)
         else:
-            self._select_active_agent()
+            raw_action = np.asarray(action_payload, dtype=np.float32).reshape(-1)
+            policy_skill_raw = float(raw_action[0]) if raw_action.size > 0 else 0.0
+            policy_action = action_from_numpy(raw_action)
 
-        # ═══════════════════════════════════════════════════════════════
-        # 3. HANDOFF CHECK + BHUMAN TAKEOVER
-        # ═══════════════════════════════════════════════════════════════
-        takeover_kick = False
-        takeover_kick_proxy = False
-        takeover_progress = False
-        pending_kick_hold = False
-        pending_kick_hold_frames = 0
-        post_kick_release_frames = 0
-        macro_resolved_pre_physics = False
-        sidecar_macro_type = "none"
-        playball_entry = False
-        ready_but_walk = False
-        ready_touch_but_walk = False
-        if sidecar_output is not None:
-            sidecar_macro_type = _effective_sidecar_macro_type(
-                sidecar_output.skill_request,
-                sidecar_output.macro_type,
-                sidecar_output.motion_request,
-            )
-
-        if self._stage.takeover_required:
-            macro = self._handoff_mgr.update(
-                self._agents_state, self._ball, self._game,
-                self._active_agent_id,
-                goal_scored=False, goal_conceded=False,
-                ball_out=False,
-                sidecar_macro_type=sidecar_macro_type,
-            )
-
-            # Track episode-level handoff_ready
-            if macro.handoff_ready:
-                self._episode_handoff_achieved = True
-                self._episode_handoff_ready_frames += 1
-
-            sidecar_playball = sidecar_macro_type in TAKEOVER_MACRO_TYPES
-            if sidecar_playball:
-                self._episode_playball_achieved = True
-            if sidecar_playball and not self._prev_playball_frame:
-                self._episode_playball_entry_count += 1
-                playball_entry = True
-            self._prev_playball_frame = sidecar_playball
-
-            tkready_frame = bool(
-                macro.takeover_active
-                and sidecar_output is not None
-                and sidecar_playball
-                and str(sidecar_output.skill_request or "none") != "walk"
-                and bool(self._active_agent_id)
-            )
-            if tkready_frame:
-                self._tkready_streak += 1
-                self._episode_tkready_frames += 1
-                if self._tkready_streak >= 2:
-                    self._episode_tkready_achieved = True
-            else:
-                self._tkready_streak = 0
-
-            ready_but_walk = (
-                macro.handoff_ready
-                and not sidecar_playball
-                and sidecar_output is not None
-                and sidecar_output.skill_request == "walk"
-            )
-            if ready_but_walk:
-                self._episode_ready_but_walk_frames += 1
-                if self._active_agent_id in self._agents_state:
-                    active_agent = self._agents_state[self._active_agent_id]
-                    touching_ball = (
-                        float(np.linalg.norm(active_agent.pos - self._ball.pos))
-                        <= AGENT.ball_interaction_range
-                    )
-                    if touching_ball:
-                        ready_touch_but_walk = True
-                        self._episode_ready_touch_but_walk_frames += 1
-
-            # Takeover execution depends on mode:
-            if macro.takeover_active and self._active_agent_id:
-                if self._takeover_sim is not None:
-                    # python_stub_smoke_only: use local physics simulator
-                    agent = self._agents_state[self._active_agent_id]
-                    agent, self._ball, takeover_kick = self._takeover_sim.simulate_step(
-                        agent, self._ball, SIM.dt
-                    )
-                    self._agents_state[self._active_agent_id] = agent
-                elif (
-                    sidecar_output is not None
-                    and sidecar_output.backend == "real"
-                    and self._sidecar_physics is not None
-                ):
-                    agent = self._agents_state[self._active_agent_id]
-                    agent, self._ball, takeover_kick, takeover_progress, pending_kick_hold, pending_kick_hold_frames = self._sidecar_physics.apply(
-                        agent, self._ball, sidecar_output, self._agents_state, SIM.dt
-                    )
-                    self._agents_state[self._active_agent_id] = agent
-                    post_kick_release_frames = self._sidecar_physics.post_kick_release_frames(
-                        self._active_agent_id
-                    )
-                    takeover_kick_proxy = self._is_takeover_kick_proxy(
-                        agent,
-                        self._ball,
-                        sidecar_output,
-                        post_kick_release_frames=post_kick_release_frames,
-                        pending_kick_hold=pending_kick_hold,
-                    )
-                    kick_like_macro = str(getattr(sidecar_output, "macro_type", "none") or "none") in {
-                        "playBall_shoot",
-                        "playBall_pass",
-                    }
-                    kick_like_skill = str(getattr(sidecar_output, "skill_request", "none") or "none") in {
-                        "shoot",
-                        "pass",
-                    }
-                    self._ball_collision_skip_agent_id = (
-                        self._active_agent_id
-                        if (
-                            pending_kick_hold
-                            or post_kick_release_frames > 0
-                            or kick_like_macro
-                            or kick_like_skill
-                        )
-                        else None
-                    )
-                    self._update_takeover_progress(
-                        agent,
-                        self._ball,
-                        sidecar_output,
-                        pending_kick_hold=pending_kick_hold,
-                    )
-
-                    if self._has_takeover_execution_evidence(
-                        agent,
-                        self._ball,
-                        sidecar_output,
-                        takeover_kick=takeover_kick,
-                        takeover_kick_proxy=takeover_kick_proxy,
-                        takeover_progress=takeover_progress,
-                        pending_kick_hold=pending_kick_hold,
-                    ):
-                        self._handoff_mgr.force_end("completed", True)
-                        macro_resolved_pre_physics = True
-                else:
-                    # contract_validation_mode keeps semantic evidence only.
-                    pass
-
-        self._resolve_agent_obstacle_collisions()
-
-        # ═══════════════════════════════════════════════════════════════
-        # 4. OPPONENT MOVEMENT
-        # ═══════════════════════════════════════════════════════════════
-        if self._opponents_state:
-            nearest_opp_idx = self._nearest_to_ball_opponent()
-            for i, opp in enumerate(self._opponents_state):
-                self._opponents_state[i] = self._scripted_ai.decide_and_move(
-                    opp, self._ball.pos,
-                    is_nearest_to_ball=(i == nearest_opp_idx),
-                    dt=SIM.dt,
-                )
-            # Opponent kicks if close to ball
-            self._ball = self._handle_opponent_ball_interaction()
-
-        # ═══════════════════════════════════════════════════════════════
-        # 5. BALL PHYSICS
-        # ═══════════════════════════════════════════════════════════════
-        self._ball, ball_out = self._ball_physics.step(self._ball, SIM.dt)
-
-        if ball_out:
-            self._ball_out_this_step = True
-            self._ball = BallState(
-                pos=np.zeros(2, dtype=np.float32),
-                vel=np.zeros(2, dtype=np.float32),
-            )
-
-        # Collision resolution
-        self._ball = self._resolve_ball_collisions()
-        self._ball_collision_skip_agent_id = None
-
-        # ═══════════════════════════════════════════════════════════════
-        # 6. GOAL CHECK
-        # ═══════════════════════════════════════════════════════════════
-        goal_scored = False
-        goal_conceded = False
-        goal_result = self._ball_physics.check_goal(self._ball)
-        if goal_result == "own":
-            self._game.own_score += 1
-            goal_scored = True
-            self._ball = self._spawn_ball(reason="goal_reset")
-        elif goal_result == "opp":
-            self._game.opp_score += 1
-            goal_conceded = True
-            self._ball = self._spawn_ball(reason="goal_reset")
-
-        # ═══════════════════════════════════════════════════════════════
-        # 7. POST-TAKEOVER UPDATE
-        # ═══════════════════════════════════════════════════════════════
-        if self._stage.takeover_required:
-            if macro_resolved_pre_physics:
-                macro = self._handoff_mgr.macro
-            else:
-                macro = self._handoff_mgr.update(
-                    self._agents_state, self._ball, self._game,
-                    self._active_agent_id,
-                    goal_scored=goal_scored, goal_conceded=goal_conceded,
-                    ball_out=self._ball_out_this_step,
-                    sidecar_macro_type=sidecar_macro_type,
-                )
-            self._recover_cleared_macro_success(
-                macro,
-                takeover_kick=takeover_kick,
-                takeover_kick_proxy=takeover_kick_proxy,
-            )
-            # Record takeover events
-            if (
-                macro.macro_end_reason != "none"
-                and macro.macro_success is not None
-                and not macro.event_recorded
-            ):
-                # Capturamos el evento para 1 frame de reward y trace,
-                # y luego limpiamos el estado para evitar "sticky completion".
-                self._macro_end_pulse_reason = macro.macro_end_reason
-                self._macro_end_pulse_success = bool(macro.macro_success)
-
-                self._episode_takeover_count += 1
-                if macro.macro_type in self._episode_takeover_count_by_type:
-                    self._episode_takeover_count_by_type[macro.macro_type] += 1
-                if macro.macro_success:
-                    self._episode_takeover_success += 1
-                    if macro.macro_type in self._episode_takeover_success_by_type:
-                        self._episode_takeover_success_by_type[macro.macro_type] += 1
-                self._takeover_events.append({
-                    "type": macro.macro_type,
-                    "duration": macro.macro_duration_frames,
-                    "end_reason": macro.macro_end_reason,
-                    "success": macro.macro_success,
-                })
-                reason_key = (
-                    macro.macro_end_reason
-                    if macro.macro_end_reason in self._episode_takeover_reason_counts
-                    else "other"
-                )
-                self._episode_takeover_reason_counts[reason_key] += 1
-                self._last_macro_end_reason = macro.macro_end_reason
-                macro.event_recorded = True
-                macro.macro_end_reason = "none"
-                macro.macro_success = None
-
-        # ═══════════════════════════════════════════════════════════════
-        # 8. UPDATE GAME STATE
-        # ═══════════════════════════════════════════════════════════════
-        self._game.step_count += 1
-        self._game.time_elapsed = self._game.step_count * SIM.dt
-
-        # ═══════════════════════════════════════════════════════════════
-        # 9. COMPUTE REWARDS
-        # ═══════════════════════════════════════════════════════════════
-        rewards = self._compute_rewards(
-            goal_scored=goal_scored,
-            goal_conceded=goal_conceded,
-            prev_ball_dists=prev_ball_dists,
-            takeover_kick=(takeover_kick or takeover_kick_proxy),
-            takeover_success_pulse=self._macro_end_pulse_success,
-            macro_end_reason_pulse=self._macro_end_pulse_reason,
-            playball_entry=playball_entry,
-            ready_but_walk=ready_but_walk,
-            ready_touch_but_walk=ready_touch_but_walk,
+        policy_skill_round = max(0, min(int(policy_action.skill_type), len(SKILL_ORDER) - 1))
+        policy_compact_skill_index = policy_skill_round
+        raw_policy_action = StructuredSkillAction(
+            skill_type=policy_skill_round,
+            target_x=policy_action.target_x,
+            target_y=policy_action.target_y,
+            target_theta=policy_action.target_theta,
+            pass_target=policy_action.pass_target,
         )
 
-        # Update tracking
-        self._prev_ball_dists = {
-            aid: float(np.linalg.norm(self._agents_state[aid].pos - self._ball.pos))
-            for aid in self.agents
-        }
-        self._prev_thetas = {aid: self._agents_state[aid].theta for aid in self.agents}
-        self._prev_omegas = {aid: self._agents_state[aid].omega for aid in self.agents}
-        self._curr_targets = current_targets.copy()
-        self._prev_targets = current_targets.copy()
-        self._prev_handoff_ready = self._handoff_mgr.macro.handoff_ready
+        if self._last_backend_obs is None:
+            raise RuntimeError("step() called before reset()")
 
-        # ═══════════════════════════════════════════════════════════════
-        # 10. EPISODE TERMINATION
-        # ═══════════════════════════════════════════════════════════════
-        live_agent_ids = list(self.agents)
-        truncated = self._game.step_count >= self._stage.episode_steps
-        terminated = False
-
-        terminateds = {aid: terminated for aid in self.agents}
-        truncateds = {aid: truncated for aid in self.agents}
-        terminateds["__all__"] = terminated
-        truncateds["__all__"] = truncated
-
-        observations = self._build_observations(agent_ids=live_agent_ids)
-        infos = self._build_infos(
-            goal_scored,
-            goal_conceded,
-            sidecar_output=sidecar_output,
-            agent_ids=live_agent_ids,
-            playball_entry=playball_entry,
-            ready_but_walk=ready_but_walk,
-            ready_touch_but_walk=ready_touch_but_walk,
-            pending_kick_hold=pending_kick_hold,
-            pending_kick_hold_frames=pending_kick_hold_frames,
-            takeover_kick=takeover_kick,
-            takeover_kick_proxy=takeover_kick_proxy,
-            post_kick_release_frames=post_kick_release_frames,
-        )
-
-        if truncated:
-            self.agents = []
-
-        return observations, rewards, terminateds, truncateds, infos
-
-    # ── Active agent selection ─────────────────────────────────────────
-
-    def _select_active_agent(self):
-        """Select the closest upright agent to ball as active."""
-        min_dist = float("inf")
-        best = None
-        for aid, agent in self._agents_state.items():
-            if not agent.is_upright:
-                continue
-            dist = float(np.linalg.norm(agent.pos - self._ball.pos))
-            if dist < min_dist:
-                min_dist = dist
-                best = aid
-
-        self._active_agent_id = best
-        for aid, agent in self._agents_state.items():
-            agent.is_active = (aid == best)
-
-    # ── Spawning ──────────────────────────────────────────────────────
-
-    def _spawn_agents(self, agent_ids):
-        # Use contract-based home poses
-        home_poses = get_home_poses(self._current_tactic, CONTRACT)
-        role_order = ["defenderL", "defenderR", "forwardL", "forwardR"]
-
-        states = {}
-        for i, aid in enumerate(agent_ids):
-            role = role_order[i] if i < len(role_order) else role_order[0]
-            home = home_poses.get(role, (0.0, 0.0))
-            noise = self._rng.uniform(-150, 150, size=2)
-            pos = np.array([home[0], home[1]], dtype=np.float32) + noise
-
-            states[aid] = AgentState(
-                agent_id=aid,
-                pos=pos,
-                theta=0.0,
-                vel=np.zeros(2),
-                omega=0.0,
-                role=role,
-                walk_target=pos.copy(),
-            )
-        return states
-
-    def _spawn_opponents(self, num_opponents):
-        opponents = []
-        base_positions = [
-            np.array([500.0, 400.0]),
-            np.array([500.0, -400.0]),
-            np.array([1500.0, 600.0]),
-            np.array([1500.0, -600.0]),
-        ]
-        for i in range(min(num_opponents, len(base_positions))):
-            home = base_positions[i]
-            noise = self._rng.uniform(-200, 200, size=2)
-            opponents.append(OpponentState(
-                opp_id=f"opp_{i}",
-                pos=home + noise,
-                theta=math.pi,
-                vel=np.zeros(2),
-                home_pos=home.copy(),
-            ))
-        return opponents
-
-    def _spawn_ball(self, reason: str = "reset"):
-        if not getattr(self, "_agents_state", None):
-            return BallState(pos=np.zeros(2, dtype=np.float32), vel=np.zeros(2, dtype=np.float32))
-
-        ref_aid = self._active_agent_id if self._active_agent_id in self._agents_state else None
-        if ref_aid is None:
-            ref_aid = self.agents[0] if self.agents else next(iter(self._agents_state.keys()))
-        ref_agent = self._agents_state[ref_aid]
-
-        if reason == "goal_reset":
-            min_goal_reset_dist = max(900.0, 0.28 * FIELD.diagonal)
-            for _ in range(200):
-                pos = np.array(
-                    [
-                        float(self._rng.uniform(-0.18 * FIELD.x_opponent_ground, 0.22 * FIELD.x_opponent_ground)),
-                        float(self._rng.uniform(-0.42 * FIELD.y_left_sideline, 0.42 * FIELD.y_left_sideline)),
-                    ],
-                    dtype=np.float32,
-                )
-                pos[0] = float(np.clip(pos[0], FIELD.x_own_ground + 350.0, FIELD.x_opponent_ground - 350.0))
-                pos[1] = float(np.clip(pos[1], FIELD.y_right_sideline + 350.0, FIELD.y_left_sideline - 350.0))
-                if float(np.linalg.norm(pos - ref_agent.pos)) >= min_goal_reset_dist:
-                    return BallState(pos=pos.astype(np.float32), vel=np.zeros(2, dtype=np.float32))
-
-        max_dist = getattr(self._stage, "ball_max_dist", -1.0)
-        if max_dist <= 0.0:
-            max_dist = FIELD.diagonal * 0.5
-
-        front_only = getattr(self._stage, "spawn_ball_in_front", False)
-        half_angle_deg = getattr(self._stage, "spawn_front_angle_deg", 180.0)
-
-        for _ in range(200):
-            r = float(self._rng.uniform(150.0, max_dist))
-            if front_only:
-                rel = math.radians(float(self._rng.uniform(-half_angle_deg, half_angle_deg)))
-                ang = ref_agent.theta + rel
-            else:
-                ang = float(self._rng.uniform(-math.pi, math.pi))
-
-            pos = ref_agent.pos + r * np.array([math.cos(ang), math.sin(ang)], dtype=np.float32)
-            pos[0] = np.clip(pos[0], FIELD.x_own_ground + 200.0, FIELD.x_opponent_ground - 200.0)
-            pos[1] = np.clip(pos[1], FIELD.y_right_sideline + 200.0, FIELD.y_left_sideline - 200.0)
-
-            if np.linalg.norm(pos - ref_agent.pos) <= max_dist + 1e-6:
-                return BallState(pos=pos.astype(np.float32), vel=np.zeros(2, dtype=np.float32))
-
-        return BallState(pos=np.zeros(2, dtype=np.float32), vel=np.zeros(2, dtype=np.float32))
-
-    def _spawn_static_obstacles(self) -> List[StaticObstacle]:
-        if self._stage.num_static_obstacles <= 0 or not self._agents_state:
-            return []
-
-        if self._active_agent_id and self._active_agent_id in self._agents_state:
-            ref_agent = self._agents_state[self._active_agent_id]
-        else:
-            ref_agent = next(iter(self._agents_state.values()))
-
-        diff = self._ball.pos - ref_agent.pos
-        dist = float(np.linalg.norm(diff))
-        if dist < 600.0:
-            return []
-
-        direction = diff / max(dist, 1e-6)
-        lateral = np.array([-direction[1], direction[0]], dtype=np.float32)
-        obstacles: List[StaticObstacle] = []
-        fractions = np.linspace(0.42, 0.68, self._stage.num_static_obstacles)
-
-        for idx, fraction in enumerate(fractions):
-            base = ref_agent.pos + direction * dist * float(fraction)
-            lateral_mag = float(self._rng.uniform(
-                OBSTACLE.path_offset_min,
-                OBSTACLE.path_offset_max,
-            ))
-            lateral_sign = 1.0 if idx % 2 == 0 else -1.0
-            pos = base + lateral * lateral_sign * lateral_mag
-            pos[0] = float(np.clip(
-                pos[0],
-                FIELD.x_own_ground + OBSTACLE.spawn_margin,
-                FIELD.x_opponent_ground - OBSTACLE.spawn_margin,
-            ))
-            pos[1] = float(np.clip(
-                pos[1],
-                FIELD.y_right_sideline + OBSTACLE.spawn_margin,
-                FIELD.y_left_sideline - OBSTACLE.spawn_margin,
-            ))
-
-            if (
-                np.linalg.norm(pos - ref_agent.pos) < 550.0
-                or np.linalg.norm(pos - self._ball.pos) < 450.0
-            ):
-                continue
-
-            obstacles.append(StaticObstacle(
-                obstacle_id=f"static_obs_{idx}",
-                pos=pos.astype(np.float32),
-                radius=OBSTACLE.radius,
-            ))
-
-        return obstacles
-
-    def _resolve_agent_obstacle_collisions(self):
-        if not self._static_obstacles:
-            return
-
-        for aid, agent in self._agents_state.items():
-            corrected = agent
-            for obstacle in self._static_obstacles:
-                diff = corrected.pos - obstacle.pos
-                dist = float(np.linalg.norm(diff))
-                min_sep = AGENT.radius + obstacle.radius
-                if dist < min_sep:
-                    if dist <= 1e-6:
-                        push_dir = np.array(
-                            [math.cos(corrected.theta), math.sin(corrected.theta)],
-                            dtype=np.float32,
-                        )
-                    else:
-                        push_dir = diff / dist
-                    new_pos = obstacle.pos + push_dir * (min_sep + 5.0)
-                    new_pos[0] = float(np.clip(
-                        new_pos[0],
-                        FIELD.x_own_ground - 500.0,
-                        FIELD.x_opponent_ground + 500.0,
-                    ))
-                    new_pos[1] = float(np.clip(
-                        new_pos[1],
-                        FIELD.y_right_sideline - 500.0,
-                        FIELD.y_left_sideline + 500.0,
-                    ))
-                    corrected = AgentState(
-                        agent_id=corrected.agent_id,
-                        pos=new_pos.astype(np.float32),
-                        theta=corrected.theta,
-                        vel=np.zeros(2, dtype=np.float32),
-                        omega=corrected.omega,
-                        role=corrected.role,
-                        is_upright=corrected.is_upright,
-                        recovery_steps=corrected.recovery_steps,
-                        battery=corrected.battery,
-                        walk_target=corrected.walk_target.copy(),
-                        speed_scalar=0.0,
-                        is_active=corrected.is_active,
-                    )
-            self._agents_state[aid] = corrected
-
-    def _guided_ball_target(self, agent: AgentState) -> np.ndarray:
-        # Guide the agent to a body pose *behind the ball toward the opponent
-        # goal*, not just behind the ball along the current chase line. This
-        # makes the fallback behavior more offensive and reduces the incentive
-        # to push the ball out of bounds to force a center reset.
-        goal_center = np.array([FIELD.x_opponent_ground, 0.0], dtype=np.float32)
-        goal_vec = goal_center - self._ball.pos
-        # Pull slightly toward midfield near the sidelines so the preferred
-        # approach lane stays in-bounds instead of hugging the line.
-        sideline_bias = float(np.clip(-0.22 * self._ball.pos[1], -450.0, 450.0))
-        goal_vec[1] += sideline_bias
-        goal_dist = float(np.linalg.norm(goal_vec))
-        if goal_dist > 1e-6:
-            approach_dir = goal_vec / goal_dist
-        else:
-            ball_vec = self._ball.pos - agent.pos
-            dist_to_ball = float(np.linalg.norm(ball_vec))
-            if dist_to_ball > 1e-6:
-                approach_dir = ball_vec / dist_to_ball
-            else:
-                approach_dir = np.array(
-                    [math.cos(agent.theta), math.sin(agent.theta)],
-                    dtype=np.float32,
-                )
-
-        desired_rel_x = float(getattr(
-            self._stage,
-            "handoff_target_rel_x_mm",
-            0.5 * (
-                float(self._handoff_mgr._handoff_cfg.ball_rel_x_min)
-                + float(self._handoff_mgr._handoff_cfg.ball_rel_x_max)
-            ),
-        ))
-        target = (
-            self._ball.pos - approach_dir.astype(np.float32) * desired_rel_x
-        ).astype(np.float32)
-        target[0] = float(np.clip(
-            target[0],
-            FIELD.x_own_ground + 300.0,
-            FIELD.x_opponent_ground - 300.0,
-        ))
-        target[1] = float(np.clip(
-            target[1],
-            FIELD.y_right_sideline + 300.0,
-            FIELD.y_left_sideline - 300.0,
-        ))
-        return target
-
-    # ── Action decoding ───────────────────────────────────────────────
-
-    def _decode_action(self, action, agent, agent_id=""):
-        max_disp = getattr(self._stage, 'local_horizon', ACTION.max_displacement_mm)
-        if max_disp <= 0.0:
-            max_disp = ACTION.max_displacement_mm
-
-        dx_mm = float(action[0]) * max_disp
-        dy_mm = float(action[1]) * max_disp
-        target_pos = agent.pos + np.array([dx_mm, dy_mm], dtype=np.float32)
-
-        target_pos[0] = float(np.clip(target_pos[0],
-                              FIELD.x_own_ground + 300.0, FIELD.x_opponent_ground - 300.0))
-        target_pos[1] = float(np.clip(target_pos[1],
-                              FIELD.y_right_sideline + 300.0, FIELD.y_left_sideline - 300.0))
-
-        target_alpha = float(getattr(self._stage, "target_pos_alpha", 1.0))
-        if agent_id and 0.0 < target_alpha < 1.0:
-            prev_target = self._prev_targets.get(agent_id, agent.pos.copy())
-            target_pos = (
-                target_alpha * target_pos
-                + (1.0 - target_alpha) * np.asarray(prev_target, dtype=np.float32)
-            ).astype(np.float32)
-            target_pos[0] = float(np.clip(
-                target_pos[0],
-                FIELD.x_own_ground + 300.0,
-                FIELD.x_opponent_ground - 300.0,
-            ))
-            target_pos[1] = float(np.clip(
-                target_pos[1],
-                FIELD.y_right_sideline + 300.0,
-                FIELD.y_left_sideline - 300.0,
-            ))
-
+        # v4.5 off-ball coordination residual (inference-only, env-gated). Commit the off-ball
+        # support to walk to its triangle slot when far, with hysteresis, then release to the
+        # policy once inside so it can settle/hold. Forcing `walk` with zero residual makes the
+        # role-aware decoder land the walk target exactly on the coordination target (triangle_ema).
         if (
-            self._stage.takeover_required
-            and agent_id
-            and agent_id == self._active_agent_id
+            OFFBALL_COORD
+            and self._team_role == "off_ball_support"
+            and self._team_coordination_target is not None
         ):
-            guided_target = self._guided_ball_target(agent)
-            dist_to_ball = float(np.linalg.norm(self._ball.pos - agent.pos))
-            chase_blend = float(getattr(self._stage, "ball_chase_blend", 0.0))
-            pose_blend = float(getattr(self._stage, "handoff_pose_blend", 0.0))
-            near_ball = dist_to_ball <= AGENT.ball_interaction_range * 1.15
-            guidance_blend = pose_blend if near_ball else chase_blend
-            if guidance_blend > 0.0:
-                target_pos = (
-                    guidance_blend * guided_target
-                    + (1.0 - guidance_blend) * target_pos
-                ).astype(np.float32)
-
-            max_ball_radius = float(
-                getattr(self._stage, "ball_target_max_radius_mm", 0.0)
+            if not hasattr(self, "_offball_coord_active"):
+                self._offball_coord_active = False
+            _tx, _ty = self._team_coordination_target
+            _dist = math.hypot(
+                float(self._last_backend_obs.robot_x) - _tx,
+                float(self._last_backend_obs.robot_y) - _ty,
             )
-            if max_ball_radius > 0.0:
-                target_offset = target_pos - self._ball.pos
-                offset_norm = float(np.linalg.norm(target_offset))
-                if offset_norm > max_ball_radius and offset_norm > 1e-6:
-                    target_pos = (
-                        self._ball.pos
-                        + target_offset * (max_ball_radius / offset_norm)
-                    ).astype(np.float32)
+            if _dist >= OFFBALL_COORD_ENTER_MM:
+                self._offball_coord_active = True
+            elif _dist <= OFFBALL_COORD_EXIT_MM:
+                self._offball_coord_active = False
+            if self._offball_coord_active:
+                raw_policy_action = StructuredSkillAction(
+                    skill_type=SkillType.from_public_name("walk"),
+                    target_x=0.0,
+                    target_y=0.0,
+                    target_theta=0.0,
+                    pass_target=raw_policy_action.pass_target,
+                )
 
-            target_pos[0] = float(np.clip(
-                target_pos[0],
-                FIELD.x_own_ground + 300.0,
-                FIELD.x_opponent_ground - 300.0,
-            ))
-            target_pos[1] = float(np.clip(
-                target_pos[1],
-                FIELD.y_right_sideline + 300.0,
-                FIELD.y_left_sideline - 300.0,
-            ))
+        policy_residual_x = float(np.clip(raw_policy_action.target_x, -1.0, 1.0))
+        policy_residual_y = float(np.clip(raw_policy_action.target_y, -1.0, 1.0))
+        policy_residual_theta = float(np.clip(raw_policy_action.target_theta, -1.0, 1.0))
+        policy_action = self._decode_residual_policy_action(raw_policy_action, obs=self._last_backend_obs)
 
-        if self._stage.theta_free:
-            target_theta = float(action[2]) * ACTION.theta_range
+        handoff_override_applied = False
+        target_repair_applied = False
+        target_repair_reason = ""
+        action_for_execution = policy_action
+        if (
+            self.cfg.enable_handoff_override
+            and policy_action.skill_name == "walk"
+            and self._should_force_dribble_handoff(self._last_backend_obs)
+        ):
+            handoff_override_applied = True
+            fallback_targets = build_fallback_action_targets("dribble", self._last_backend_obs)
+            action_for_execution = StructuredSkillAction(
+                skill_type=SkillType.from_public_name("dribble"),
+                target_x=fallback_targets["target_x"],
+                target_y=fallback_targets["target_y"],
+                target_theta=fallback_targets["target_theta"],
+                pass_target=policy_action.pass_target,
+            )
         else:
-            # Face-ball with hysteresis. Once the robot is in a valid handoff
-            # pose, keep the heading stable instead of chasing tiny ball-angle
-            # fluctuations frame to frame.
-            bdx = self._ball.pos[0] - agent.pos[0]
-            bdy = self._ball.pos[1] - agent.pos[1]
-            dist_to_ball = math.hypot(bdx, bdy)
-            raw_theta = math.atan2(bdy, bdx)
-            prev_face = self._prev_face_thetas.get(agent_id, agent.theta)
-            diff = math.atan2(math.sin(raw_theta - prev_face), math.cos(raw_theta - prev_face))
-            in_handoff_pose = self._handoff_mgr.compute_handoff_ready(agent, self._ball, self._game)
-            face_hold_dist = AGENT.ball_interaction_range * float(
-                getattr(self._stage, "face_hold_dist_ratio", 0.70)
+            action_for_execution, target_repair_applied, target_repair_reason = self._repair_execution_targets(
+                policy_action,
+                obs=self._last_backend_obs,
             )
-            angle_deadband = math.radians(float(
-                getattr(self._stage, "face_theta_deadband_deg", 6.0)
-            ))
-            face_alpha = float(getattr(self._stage, "face_theta_alpha", 0.18))
+        policy_target_error_mm, policy_theta_error_rad = self._policy_anchor_errors(
+            policy_action,
+            obs=self._last_backend_obs,
+        )
 
-            if (
-                dist_to_ball < face_hold_dist
-                or in_handoff_pose
-                or abs(diff) < angle_deadband
-            ):
-                target_theta = prev_face
-            else:
-                target_theta = _normalize_angle(prev_face + face_alpha * diff)
+        executed_action, projection_applied = self.project_action(action_for_execution, obs=self._last_backend_obs)
+        if _STEP_PROFILE:
+            _t0 = time.perf_counter()
+        obs = self.backend.step(executed_action)
+        if _STEP_PROFILE:
+            _t1 = time.perf_counter()
+        self._episode_step += 1
 
-            if agent_id:
-                self._prev_face_thetas[agent_id] = target_theta
+        dynamic_update_applied = False
+        world_update = get_dynamic_world_update(
+            self._episode_stage_id,
+            self._episode_step,
+            robot_x=obs.robot_x,
+            robot_y=obs.robot_y,
+            ball_x=obs.ball_x,
+            ball_y=obs.ball_y,
+            dynamic_state=self._dynamic_world_state,
+        )
+        if world_update:
+            obs = self.backend.set_dynamic_world(**world_update)
+            dynamic_update_applied = True
 
-        return target_pos, target_theta
+        scored = goal_scored(obs.ball_x, obs.ball_y)
+        collision = self._derive_collision(obs)
+        fallen_stuck = self._update_fallen_stuck_counter(obs)
+        timeout = (not scored) and (
+            self._episode_step >= self.cfg.max_episode_steps
+            or fallen_stuck
+        )
+        corridor_open = self._derive_corridor_open(obs)
+        prev_skill_name = self._skill_history[-1] if self._skill_history else None
+        skill_history = tuple((*self._skill_history, executed_action.skill_name))
 
-    # ── Ball interactions ─────────────────────────────────────────────
+        # Takeover commitment latch: once a stable trusted takeover has occurred,
+        # keep treating the robot as committed for a short grace window as long as
+        # the ball stays geometrically in front, so a brief perception-trust
+        # dropout does not flip the dribble reward sign (see reward.evaluate_step).
+        takeover_committed = bool(
+            self._trusted_takeover_grace > 0
+            and is_geometric_takeover(features_from_obs(obs))
+        )
+        finishing_active = bool(
+            self.cfg.post_takeover_progress_enabled
+            and self._post_takeover_finishing_steps > 0
+        )
 
-    def _handle_opponent_ball_interaction(self):
-        """Opponents kick ball if close enough."""
-        ball = self._ball
-        for opp in self._opponents_state:
-            dist = float(np.linalg.norm(opp.pos - ball.pos))
-            if dist < AGENT.ball_interaction_range * 0.7 and opp.is_upright:
-                kick_theta = math.atan2(-opp.pos[1], FIELD.x_own_ground - opp.pos[0])
-                kick_dir = np.array([math.cos(kick_theta), math.sin(kick_theta)])
-                ball = BallState(
-                    pos=opp.pos + kick_dir * (AGENT.min_robot_distance + 50),
-                    vel=kick_dir * CONTRACT.kick_info.ball_velocity_max,
-                    last_touched_by=None,
-                )
-                break
-        return ball
-
-    def _resolve_ball_collisions(self):
-        ball = self._ball
-        min_sep = AGENT.radius + BALL.radius  # 200 + 100 = 300mm
-
-        for aid, agent in self._agents_state.items():
-            if not agent.is_upright:
-                continue
-            if aid == self._ball_collision_skip_agent_id:
-                continue
-            diff = ball.pos - agent.pos
-            dist = float(np.linalg.norm(diff))
-            if dist < min_sep and dist > 1e-6:
-                push_dir = diff / dist
-                ball = BallState(
-                    pos=ball.pos + push_dir * (min_sep - dist + 5.0),
-                    vel=ball.vel.copy(),
-                    last_touched_by=ball.last_touched_by,
-                )
-            elif dist <= 1e-6:
-                push_dir = np.array([math.cos(agent.theta), math.sin(agent.theta)])
-                ball = BallState(
-                    pos=agent.pos + push_dir * (min_sep + 5.0),
-                    vel=ball.vel.copy(),
-                    last_touched_by=ball.last_touched_by,
-                )
-
-        for opp in self._opponents_state:
-            if not opp.is_upright:
-                continue
-            diff = ball.pos - opp.pos
-            dist = float(np.linalg.norm(diff))
-            if dist < min_sep and dist > 1e-6:
-                push_dir = diff / dist
-                ball = BallState(
-                    pos=ball.pos + push_dir * (min_sep - dist + 5.0),
-                    vel=ball.vel.copy(),
-                    last_touched_by=ball.last_touched_by,
-                )
-
-        for obstacle in self._static_obstacles:
-            diff = ball.pos - obstacle.pos
-            dist = float(np.linalg.norm(diff))
-            min_sep = obstacle.radius + BALL.radius
-            if dist < min_sep:
-                if dist <= 1e-6:
-                    push_dir = np.array([1.0, 0.0], dtype=np.float32)
-                else:
-                    push_dir = diff / dist
-                reflected = ball.vel - 2.0 * np.dot(ball.vel, push_dir) * push_dir
-                ball = BallState(
-                    pos=obstacle.pos + push_dir * (min_sep + 5.0),
-                    vel=0.35 * reflected,
-                    last_touched_by=ball.last_touched_by,
-                    seen_age_ms=ball.seen_age_ms,
-                )
-
-        return ball
-
-    def _nearest_to_ball_opponent(self):
-        if not self._opponents_state:
-            return -1
-        dists = [np.linalg.norm(opp.pos - self._ball.pos) for opp in self._opponents_state]
-        return int(np.argmin(dists))
-
-    # ── Observations ──────────────────────────────────────────────────
-
-    def _build_observations(self, agent_ids=None):
-        observations = {}
-        all_agents = list(self._agents_state.values())
-        if agent_ids is None:
-            agent_ids = self.agents
-
-        for aid in agent_ids:
-            agent = self._agents_state[aid]
-            visible_opps = self._get_visible_obstacle_aware_entities(aid, agent)
-            obs = self._obs_builder.build(
-                agent, all_agents, self._ball,
-                visible_opps, self._game, self._current_tactic
+        step_ctx = StepContext(
+            stage=self._episode_stage_id,
+            episode_step=self._episode_step,
+            max_episode_steps=self.cfg.max_episode_steps,
+            prev_obs=self._last_backend_obs,
+            obs=obs,
+            skill_name=executed_action.skill_name,
+            policy_skill_name=policy_action.skill_name,
+            projection_applied=projection_applied,
+            prev_skill_name=prev_skill_name,
+            skill_history=skill_history,
+            goal_scored=scored,
+            timeout=timeout,
+            collision=collision,
+            corridor_open=corridor_open,
+            first_to_ball=False,
+            bad_duel=False,
+            policy_skill_raw=policy_skill_raw,
+            policy_skill_prob_walk=float(policy_skill_probs.get("walk", 0.0)),
+            policy_skill_prob_dribble=float(policy_skill_probs.get("dribble", 0.0)),
+            policy_skill_prob_shoot=float(policy_skill_probs.get("shoot", 0.0)),
+            handoff_override_applied=handoff_override_applied,
+            takeover_committed=takeover_committed,
+            post_takeover_finishing_active=finishing_active,
+        )
+        evaluation = evaluate_step(step_ctx, self._episode_stage_spec.reward_weights)
+        evaluation = self._augment_stage8_defense_reward(evaluation, step_ctx)
+        if evaluation.stable_trusted_takeover:
+            self._trusted_takeover_grace = TAKEOVER_GRACE_STEPS
+            self._post_takeover_finishing_steps = max(
+                self._post_takeover_finishing_steps,
+                int(self.cfg.post_takeover_progress_window_steps),
             )
-            if not np.all(np.isfinite(obs)):
-                obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
-            observations[aid] = obs
-        return observations
-
-    def _get_visible_obstacle_aware_entities(self, agent_id: str, agent: AgentState):
-        visible_entities = self._fov_filter.get_visible_opponents(
-            agent_id, agent.pos, agent.theta, self._opponents_state
-        )
-
-        for obstacle in self._static_obstacles:
-            if not self._use_fov or self._fov_filter._is_in_fov(agent.pos, agent.theta, obstacle.pos):
-                visible_entities.append(obstacle)
-
-        def _entity_dist(entity):
-            return float(np.linalg.norm(entity.pos - agent.pos))
-
-        visible_entities.sort(key=_entity_dist)
-        return visible_entities[:OBS.opp_slots]
-
-    # ── Rewards ────────────────────────────────────────────────────────
-
-    def _compute_rewards(self, goal_scored, goal_conceded,
-                         prev_ball_dists, takeover_kick=False,
-                         takeover_success_pulse=None,
-                         macro_end_reason_pulse="none",
-                         playball_entry=False,
-                         ready_but_walk=False,
-                         ready_touch_but_walk=False):
-        from reward import (
-            AgentRewardInfo, TeamRewardInfo,
-            compute_reward, compute_per_agent_reward,
-        )
-
-        agents_list = [
-            AgentRewardInfo(
-                pos=self._agents_state[aid].pos,
-                theta=self._agents_state[aid].theta,
-                is_upright=self._agents_state[aid].is_upright,
-                role=self._agents_state[aid].role,
-                prev_ball_dist=prev_ball_dists.get(aid, 0.0),
-                prev_theta=self._prev_thetas.get(aid, self._agents_state[aid].theta),
-                ball_in_fov=self._is_ball_in_fov(aid),
-                prev_omega=self._prev_omegas.get(aid, 0.0),
-                is_active=self._agents_state[aid].is_active,
-            )
-            for aid in self.agents
-        ]
-
-        macro = self._handoff_mgr.macro
-
-        team_info = TeamRewardInfo(
-            agents=agents_list,
-            ball_pos=self._ball.pos,
-            ball_vel=self._ball.vel,
-            prev_ball_pos=self._prev_ball_pos,
-            prev_ball_speed=self._prev_ball_speed,
-            own_score=self._game.own_score,
-            opp_score=self._game.opp_score,
-            goal_scored=goal_scored,
-            goal_conceded=goal_conceded,
-            opp_positions=[opp.pos for opp in self._opponents_state],
-            ball_out_of_bounds=self._ball_out_this_step,
-            # BHuman contract fields
-            handoff_ready=macro.handoff_ready,
-            prev_handoff_ready=self._prev_handoff_ready,
-            takeover_active=macro.takeover_active,
-            takeover_success=takeover_success_pulse,
-            takeover_kick=takeover_kick,
-            playball_entry=playball_entry,
-            ready_but_walk=ready_but_walk,
-            ready_touch_but_walk=ready_touch_but_walk,
-            macro_duration_frames=macro.macro_duration_frames,
-            macro_end_reason=str(macro_end_reason_pulse or "none"),
-            # Backend provenance for reward gating
-            sidecar_backend=(
-                self._sidecar.backend_label if self._sidecar is not None
-                else "python_stub"
-            ),
-        )
-
-        team_components = compute_reward(
-            team_info,
-            self._stage.shaping_weight,
-            approach_weight=self._stage.shaping_approach_w,
-            takeover_weight=self._stage.shaping_takeover_w,
-            support_weight=self._stage.shaping_support_w,
-        )
-
-        rewards = {}
-        for i, aid in enumerate(self.agents):
-            r = compute_per_agent_reward(
-                team_components, agents_list[i],
-                self._ball.pos, self._stage.shaping_weight,
-                handoff_ready=macro.handoff_ready,
-                takeover_active=macro.takeover_active,
-            )
-            if not math.isfinite(r):
-                r = 0.0
-            rewards[aid] = r
-        return rewards
-
-    def _is_takeover_kick_proxy(self,
-                                agent: AgentState,
-                                ball: BallState,
-                                sidecar_output: Any,
-                                *,
-                                post_kick_release_frames: int,
-                                pending_kick_hold: bool) -> bool:
-        if sidecar_output is None:
-            return False
-        effective_macro_type = _effective_sidecar_macro_type(
-            getattr(sidecar_output, "skill_request", "none"),
-            getattr(sidecar_output, "macro_type", "none"),
-            getattr(sidecar_output, "motion_request", "none"),
-        )
-        if effective_macro_type not in {"playBall_shoot", "playBall_pass"}:
-            return False
-        release_limit = 5
-        if self._sidecar_physics is not None:
-            release_limit = int(getattr(self._sidecar_physics, "_post_kick_release_limit", release_limit) or release_limit)
-        # Proxy evidence should only be accepted right after a kick-like
-        # release, not throughout the entire release tail.
-        if pending_kick_hold or post_kick_release_frames < max(1, release_limit - 1):
-            return False
-
-        ball_speed = float(np.linalg.norm(ball.vel))
-        expected_speed = float(CONTRACT.kick_info.ball_velocity_max)
-        if self._sidecar_physics is not None:
-            expected_speed = float(self._sidecar_physics._kick_speed(sidecar_output))
-        min_speed = max(
-            320.0,
-            float(CONTRACT.kick_info.ball_velocity_max) * 0.18,
-            expected_speed * 0.42,
-        )
-        if ball_speed < min_speed:
-            return False
-
-        release_distance = AGENT.radius + BALL.radius + 24.0
-        if float(np.linalg.norm(ball.pos - agent.pos)) <= release_distance:
-            return False
-
-        away_dir = ball.pos - agent.pos
-        away_norm = float(np.linalg.norm(away_dir))
-        if away_norm <= 1e-6:
-            return False
-        if float(np.dot(ball.vel / max(ball_speed, 1e-6), away_dir / away_norm)) < 0.4:
-            return False
-
-        ball_target = None
-        if self._sidecar_physics is not None:
-            ball_target = self._sidecar_physics._resolve_playball_ball_target(
-                agent, ball, sidecar_output
-            )
-        if ball_target is not None:
-            delta = ball_target - ball.pos
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                target_dir = delta / norm
-                ball_dir = ball.vel / max(ball_speed, 1e-6)
-                if float(np.dot(ball_dir, target_dir)) < 0.62:
-                    return False
-
-        return True
-
-    def _update_takeover_progress(self,
-                                  agent: AgentState,
-                                  ball: BallState,
-                                  sidecar_output: Any,
-                                  *,
-                                  pending_kick_hold: bool) -> None:
-        macro = self._handoff_mgr.macro
-        if sidecar_output is None or not macro.macro_active:
-            return
-
-        ball_pos = ball.pos.astype(np.float32, copy=True)
-        if macro.takeover_start_ball_pos is None:
-            macro.takeover_start_ball_pos = ball_pos.copy()
-        if macro.takeover_last_ball_pos is None:
-            macro.takeover_last_ball_pos = ball_pos.copy()
-
-        macro_type = str(getattr(sidecar_output, "macro_type", "none") or "none")
-        skill_request = str(getattr(sidecar_output, "skill_request", "none") or "none")
-        motion_request = str(getattr(sidecar_output, "motion_request", "none") or "none")
-        effective_macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            macro_type,
-            motion_request,
-        )
-
-        control_distance = AGENT.radius + BALL.radius + 55.0
-        ball_controlled = float(np.linalg.norm(agent.pos - ball.pos)) <= control_distance
-        if ball_controlled and not pending_kick_hold:
-            macro.takeover_control_frames += 1
         else:
-            macro.takeover_control_frames = 0
+            self._trusted_takeover_grace = max(0, self._trusted_takeover_grace - 1)
+            self._post_takeover_finishing_steps = max(0, self._post_takeover_finishing_steps - 1)
+        if _STEP_PROFILE:
+            _t2 = time.perf_counter()
+        self._gate_decision = self._skill_gate.step(obs)
+        if self._team_hook is not None:
+            obs, self._gate_decision = self._team_hook(self, obs, self._gate_decision)
+        encoded = self._encode_obs(obs)
+        if _STEP_PROFILE:
+            _t3 = time.perf_counter()
+        self._update_episode_tracker(
+            step_ctx,
+            evaluation,
+            projection_applied,
+            dynamic_update_applied,
+            target_repair_applied=target_repair_applied,
+            target_repair_reason=target_repair_reason,
+            policy_target_error_mm=policy_target_error_mm,
+            policy_theta_error_rad=policy_theta_error_rad,
+            policy_skill_entropy=policy_skill_entropy,
+            policy_param_std_mean=policy_param_std_mean,
+        )
 
-        step_delta = ball_pos - macro.takeover_last_ball_pos
-        step_progress_mm = float(np.linalg.norm(step_delta))
-        total_delta = ball_pos - macro.takeover_start_ball_pos
-        total_progress_mm = float(np.linalg.norm(total_delta))
+        self._last_obs = encoded
+        self._last_backend_obs = obs
+        self._last_evaluation = evaluation
+        self._skill_history.append(executed_action.skill_name)
 
-        total_along_target_mm = 0.0
-        target = None
-        if self._sidecar_physics is not None:
-            target = self._sidecar_physics._resolve_playball_ball_target(
-                agent, ball, sidecar_output
-            )
-        if target is not None:
-            target_delta = target - macro.takeover_start_ball_pos
-            target_norm = float(np.linalg.norm(target_delta))
-            if target_norm > 1e-6:
-                target_dir = target_delta / target_norm
-                total_along_target_mm = float(np.dot(total_delta, target_dir))
-                step_along_target_mm = float(np.dot(step_delta, target_dir))
-            else:
-                step_along_target_mm = 0.0
+        prestage_takeover_done = (
+            self._episode_stage_id < 0
+            and evaluation.takeover_envelope
+            and evaluation.prev_takeover_envelope
+        )
+        done = scored or timeout or prestage_takeover_done
+        info = self._build_info(
+            obs=obs,
+            policy_action=policy_action,
+            executed_action=executed_action,
+            evaluation=evaluation,
+            projection_applied=projection_applied,
+            dynamic_update_applied=dynamic_update_applied,
+            policy_skill_raw=policy_skill_raw,
+            policy_skill_round=policy_skill_round,
+            policy_compact_skill_index=policy_compact_skill_index,
+            policy_skill_probs=policy_skill_probs,
+            policy_skill_entropy=policy_skill_entropy,
+            policy_param_std_mean=policy_param_std_mean,
+            policy_residual_x=policy_residual_x,
+            policy_residual_y=policy_residual_y,
+            policy_residual_theta=policy_residual_theta,
+            policy_target_error_mm=policy_target_error_mm,
+            policy_theta_error_rad=policy_theta_error_rad,
+            handoff_override_applied=handoff_override_applied,
+            target_repair_applied=target_repair_applied,
+            target_repair_reason=target_repair_reason,
+            fallen_stuck=fallen_stuck,
+            done=done,
+        )
+
+        if _STEP_PROFILE:
+            _t4 = time.perf_counter()
+            self._prof_acc["backend_ms"] += (_t1 - _t0) * 1e3
+            self._prof_acc["reward_ms"] += (_t2 - _t1) * 1e3
+            self._prof_acc["encode_ms"] += (_t3 - _t2) * 1e3
+            self._prof_acc["other_ms"] += (_t4 - _t3) * 1e3
+            self._prof_count += 1
+            if self._prof_count >= _PROFILE_INTERVAL:
+                n = self._prof_count
+                total = sum(self._prof_acc.values())
+                player = getattr(self.cfg.backend, "player_number", "?")
+                print(
+                    f"[step_prof p={player} n={n}] "
+                    f"backend={self._prof_acc['backend_ms']/n:.1f}ms "
+                    f"reward={self._prof_acc['reward_ms']/n:.2f}ms "
+                    f"encode={self._prof_acc['encode_ms']/n:.2f}ms "
+                    f"other={self._prof_acc['other_ms']/n:.2f}ms "
+                    f"step_total={total/n:.1f}ms "
+                    f"step_rate={1e3*n/total:.1f}/s",
+                    flush=True,
+                )
+                self._prof_acc = defaultdict(float)
+                self._prof_count = 0
+
+        rewards = {"player_1": float(evaluation.total_reward)}
+        terminations = {"player_1": done}
+        truncations = {"player_1": False}
+        if done:
+            self._episode_tracker["fallen_stuck_episode"] = bool(fallen_stuck)
+            info["episode_metrics"] = self._finalize_episode_metrics()
+            self.agents = []
+        return {"player_1": encoded}, rewards, terminations, truncations, {"player_1": info}
+
+    def _policy_anchor_errors(self, policy_action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[float, float]:
+        if policy_action.skill_name not in {"walk", "dribble"}:
+            return 0.0, 0.0
+        anchors = build_fallback_action_targets(policy_action.skill_name, obs)
+        target_error_mm = math.hypot(
+            float(policy_action.target_x) - float(anchors["target_x"]),
+            float(policy_action.target_y) - float(anchors["target_y"]),
+        )
+        theta_error_rad = abs(self._wrap_angle(float(policy_action.target_theta) - float(anchors["target_theta"])))
+        return float(target_error_mm), float(theta_error_rad)
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+    def _decode_residual_policy_action(
+        self,
+        raw_action: StructuredSkillAction,
+        *,
+        obs: BackendObservation,
+    ) -> StructuredSkillAction:
+        residual_x = float(np.clip(raw_action.target_x, -1.0, 1.0))
+        residual_y = float(np.clip(raw_action.target_y, -1.0, 1.0))
+        residual_theta = float(np.clip(raw_action.target_theta, -1.0, 1.0))
+        param_mask = action_param_mask(raw_action.skill_name)
+        residual_x *= float(param_mask[0])
+        residual_y *= float(param_mask[1])
+        residual_theta *= float(param_mask[2])
+        # Role-aware anchor: support walk residuals in the multi-agent dataset are
+        # anchored on the EMA coordination target (multiagent_teacher.build_open_lane_anchor),
+        # NOT the ball. Decoding them ball-anchored produces degenerate/garbage walk
+        # targets (the doc-28 "walk chosen but robot frozen" failure). Single-agent
+        # path (_team_role None) is bit-identical to before.
+        if (
+            self._team_role in ("open_support", "off_ball_support")
+            and raw_action.skill_name == "walk"
+            and self._team_coordination_target is not None
+        ):
+            from multiagent_teacher import build_open_lane_anchor
+            anchors = build_open_lane_anchor(obs, self._team_coordination_target)
         else:
-            step_along_target_mm = 0.0
-
-        macro.takeover_ball_progress_mm = max(macro.takeover_ball_progress_mm, total_progress_mm)
-        macro.takeover_ball_progress_along_target_mm = max(
-            macro.takeover_ball_progress_along_target_mm,
-            total_along_target_mm,
+            anchors = build_fallback_action_targets(raw_action.skill_name, obs)
+        target_x = float(anchors["target_x"] + residual_x * ACTION.residual_x_range)
+        target_y = float(anchors["target_y"] + residual_y * ACTION.residual_y_range)
+        target_theta = self._wrap_angle(float(anchors["target_theta"] + residual_theta * ACTION.residual_theta_range))
+        return StructuredSkillAction(
+            skill_type=raw_action.skill_type,
+            target_x=float(np.clip(target_x, -ACTION.x_range, ACTION.x_range)),
+            target_y=float(np.clip(target_y, -ACTION.y_range, ACTION.y_range)),
+            target_theta=target_theta,
+            pass_target=int(raw_action.pass_target) if float(param_mask[3]) > 0.0 else 0,
         )
 
-        is_progress_macro = (
-            effective_macro_type in {"playBall_dribble", "playBall_duel"}
-            or skill_request == "dribble"
-            or motion_request == "dribble"
+    def project_action(self, action: StructuredSkillAction, *, obs: BackendObservation) -> tuple[StructuredSkillAction, bool]:
+        if action.skill_name in self._episode_stage_spec.active_skill_names:
+            return action, False
+
+        # Always project to walk (not preferred_skill) so telemetry reflects what
+        # the policy actually learned. Using preferred_skill here caused dribble to
+        # appear as "executed" on policy errors, masking that the policy never emitted it.
+        fallback_targets = build_fallback_action_targets("walk", obs)
+        projected = StructuredSkillAction(
+            skill_type=SkillType.from_public_name("walk"),
+            target_x=float(fallback_targets["target_x"]),
+            target_y=float(fallback_targets["target_y"]),
+            target_theta=float(fallback_targets["target_theta"]),
+            pass_target=int(action.pass_target),
         )
-        if is_progress_macro and ball_controlled and not pending_kick_hold:
-            if step_progress_mm >= 8.0 and (target is None or step_along_target_mm >= 4.0):
-                macro.takeover_progress_frames += 1
+        return projected, True
 
-        macro.takeover_last_ball_pos = ball_pos
+    def _repair_execution_targets(
+        self,
+        policy_action: StructuredSkillAction,
+        *,
+        obs: BackendObservation,
+    ) -> tuple[StructuredSkillAction, bool, str]:
+        if policy_action.skill_name not in {"walk", "dribble"}:
+            return policy_action, False, ""
 
-    def _has_takeover_execution_evidence(self,
-                                         agent: AgentState,
-                                         ball: BallState,
-                                         sidecar_output: Any,
-                                         *,
-                                         takeover_kick: bool,
-                                         takeover_kick_proxy: bool,
-                                         takeover_progress: bool,
-                                         pending_kick_hold: bool) -> bool:
-        if sidecar_output is None:
-            return False
-
-        macro = self._handoff_mgr.macro
-        skill_request = str(getattr(sidecar_output, "skill_request", "none") or "none")
-        motion_request = str(getattr(sidecar_output, "motion_request", "none") or "none")
-        macro_type = _effective_sidecar_macro_type(
-            skill_request,
-            getattr(sidecar_output, "macro_type", "none"),
-            motion_request,
+        # Role-aware anchor — MUST mirror _decode_residual_policy_action. A support's walk is
+        # anchored on its coordination target (open_lane/triangle EMA), NOT the ball. Using the
+        # ball-anchored fallback here repaired every support walk-to-slot back toward the ball
+        # (target_error vs the far slot always exceeded the residual radius), so supports could
+        # never reach their triangle/open slot — the closed-loop cause of triangle_hold=0.000.
+        if (
+            self._team_role in ("open_support", "off_ball_support")
+            and policy_action.skill_name == "walk"
+            and self._team_coordination_target is not None
+        ):
+            from multiagent_teacher import build_open_lane_anchor
+            fallback_targets = build_open_lane_anchor(obs, self._team_coordination_target)
+        else:
+            fallback_targets = build_fallback_action_targets(policy_action.skill_name, obs)
+        target_error_mm = math.hypot(
+            float(policy_action.target_x) - float(fallback_targets["target_x"]),
+            float(policy_action.target_y) - float(fallback_targets["target_y"]),
         )
-        executed_phase = str(getattr(sidecar_output, "motion_executed_phase", "unavailable") or "unavailable")
-        phase_compatible = executed_phase in {"walk", "kick", "stand"}
-
-        if skill_request in {"shoot", "pass"} or macro_type in {"playBall_shoot", "playBall_pass"}:
-            return phase_compatible and (takeover_kick or takeover_kick_proxy)
-
-        control_distance = AGENT.radius + BALL.radius + 55.0
-        ball_controlled = float(np.linalg.norm(agent.pos - ball.pos)) <= control_distance
-
-        if skill_request == "dribble" or motion_request == "dribble" or macro_type == "playBall_dribble":
-            strong_ball_progress = (
-                macro.takeover_ball_progress_mm >= 800.0
-                and macro.takeover_ball_progress_along_target_mm >= 600.0
-            )
-            controlled_progress = (
-                macro.takeover_control_frames >= 1
-                and macro.takeover_ball_progress_mm >= 180.0
-                and macro.takeover_ball_progress_along_target_mm >= 120.0
-            )
-            return (
-                phase_compatible
-                and not pending_kick_hold
-                and (strong_ball_progress or controlled_progress)
-            )
-
-        if skill_request == "block":
-            return False
-
-        if macro_type == "playBall_duel":
-            strong_duel_progress = (
-                macro.takeover_ball_progress_mm >= 500.0
-                and macro.takeover_ball_progress_along_target_mm >= 250.0
-            )
-            return (
-                phase_compatible
-                and not pending_kick_hold
-                and (
-                    strong_duel_progress
-                    or (
-                        ball_controlled
-                        and takeover_progress
-                        and (
-                            macro.takeover_progress_frames >= 1
-                            or macro.takeover_ball_progress_mm >= 80.0
-                        )
-                    )
-                )
-            )
-
-        return takeover_progress
-
-    def _recover_cleared_macro_success(self,
-                                       macro: MacroState,
-                                       *,
-                                       takeover_kick: bool,
-                                       takeover_kick_proxy: bool) -> None:
-        if macro.macro_end_reason != "skill_request_cleared" or macro.macro_success is not False:
-            return
-
-        if macro.macro_type in {"playBall_shoot", "playBall_pass"}:
-            if takeover_kick or takeover_kick_proxy:
-                macro.macro_end_reason = "completed"
-                macro.macro_success = True
-            return
-
-        if macro.macro_type == "playBall_dribble":
-            if (
-                macro.takeover_ball_progress_mm >= 800.0
-                and macro.takeover_ball_progress_along_target_mm >= 600.0
-            ):
-                macro.macro_end_reason = "completed"
-                macro.macro_success = True
-            return
-
-        if macro.macro_type == "playBall_duel":
-            if (
-                macro.takeover_ball_progress_mm >= 500.0
-                and macro.takeover_ball_progress_along_target_mm >= 250.0
-            ):
-                macro.macro_end_reason = "completed"
-                macro.macro_success = True
-
-    def _is_ball_in_fov(self, agent_id):
-        if agent_id not in self._agents_state:
-            return False
-        agent = self._agents_state[agent_id]
-        if not agent.is_upright:
-            return False
-        return self._fov_filter._is_in_fov(agent.pos, agent.theta, self._ball.pos)
-
-    def _build_infos(self, goal_scored, goal_conceded, sidecar_output=None, agent_ids=None,
-                     playball_entry=False, ready_but_walk=False,
-                     ready_touch_but_walk=False, pending_kick_hold=False,
-                     pending_kick_hold_frames=0, takeover_kick=False,
-                     takeover_kick_proxy=False,
-                     post_kick_release_frames=0):
-        macro = self._handoff_mgr.macro
-        if agent_ids is None:
-            agent_ids = self.agents
-        effective_macro_type = macro.macro_type
-        if sidecar_output is not None and not macro.macro_active:
-            effective_macro_type = sidecar_output.macro_type
-        ready_frames = max(1, self._episode_handoff_ready_frames)
-        takeover_total = max(1, self._episode_takeover_count)
-        control_owner = "BHUMAN" if macro.takeover_active else ("HANDOFF" if macro.handoff_ready else "RL")
-        base_info = {
-            "own_score": self._game.own_score,
-            "opp_score": self._game.opp_score,
-            "step": self._game.step_count,
-            "goal_scored": goal_scored,
-            "goal_conceded": goal_conceded,
-            "ball_out": self._ball_out_this_step,
-            "ball_pos": self._ball.pos.tolist(),
-            "ball_vel": self._ball.vel.tolist(),
-            "ball_speed": float(np.linalg.norm(self._ball.vel)),
-            "ball_heading_deg": (
-                math.degrees(math.atan2(float(self._ball.vel[1]), float(self._ball.vel[0])))
-                if float(np.linalg.norm(self._ball.vel)) > 1e-6 else None
-            ),
-            # BHuman contract info
-            "control_owner": control_owner,
-            "handoff_ready": macro.handoff_ready,
-            "takeover_active": macro.takeover_active,
-            "macro_active": macro.macro_active,
-            "macro_type": effective_macro_type,
-            "takeover_macro_type": macro.macro_type,
-            "macro_duration_frames": macro.macro_duration_frames,
-            "macro_end_reason": macro.macro_end_reason,
-            "macro_success": macro.macro_success,
-            "last_macro_end_reason": self._last_macro_end_reason,
-            "diag_macro_end_pulse_reason": str(getattr(self, "_macro_end_pulse_reason", "none") or "none"),
-            "diag_macro_end_pulse_success": (
-                int(bool(getattr(self, "_macro_end_pulse_success", False)))
-                if getattr(self, "_macro_end_pulse_success", None) is not None
-                else None
-            ),
-            "playball_entry": playball_entry,
-            "ready_but_walk": ready_but_walk,
-            "ready_touch_but_walk": ready_touch_but_walk,
-            "pending_kick_hold": bool(pending_kick_hold),
-            "pending_kick_hold_frames": int(pending_kick_hold_frames),
-            "takeover_kick": bool(takeover_kick),
-            "takeover_kick_proxy": bool(takeover_kick_proxy),
-            "post_kick_release_frames": int(post_kick_release_frames),
-            "active_agent_id": self._active_agent_id,
-            "takeover_control_frames": int(macro.takeover_control_frames),
-            "takeover_progress_frames": int(macro.takeover_progress_frames),
-            "takeover_ball_progress_mm": float(macro.takeover_ball_progress_mm),
-            "takeover_ball_progress_along_target_mm": float(
-                macro.takeover_ball_progress_along_target_mm
-            ),
-            "episode_takeover_count": self._episode_takeover_count,
-            "episode_takeover_success": self._episode_takeover_success,
-            "episode_takeover_count_dribble": self._episode_takeover_count_by_type["playBall_dribble"],
-            "episode_takeover_count_duel": self._episode_takeover_count_by_type["playBall_duel"],
-            "episode_takeover_count_shoot": self._episode_takeover_count_by_type["playBall_shoot"],
-            "episode_takeover_count_pass": self._episode_takeover_count_by_type["playBall_pass"],
-            "episode_takeover_success_dribble": self._episode_takeover_success_by_type["playBall_dribble"],
-            "episode_takeover_success_duel": self._episode_takeover_success_by_type["playBall_duel"],
-            "episode_takeover_success_shoot": self._episode_takeover_success_by_type["playBall_shoot"],
-            "episode_takeover_success_pass": self._episode_takeover_success_by_type["playBall_pass"],
-            "episode_handoff_achieved": self._episode_handoff_achieved,
-            "episode_handoff_ready_frames": self._episode_handoff_ready_frames,
-            "episode_tkready_achieved": self._episode_tkready_achieved,
-            "episode_tkready_frames": self._episode_tkready_frames,
-            "episode_playball_entry_count": self._episode_playball_entry_count,
-            "episode_playball_achieved": self._episode_playball_achieved,
-            "episode_ready_but_walk_frames": self._episode_ready_but_walk_frames,
-            "episode_ready_touch_but_walk_frames": self._episode_ready_touch_but_walk_frames,
-            "episode_ready_but_walk_rate": (
-                self._episode_ready_but_walk_frames / ready_frames
-                if self._episode_handoff_ready_frames > 0 else 0.0
-            ),
-            "episode_ready_touch_but_walk_rate": (
-                self._episode_ready_touch_but_walk_frames / ready_frames
-                if self._episode_handoff_ready_frames > 0 else 0.0
-            ),
-            "episode_takeover_timeout_count": self._episode_takeover_reason_counts["timeout"],
-            "episode_takeover_skill_cleared_count": (
-                self._episode_takeover_reason_counts["skill_request_cleared"]
-            ),
-            "episode_takeover_active_change_count": (
-                self._episode_takeover_reason_counts["active_agent_changed"]
-            ),
-            "episode_takeover_other_end_count": (
-                self._episode_takeover_reason_counts["out"]
-                + self._episode_takeover_reason_counts["goal"]
-                + self._episode_takeover_reason_counts["game_state_changed"]
-                + self._episode_takeover_reason_counts["other"]
-            ),
-            "episode_takeover_timeout_rate": (
-                self._episode_takeover_reason_counts["timeout"] / takeover_total
-                if self._episode_takeover_count > 0 else 0.0
-            ),
-            "episode_takeover_skill_cleared_rate": (
-                self._episode_takeover_reason_counts["skill_request_cleared"] / takeover_total
-                if self._episode_takeover_count > 0 else 0.0
-            ),
-            "episode_takeover_active_change_rate": (
-                self._episode_takeover_reason_counts["active_agent_changed"] / takeover_total
-                if self._episode_takeover_count > 0 else 0.0
-            ),
-            "episode_takeover_other_end_rate": (
-                (
-                    self._episode_takeover_reason_counts["out"]
-                    + self._episode_takeover_reason_counts["goal"]
-                    + self._episode_takeover_reason_counts["game_state_changed"]
-                    + self._episode_takeover_reason_counts["other"]
-                ) / takeover_total
-                if self._episode_takeover_count > 0 else 0.0
-            ),
-            "static_obstacle_count": len(self._static_obstacles),
-            "static_obstacles": [
-                {
-                    "id": obstacle.obstacle_id,
-                    "pos": obstacle.pos.tolist(),
-                    "radius": obstacle.radius,
-                }
-                for obstacle in self._static_obstacles
-            ],
-            "global_state": build_global_state(
-                list(self._agents_state.values()),
-                self._ball, self._opponents_state, self._game,
-                static_obstacles=self._static_obstacles,
-            ),
-            "execution_mode": self._execution_mode,
-            "sidecar_active": self._sidecar is not None,
-        }
-        if self._active_agent_id in self._agents_state:
-            active_agent = self._agents_state[self._active_agent_id]
-            ball_delta = self._ball.pos - active_agent.pos
-            ball_dist = float(np.linalg.norm(ball_delta))
-            if ball_dist > 1e-6:
-                ball_bearing_rad = _normalize_angle(
-                    math.atan2(float(ball_delta[1]), float(ball_delta[0])) - float(active_agent.theta)
-                )
-                heading_alignment = float(np.dot(
-                    ball_delta / ball_dist,
-                    np.array([math.cos(active_agent.theta), math.sin(active_agent.theta)], dtype=np.float32),
-                ))
-            else:
-                ball_bearing_rad = 0.0
-                heading_alignment = 1.0
-            base_info.update({
-                "active_agent_pos": active_agent.pos.tolist(),
-                "active_agent_theta": float(active_agent.theta),
-                "active_agent_theta_deg": math.degrees(float(active_agent.theta)),
-                "active_agent_vel": active_agent.vel.tolist(),
-                "active_agent_speed": float(np.linalg.norm(active_agent.vel)),
-                "active_agent_omega": float(active_agent.omega),
-                "active_agent_walk_target": active_agent.walk_target.tolist(),
-                "active_agent_ball_distance_mm": ball_dist,
-                "active_agent_ball_bearing_rad": float(ball_bearing_rad),
-                "active_agent_ball_bearing_deg": math.degrees(float(ball_bearing_rad)),
-                "active_agent_ball_heading_alignment": heading_alignment,
-            })
-        # Sidecar-enriched fields
-        if sidecar_output is not None:
-            base_info["sidecar_macro_type"] = sidecar_output.macro_type
-            base_info["sidecar_macro_type_effective"] = _effective_sidecar_macro_type(
-                sidecar_output.skill_request,
-                sidecar_output.macro_type,
-                sidecar_output.motion_request,
-            )
-            base_info["sidecar_current_tactic"] = sidecar_output.current_tactic
-            base_info["sidecar_skill_request"] = sidecar_output.skill_request
-            base_info["sidecar_skill_target"] = sidecar_output.skill_target
-            base_info["sidecar_skill_target_direction"] = sidecar_output.skill_target_direction
-            base_info["sidecar_motion_request"] = sidecar_output.motion_request
-            base_info["sidecar_motion_walk_target"] = sidecar_output.motion_walk_target
-            base_info["sidecar_motion_target_direction"] = sidecar_output.motion_target_direction
-            base_info["sidecar_motion_executed_phase"] = sidecar_output.motion_executed_phase
-            base_info["sidecar_motion_ball_target_field"] = sidecar_output.motion_ball_target_field
-            base_info["sidecar_motion_contact_point_field"] = sidecar_output.motion_contact_point_field
-            base_info["sidecar_robot_pose_field"] = sidecar_output.robot_pose_field
-            base_info["sidecar_field_ball_position"] = sidecar_output.field_ball_position
-            base_info["sidecar_field_ball_intercepted_position"] = (
-                sidecar_output.field_ball_intercepted_position
-            )
-            base_info["sidecar_behavior_status"] = sidecar_output.behavior_status
-            base_info["sidecar_behavior_speed"] = sidecar_output.behavior_speed
-            base_info["sidecar_behavior_walking_to"] = sidecar_output.behavior_walking_to
-            base_info["sidecar_behavior_shooting_to"] = sidecar_output.behavior_shooting_to
-            base_info["sidecar_strategy_status"] = sidecar_output.strategy_status
-            base_info["sidecar_activation_graph"] = [
-                n.to_dict() if hasattr(n, "to_dict") else str(n)
-                for n in sidecar_output.activation_graph
-            ]
-            base_info["sidecar_kick_type"] = sidecar_output.kick_type
-            base_info["sidecar_kick_length"] = sidecar_output.kick_length
-            base_info["sidecar_kick_length_raw"] = getattr(
-                sidecar_output, "kick_length_raw", sidecar_output.kick_length
-            )
-            base_info["sidecar_last_kick_type"] = sidecar_output.last_kick_type
-            base_info["sidecar_last_kick_timestamp"] = sidecar_output.last_kick_timestamp
-            base_info["sidecar_pass_target_player_number"] = sidecar_output.pass_target_player_number
-            base_info["sidecar_pass_origin_player_number"] = sidecar_output.pass_origin_player_number
-            base_info["sidecar_backend"] = sidecar_output.backend
-            base_info["sidecar_bridge_mode"] = sidecar_output.bridge_mode
-            if (
-                self._active_agent_id in self._agents_state
-                and self._sidecar_physics is not None
-            ):
-                active_agent = self._agents_state[self._active_agent_id]
-                walk_target_field = self._sidecar_physics._robot_relative_target_to_field(
-                    active_agent,
-                    sidecar_output.behavior_walking_to,
-                    sidecar_output,
-                )
-                if walk_target_field is not None:
-                    base_info["sidecar_behavior_walking_to_field"] = walk_target_field.tolist()
-                shoot_target_field = self._sidecar_physics._robot_relative_target_to_field(
-                    active_agent,
-                    sidecar_output.behavior_shooting_to,
-                    sidecar_output,
-                )
-                if shoot_target_field is not None:
-                    base_info["sidecar_behavior_shooting_to_field"] = shoot_target_field.tolist()
-                motion_walk_target_field = self._sidecar_physics._motion_walk_target_to_field(
-                    active_agent,
-                    sidecar_output.motion_walk_target,
-                    sidecar_output,
-                )
-                if motion_walk_target_field is not None:
-                    base_info["sidecar_motion_walk_target_field"] = motion_walk_target_field[0].tolist()
-                    base_info["sidecar_motion_walk_target_theta_field"] = float(motion_walk_target_field[1])
-                playball_ball_target = self._sidecar_physics._resolve_playball_ball_target(
-                    active_agent,
-                    self._ball,
-                    sidecar_output,
-                )
-                if playball_ball_target is not None:
-                    base_info["sidecar_ball_target_field"] = playball_ball_target.tolist()
-                effective_target = self._sidecar_physics._resolve_reference_target(
-                    active_agent,
-                    self._ball,
-                    sidecar_output,
-                )
-                if effective_target is not None:
-                    base_info["sidecar_effective_target"] = effective_target.tolist()
-                effective_motion_target, effective_theta = self._sidecar_physics._resolve_motion_target(
-                    active_agent,
-                    self._ball,
-                    sidecar_output,
-                    SIM.dt,
-                )
-                base_info["sidecar_effective_motion_target"] = effective_motion_target.tolist()
-                base_info["sidecar_effective_target_theta"] = float(effective_theta)
-            base_info["sidecar_contract_validation_mode"] = sidecar_output.contract_validation_mode
-            base_info["takeover_simulator_active"] = (self._takeover_sim is not None)
-            base_info["bridge_frame_id"] = sidecar_output.bridge_frame_id
-            base_info["bridge_player_number"] = sidecar_output.bridge_player_number
-            base_info["bridge_metadata"] = dict(sidecar_output.bridge_metadata)
-            for key, value in sidecar_output.bridge_metadata.items():
-                base_info[f"bridge_{key}"] = value
-        return {aid: base_info.copy() for aid in agent_ids}
-
-    # ── Utilities ─────────────────────────────────────────────────────
-
-    def set_stage(self, stage_cfg):
-        self._stage = stage_cfg
-        self._movement.configure(stage_cfg)
-        self._fov_filter = FOVFilter(use_fov=self._use_fov)
-        self._handoff_mgr.set_takeover_timeout_frames(self._stage.takeover_timeout_steps)
-
-    def get_global_state(self):
-        return build_global_state(
-            list(self._agents_state.values()),
-            self._ball, self._opponents_state, self._game,
-            static_obstacles=self._static_obstacles,
+        theta_error = abs(self._wrap_angle(float(policy_action.target_theta) - float(fallback_targets["target_theta"])))
+        residual_radius_limit = math.hypot(ACTION.residual_x_range, ACTION.residual_y_range) * 1.05
+        if target_error_mm <= residual_radius_limit and theta_error <= ACTION.residual_theta_range * 1.05:
+            return policy_action, False, ""
+        repaired = StructuredSkillAction(
+            skill_type=policy_action.skill_type,
+            target_x=float(fallback_targets["target_x"]),
+            target_y=float(fallback_targets["target_y"]),
+            target_theta=float(fallback_targets["target_theta"]),
+            pass_target=policy_action.pass_target,
         )
+        return repaired, True, f"{policy_action.skill_name}_heuristic_anchor"
+
+    def _should_force_dribble_handoff(self, obs: BackendObservation) -> bool:
+        if self._episode_stage_id != 0 or "dribble" not in self._episode_stage_spec.active_skill_names:
+            return False
+        if self._last_evaluation is None:
+            return False
+        stable_takeover = bool(self._last_evaluation.takeover_envelope and self._last_evaluation.prev_takeover_envelope)
+        if not stable_takeover:
+            return False
+        rescued = bool(obs.synthetic_ball_observation or obs.corrected_exported_ball)
+        trusted = bool((not rescued) and float(obs.natural_time_since_ball_seen) <= BALL_TRUSTED_MAX_AGE_MS)
+        clean_export = bool(
+            obs.ball_export_fresh
+            and not obs.ball_observation_stale
+            and not obs.ball_observation_collapsed
+        )
+        return bool(trusted and clean_export)
 
     def close(self):
-        if self._sidecar is not None:
-            self._sidecar.shutdown()
+        self.backend.close()
 
+    def get_global_state(self) -> np.ndarray:
+        return self._last_obs.copy() if self._last_obs is not None else np.zeros(OBS_SIZE, dtype=np.float32)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UTILITY FUNCTIONS
-# ─────────────────────────────────────────────────────────────────────────────
+    def state(self) -> np.ndarray:
+        return self.get_global_state()
 
-def _normalize_angle(angle: float) -> float:
-    while angle > math.pi:
-        angle -= 2.0 * math.pi
-    while angle < -math.pi:
-        angle += 2.0 * math.pi
-    return angle
+    def _gt_opponent_distances(self, transform_fn, obs: BackendObservation | None = None) -> tuple[float, float] | None:
+        """Training-only: nearest opponent distance (all-directions, front) in mm from
+        GROUND-TRUTH positions. Returns None when no opponents are known (caller falls
+        back to the perceived obs). `transform_fn(field_x, field_y) -> (rel_x, rel_y)`
+        maps to the robot frame; rel_x > 0 means in front (matches obs[21] gate semantics).
 
+        Source priority matters once opponents are allowed to play REAL B-Human football
+        instead of being teleported along a script (RL_MA_STAGE8_DYNAMIC_WORLD_UPDATES=0):
+        the dynamic-world state stops updating and the spawn WorldSpec goes stale within
+        seconds, so both legacy sources would silently feed the policy the opponents'
+        kickoff positions. The live GlobalOpponentsModel export (added 2026-08-11) tracks
+        them wherever they actually run, so prefer it whenever it is populated."""
+        positions: list[tuple[float, float]] = []
+        live_pos = getattr(obs, "opponent_positions", ()) if obs is not None else ()
+        dws = getattr(self, "_dynamic_world_state", None)
+        dyn_pos = getattr(dws, "opponent_positions", None) if dws is not None else None
+        if live_pos:
+            positions = [(float(px), float(py)) for px, py in live_pos]
+        elif dyn_pos is not None and len(dyn_pos) > 0:
+            positions = [(float(p[0]), float(p[1])) for p in dyn_pos]
+        elif self._current_world_spec is not None and self._current_world_spec.opponents:
+            positions = [(float(o.x), float(o.y)) for o in self._current_world_spec.opponents]
+        if not positions:
+            return None
+        best_all = float("inf")
+        best_front = float("inf")
+        for ox, oy in positions:
+            rel_x, rel_y = transform_fn(ox, oy)
+            dist = math.hypot(rel_x, rel_y)
+            if dist < best_all:
+                best_all = dist
+            if rel_x > 0.0 and dist < best_front:
+                best_front = dist
+        # 5000mm = "far/unseen" sentinel (norm_dist clamps to 1.0 -> gate leaves mark/block
+        # disarmed), matching the teacher's blank-obs convention.
+        all_d = best_all if best_all != float("inf") else 5000.0
+        front_d = best_front if best_front != float("inf") else 5000.0
+        return all_d, front_d
 
-def _goal_opening_angle(pos: np.ndarray) -> float:
-    goal_left = np.array([FIELD.x_opponent_ground, FIELD.y_left_goal])
-    goal_right = np.array([FIELD.x_opponent_ground, FIELD.y_right_goal])
-    angle_left = math.atan2(goal_left[1] - pos[1], goal_left[0] - pos[0])
-    angle_right = math.atan2(goal_right[1] - pos[1], goal_right[0] - pos[0])
-    return float(angle_left - angle_right)
+    def _encode_obs(self, obs: BackendObservation) -> np.ndarray:
+        def norm_time(value: float) -> float:
+            return float(np.clip(value / TIME_NORM_MS, 0.0, 1.0))
 
+        def norm_dist(value: float) -> float:
+            return float(np.clip(value / ACTION.x_range, 0.0, 1.0))
 
-def _goal_relative_angle(pos: np.ndarray, theta: float) -> float:
-    goal_center = np.array([FIELD.x_opponent_ground, 0.0])
-    dx = goal_center[0] - pos[0]
-    dy = goal_center[1] - pos[1]
-    absolute_angle = math.atan2(dy, dx)
-    return _normalize_angle(absolute_angle - theta)
+        def transform_to_robot_frame(field_x: float, field_y: float):
+            dx = field_x - obs.robot_x
+            dy = field_y - obs.robot_y
+
+            c = math.cos(-obs.robot_theta)
+            s = math.sin(-obs.robot_theta)
+
+            rel_x = dx * c - dy * s
+            rel_y = dx * s + dy * c
+
+            return rel_x, rel_y
+
+        # Training-only GT opponent distances (see GT_OPPONENT_OBS). Populated from the
+        # env's known opponent positions so block/mark can learn where in-sim off-ball
+        # perception is ~0. No-op (uses perceived obs) when the flag is off or there are
+        # no spawned opponents — so deployment/eval semantics are untouched.
+        opp_all_norm = norm_dist(obs.nearest_opponent_dist)
+        opp_front_norm = norm_dist(obs.nearest_opponent_front_dist)
+        if GT_OPPONENT_OBS:
+            gt = self._gt_opponent_distances(transform_to_robot_frame, obs)
+            if gt is not None:
+                opp_all_norm = norm_dist(gt[0])
+                opp_front_norm = norm_dist(gt[1])
+
+        gate_feats = (
+            self._gate_decision.obs_features()
+            if self._gate_decision is not None
+            else [0.0, 0.0, 0.0]
+        )
+
+        base_features = [
+            obs.robot_x / ACTION.x_range,
+            obs.robot_y / ACTION.y_range,
+            obs.robot_theta / math.pi,
+            obs.ball_rel_x / ACTION.x_range,
+            obs.ball_rel_y / ACTION.y_range,
+            obs.ball_end_rel_x / ACTION.x_range,
+            obs.ball_end_rel_y / ACTION.y_range,
+            obs.ball_vel_x / BALL_VEL_NORM,
+            obs.ball_vel_y / BALL_VEL_NORM,
+            norm_time(obs.time_since_ball_seen),
+            norm_time(obs.time_since_ball_disappeared),
+            float(np.clip(obs.ball_seen_percentage / 100.0, 0.0, 1.0)),
+            1.0 if obs.ball_consistent_with_game_state else 0.0,
+            1.0 if obs.can_score_now else 0.0,
+            float(np.clip(obs.shot_quality_no_obstacles, 0.0, 1.0)),
+            float(np.clip(obs.shot_opening_with_obstacles, 0.0, 1.0)),
+            float(np.clip(obs.pass_options_count / PASS_COUNT_NORM, 0.0, 1.0)),
+            norm_dist(obs.nearest_teammate_dist),
+            opp_all_norm,
+            norm_dist(obs.nearest_uncertain_obstacle_dist),
+            norm_dist(obs.nearest_teammate_front_dist),
+            opp_front_norm,
+            norm_dist(obs.nearest_uncertain_front_dist),
+            *gate_feats,
+        ]
+
+        fresh_teammates: list[tuple[float, float, float, int]] = []
+
+        for idx, pose in enumerate(obs.teammate_poses):
+            age = float(obs.teammate_ages_ms[idx]) if idx < len(obs.teammate_ages_ms) else float("inf")
+            activity = int(obs.teammate_activities[idx]) if idx < len(obs.teammate_activities) else TEAMMATE_ACTIVITY_IDLE
+            if age <= TEAMMATE_STALE_THRESHOLD_MS:
+                fresh_teammates.append((float(pose[0]), float(pose[1]), float(pose[2]), activity))
+
+        fresh_teammates.sort(
+            key=lambda p: (p[0] - obs.robot_x) ** 2
+            + (p[1] - obs.robot_y) ** 2
+        )
+
+        slotted_teammates = fresh_teammates[:3]
+        teammate_features = []
+        engagement_features = []
+
+        for slot in range(3):
+            if slot >= len(slotted_teammates):
+                teammate_features.extend([0.0, 0.0])
+                engagement_features.append(0.0)
+                continue
+
+            px, py, _theta, activity = slotted_teammates[slot]
+            rx, ry = transform_to_robot_frame(px, py)
+            teammate_features.extend([
+                float(np.clip(rx / ACTION.x_range, -1.0, 1.0)),
+                float(np.clip(ry / ACTION.y_range, -1.0, 1.0)),
+            ])
+            engagement_features.append(
+                1.0
+                if _teammate_activity_is_engaging(
+                    activity,
+                    teammate_x=px,
+                    teammate_y=py,
+                    team_ball_x=obs.global_team_ball_x_mm,
+                    team_ball_y=obs.global_team_ball_y_mm,
+                    team_ball_valid=obs.global_team_ball_valid,
+                )
+                else 0.0
+            )
+
+        tbx, tby = transform_to_robot_frame(
+            obs.global_team_ball_x_mm,
+            obs.global_team_ball_y_mm,
+        )
+
+        team_ball_features = [
+            float(np.clip(tbx / ACTION.x_range, -1.0, 1.0)),
+            float(np.clip(tby / ACTION.y_range, -1.0, 1.0)),
+            norm_time(obs.global_team_ball_age_ms),
+        ]
+
+        own_ball_field_x = obs.robot_x + obs.ball_rel_x
+        own_ball_field_y = obs.robot_y + obs.ball_rel_y
+
+        distance_to_team_ball = math.hypot(
+            own_ball_field_x - obs.global_team_ball_x_mm,
+            own_ball_field_y - obs.global_team_ball_y_mm,
+        )
+
+        consensus = (
+            1.0
+            if (
+                obs.global_team_ball_valid
+                and distance_to_team_ball < TEAM_BALL_CONSENSUS_MM
+            )
+            else 0.0
+        )
+
+        gx, gy = transform_to_robot_frame(
+            obs.goal_opponent_x_mm,
+            obs.goal_opponent_y_mm,
+        )
+
+        goal_features = [
+            float(np.clip(gx / ACTION.x_range, -1.0, 1.0)),
+            float(np.clip(gy / ACTION.y_range, -1.0, 1.0)),
+        ]
+
+        # Multi-agent extension (Block A continued + Block G), indices 41-46.
+        # Six floats: pass_armed, observe_armed, pass_arm_progress, is_striker,
+        # is_open_support, is_off_ball_support. Default to zeros when the env's
+        # gate_decision was produced by the single-agent SkillGate.step (which sets
+        # only the legacy 3 fields); the orchestrator overrides via dataclasses.replace
+        # before per-step encoding for multi-agent stages.
+        if self._gate_decision is not None:
+            team_gate_features = self._gate_decision.obs_features_team()
+        else:
+            team_gate_features = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        return np.asarray(
+            base_features
+            + teammate_features
+            + team_ball_features
+            + engagement_features
+            + [consensus]
+            + goal_features
+            + team_gate_features,
+            dtype=np.float32,
+        )
+
+    def _reset_episode_tracker(self) -> None:
+        self._episode_tracker = {
+            "reward_total": 0.0,
+            "reward_terms_sum": {},
+            "reward_weighted_terms_sum": {},
+            "skill_counts": {name: 0 for name in ACTION.skill_names},
+            "policy_skill_counts": {name: 0 for name in ACTION.skill_names},
+            "policy_skill_prob_sums": {name: 0.0 for name in ACTION.skill_names},
+            "policy_skill_entropy_sum": 0.0,
+            "policy_param_std_sum": 0.0,
+            "skill_projection_count": 0,
+            "handoff_override_count": 0,
+            "target_repair_count": 0,
+            "target_repair_reason_counts": defaultdict(int),
+            "policy_target_error_sum": 0.0,
+            "policy_theta_error_sum": 0.0,
+            "policy_target_quality_count": 0,
+            "walk_steps": 0,
+            "dribble_steps": 0,
+            "shoot_steps": 0,
+            "shoot_distance_ready_steps": 0,
+            "shoot_angle_ready_steps": 0,
+            "shoot_fresh_ready_steps": 0,
+            "shoot_open_ready_steps": 0,
+            "shoot_geometry_ready_steps": 0,
+            "good_walk_steps": 0,
+            "good_dribble_steps": 0,
+            "good_shoot_steps": 0,
+            "bad_walk_steps": 0,
+            "bad_dribble_steps": 0,
+            "bad_shoot_steps": 0,
+            "walk_zone_steps": 0,
+            "dribble_zone_steps": 0,
+            "shoot_zone_steps": 0,
+            "takeover_entered": False,
+            "takeover_first_step": None,
+            "takeover_hold_current": 0,
+            "takeover_hold_max": 0,
+            "stable_takeover_steps": 0,
+            "incompatible_takeover_requests": 0,
+            "walk_in_stable_takeover_steps": 0,
+            "stand_in_stable_takeover_steps": 0,
+            "policy_incompatible_takeover_requests": 0,
+            "policy_walk_in_stable_takeover_steps": 0,
+            "policy_stand_in_stable_takeover_steps": 0,
+            "good_finish_steps": 0,
+            "shoot_finish_steps": 0,
+            "goal": False,
+            "collision_count": 0,
+            "fall_step_count": 0,
+            "fallen_stuck_episode": False,
+            "fall_consecutive_max": 0,
+            "thrash_count": 0,
+            "clearance_positive_steps": 0,
+            "obstacle_present_steps": 0,
+            "corridor_keep_steps": 0,
+            "defense_phase_steps": 0,
+            "defender_goal_side_steps": 0,
+            "defender_cover_corridor_steps": 0,
+            "defender_danger_steps": 0,
+            "defender_danger_cover_steps": 0,
+            "defender_block_steps": 0,
+            "defender_pass_steps": 0,
+            "defender_gk_near_steps": 0,
+            "defender_corridor_distance_sum": 0.0,
+            "dynamic_updates": 0,
+            "post_takeover_progress_sum": 0.0,
+            "post_takeover_finishing_steps": 0,
+            "synthetic_pose_steps": 0,
+            "synthetic_ball_steps": 0,
+            "obs_mode_estimated_steps": 0,
+            "obs_mode_corrected_steps": 0,
+            "pose_alignment_warning_steps": 0,
+            "pose_jump_steps": 0,
+            "pose_jump_max_mm": 0.0,
+            "ball_stale_steps": 0,
+            "ball_collapsed_steps": 0,
+            "corrected_exported_robot_pose_steps": 0,
+            "corrected_exported_ball_steps": 0,
+            "ball_export_fresh_steps": 0,
+            "ball_export_source_estimated_steps": 0,
+            "ball_export_source_reset_steps": 0,
+            "ball_export_source_dynamic_steps": 0,
+            "natural_ball_seen_steps": 0,
+            "opponent_seen_steps": 0,
+            "natural_ball_consistent_steps": 0,
+            "ball_visible_steps": 0,
+            "ball_trusted_steps": 0,
+            "fov_steps": 0,           # steps ball is inside NAO camera FOV (by GT pos)
+            "fov_not_seen_steps": 0,  # of those, BHuman natural_ball_seen_pct == 0
+            "ball_semi_trusted_steps": 0,
+            "ball_degraded_steps": 0,
+            "ball_rescued_steps": 0,
+            "ball_lost_steps": 0,
+            "misleading_seen_synthetic_steps": 0,
+            "ball_confidence_score_sum": 0.0,
+            "first_ball_seen_after_reset_ms": None,
+            "first_fresh_export_after_reset_ms": None,
+            "first_non_synthetic_ball_after_reset_ms": None,
+            "first_trusted_ball_after_reset_ms": None,
+            "first_natural_ball_seen_after_reset_ms": None,
+        }
+
+    def _update_episode_tracker(
+        self,
+        step_ctx: StepContext,
+        evaluation: StepEvaluation,
+        projection_applied: bool,
+        dynamic_update_applied: bool,
+        *,
+        target_repair_applied: bool,
+        target_repair_reason: str,
+        policy_target_error_mm: float,
+        policy_theta_error_rad: float,
+        policy_skill_entropy: float,
+        policy_param_std_mean: float,
+    ) -> None:
+        tracker = self._episode_tracker
+        tracker["reward_total"] += evaluation.total_reward
+        for container_name, source in (
+            ("reward_terms_sum", evaluation.terms),
+            ("reward_weighted_terms_sum", evaluation.weighted_terms),
+        ):
+            container = tracker[container_name]
+            for key, value in source.items():
+                container[key] = float(container.get(key, 0.0) + value)
+
+        tracker["skill_counts"][step_ctx.skill_name] += 1
+        tracker["policy_skill_counts"][step_ctx.policy_skill_name] += 1
+        tracker["policy_skill_prob_sums"]["walk"] += float(step_ctx.policy_skill_prob_walk)
+        tracker["policy_skill_prob_sums"]["dribble"] += float(step_ctx.policy_skill_prob_dribble)
+        tracker["policy_skill_prob_sums"]["shoot"] += float(step_ctx.policy_skill_prob_shoot)
+        tracker["policy_skill_entropy_sum"] += float(policy_skill_entropy)
+        tracker["policy_param_std_sum"] += float(policy_param_std_mean)
+        if projection_applied:
+            tracker["skill_projection_count"] += 1
+        if step_ctx.handoff_override_applied:
+            tracker["handoff_override_count"] += 1
+        if target_repair_applied:
+            tracker["target_repair_count"] += 1
+            if target_repair_reason:
+                tracker["target_repair_reason_counts"][target_repair_reason] += 1
+        if step_ctx.policy_skill_name in {"walk", "dribble"}:
+            tracker["policy_target_error_sum"] += float(policy_target_error_mm)
+            tracker["policy_theta_error_sum"] += float(policy_theta_error_rad)
+            tracker["policy_target_quality_count"] += 1
+        if dynamic_update_applied:
+            tracker["dynamic_updates"] += 1
+        tracker["post_takeover_finishing_steps"] += int(bool(step_ctx.post_takeover_finishing_active))
+        tracker["synthetic_pose_steps"] += int(bool(step_ctx.obs.synthetic_pose_observation))
+        tracker["synthetic_ball_steps"] += int(bool(step_ctx.obs.synthetic_ball_observation))
+        tracker["obs_mode_estimated_steps"] += int(int(step_ctx.obs.obs_export_mode) == 0)
+        tracker["obs_mode_corrected_steps"] += int(int(step_ctx.obs.obs_export_mode) == 1)
+        tracker["pose_alignment_warning_steps"] += int(bool(step_ctx.obs.pose_alignment_warning))
+        if step_ctx.prev_obs is not None:
+            pose_jump_mm = math.hypot(
+                float(step_ctx.obs.robot_x) - float(step_ctx.prev_obs.robot_x),
+                float(step_ctx.obs.robot_y) - float(step_ctx.prev_obs.robot_y),
+            )
+            tracker["pose_jump_max_mm"] = max(float(tracker["pose_jump_max_mm"]), float(pose_jump_mm))
+            tracker["pose_jump_steps"] += int(pose_jump_mm > POSE_JUMP_WARNING_MM)
+        tracker["ball_stale_steps"] += int(bool(step_ctx.obs.ball_observation_stale))
+        tracker["ball_collapsed_steps"] += int(bool(step_ctx.obs.ball_observation_collapsed))
+        if int(step_ctx.obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE:
+            tracker["fall_step_count"] += 1
+        tracker["fall_consecutive_max"] = max(int(tracker["fall_consecutive_max"]), int(self._fallen_consecutive_steps))
+        tracker["corrected_exported_robot_pose_steps"] += int(bool(step_ctx.obs.corrected_exported_robot_pose))
+        tracker["corrected_exported_ball_steps"] += int(bool(step_ctx.obs.corrected_exported_ball))
+        tracker["ball_export_fresh_steps"] += int(bool(step_ctx.obs.ball_export_fresh))
+        tracker["natural_ball_seen_steps"] += int(
+            bool(step_ctx.obs.natural_ball_seen_percentage > 0.0 or step_ctx.obs.natural_time_since_ball_seen <= 1000.0)
+        )
+        tracker["natural_ball_consistent_steps"] += int(bool(step_ctx.obs.natural_ball_consistent_with_game_state))
+        # Opponent perception: a real opponent within sensor range (4500mm sentinel = unseen).
+        tracker["opponent_seen_steps"] += int(bool(float(step_ctx.obs.nearest_opponent_dist) < 4500.0))
+        masks = _ball_observation_masks(step_ctx.obs)
+        tracker["ball_visible_steps"] += int(bool(masks["ball_visible_mask"]))
+        tracker["ball_trusted_steps"] += int(bool(masks["ball_trusted_mask"]))
+        # FOV diagnostic: did BHuman detect the ball when it was inside the camera FOV?
+        # ball_rel_x/y are in robot frame from the corrected (GT) obs — reliable even
+        # when BHuman's own model is stale. NAO camera: ~±30° horiz, <2500mm range.
+        _bx = float(step_ctx.obs.ball_rel_x)
+        _by = float(step_ctx.obs.ball_rel_y)
+        if (_bx > 100.0
+                and math.hypot(_bx, _by) < 2500.0
+                and abs(math.atan2(_by, _bx)) < math.radians(30)):
+            tracker["fov_steps"] += 1
+            if float(step_ctx.obs.natural_ball_seen_percentage) == 0.0:
+                tracker["fov_not_seen_steps"] += 1
+        tracker["ball_semi_trusted_steps"] += int(bool(masks["ball_semi_trusted_mask"]))
+        tracker["ball_degraded_steps"] += int(bool(masks["ball_degraded_mask"]))
+        tracker["ball_rescued_steps"] += int(bool(masks["ball_rescued_mask"]))
+        tracker["ball_lost_steps"] += int(bool(masks["ball_lost_mask"]))
+        tracker["misleading_seen_synthetic_steps"] += int(
+            bool(float(step_ctx.obs.ball_seen_percentage) > 0.0 and bool(step_ctx.obs.synthetic_ball_observation))
+        )
+        tracker["ball_confidence_score_sum"] += float(masks["ball_confidence_score"])
+        if int(step_ctx.obs.ball_export_source) == 0:
+            tracker["ball_export_source_estimated_steps"] += 1
+        elif int(step_ctx.obs.ball_export_source) == 1:
+            tracker["ball_export_source_reset_steps"] += 1
+        elif int(step_ctx.obs.ball_export_source) == 2:
+            tracker["ball_export_source_dynamic_steps"] += 1
+
+        reset_frame = int(step_ctx.obs.reset_applied_frame)
+        delay_since_reset_ms = int(step_ctx.obs.frame - reset_frame) if reset_frame > 0 and step_ctx.obs.frame >= reset_frame else None
+        if delay_since_reset_ms is not None:
+            if tracker["first_ball_seen_after_reset_ms"] is None and (
+                float(step_ctx.obs.ball_seen_percentage) > 0.0 or float(step_ctx.obs.time_since_ball_seen) <= 1000.0
+            ):
+                tracker["first_ball_seen_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_fresh_export_after_reset_ms"] is None and bool(step_ctx.obs.ball_export_fresh):
+                tracker["first_fresh_export_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_non_synthetic_ball_after_reset_ms"] is None and not bool(step_ctx.obs.synthetic_ball_observation):
+                tracker["first_non_synthetic_ball_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_trusted_ball_after_reset_ms"] is None and bool(masks["ball_trusted_mask"]):
+                tracker["first_trusted_ball_after_reset_ms"] = float(delay_since_reset_ms)
+            if tracker["first_natural_ball_seen_after_reset_ms"] is None and (
+                float(step_ctx.obs.natural_ball_seen_percentage) > 0.0
+                or float(step_ctx.obs.natural_time_since_ball_seen) <= 1000.0
+            ):
+                tracker["first_natural_ball_seen_after_reset_ms"] = float(delay_since_reset_ms)
+
+        if step_ctx.skill_name == "walk":
+            tracker["walk_steps"] += 1
+        elif step_ctx.skill_name == "dribble":
+            tracker["dribble_steps"] += 1
+        elif step_ctx.skill_name == "shoot":
+            tracker["shoot_steps"] += 1
+
+        if evaluation.walk_zone:
+            tracker["walk_zone_steps"] += 1
+        if evaluation.dribble_zone:
+            tracker["dribble_zone_steps"] += 1
+        if evaluation.shoot_zone:
+            tracker["shoot_zone_steps"] += 1
+        shoot_distance_ready = evaluation.features.d_ball_mm <= 380.0
+        shoot_angle_ready = abs(evaluation.features.a_ball_rad) <= math.radians(25.0)
+        shoot_fresh_ready = evaluation.features.t_seen_ms <= BALL_TRUSTED_MAX_AGE_MS
+        shoot_open_ready = evaluation.features.shot_open >= 0.6 or evaluation.features.score_now
+        tracker["shoot_distance_ready_steps"] += int(shoot_distance_ready)
+        tracker["shoot_angle_ready_steps"] += int(shoot_angle_ready)
+        tracker["shoot_fresh_ready_steps"] += int(shoot_fresh_ready)
+        tracker["shoot_open_ready_steps"] += int(shoot_open_ready)
+        tracker["shoot_geometry_ready_steps"] += int(shoot_distance_ready and shoot_angle_ready and shoot_fresh_ready)
+        if evaluation.features.front_obstacle_count > 0 or evaluation.features.front_obstacle_mm > 0.0:
+            tracker["obstacle_present_steps"] += 1
+
+        tracker["good_walk_steps"] += int(evaluation.terms["good_walk"] > 0.0)
+        tracker["good_dribble_steps"] += int(evaluation.terms["good_dribble"] > 0.0)
+        tracker["good_shoot_steps"] += int(evaluation.terms["good_shoot"] > 0.0)
+        tracker["bad_walk_steps"] += int(evaluation.terms["bad_walk"] > 0.0)
+        tracker["bad_dribble_steps"] += int(evaluation.terms["bad_dribble"] > 0.0)
+        tracker["bad_shoot_steps"] += int(evaluation.terms["bad_shoot"] > 0.0)
+
+        if evaluation.takeover_envelope:
+            tracker["takeover_hold_current"] += 1
+            tracker["takeover_hold_max"] = max(tracker["takeover_hold_max"], tracker["takeover_hold_current"])
+            if not tracker["takeover_entered"]:
+                tracker["takeover_entered"] = True
+                tracker["takeover_first_step"] = step_ctx.episode_step
+        else:
+            tracker["takeover_hold_current"] = 0
+
+        stable_takeover_envelope = evaluation.takeover_envelope and evaluation.prev_takeover_envelope
+        if stable_takeover_envelope:
+            tracker["stable_takeover_steps"] += 1
+        if stable_takeover_envelope and step_ctx.skill_name not in {"dribble", "shoot"}:
+            tracker["incompatible_takeover_requests"] += 1
+            if step_ctx.skill_name == "walk":
+                tracker["walk_in_stable_takeover_steps"] += 1
+            elif step_ctx.skill_name == "stand":
+                tracker["stand_in_stable_takeover_steps"] += 1
+        if stable_takeover_envelope and step_ctx.policy_skill_name not in {"dribble", "shoot"}:
+            tracker["policy_incompatible_takeover_requests"] += 1
+            if step_ctx.policy_skill_name == "walk":
+                tracker["policy_walk_in_stable_takeover_steps"] += 1
+            elif step_ctx.policy_skill_name == "stand":
+                tracker["policy_stand_in_stable_takeover_steps"] += 1
+
+        if evaluation.terms["good_shoot"] > 0.0 or evaluation.terms["good_dribble"] > 0.0:
+            tracker["good_finish_steps"] += 1
+        if evaluation.terms["good_shoot"] > 0.0:
+            tracker["shoot_finish_steps"] += 1
+        if evaluation.terms["collision"] > 0.0:
+            tracker["collision_count"] += 1
+        if evaluation.terms["thrash"] > 0.0:
+            tracker["thrash_count"] += 1
+        if evaluation.terms["clearance_gain"] > 0.0:
+            tracker["clearance_positive_steps"] += 1
+        if evaluation.terms["corridor_keep"] > 0.0:
+            tracker["corridor_keep_steps"] += 1
+
+        if step_ctx.stage == 8:
+            defense = self._defense_metrics_from_obs(step_ctx.obs)
+            tracker["defense_phase_steps"] += int(defense["defense_phase"])
+            tracker["defender_goal_side_steps"] += int(defense["defense_phase"] and defense["goal_side"])
+            tracker["defender_cover_corridor_steps"] += int(defense["defense_phase"] and defense["cover_corridor"])
+            tracker["defender_danger_steps"] += int(defense["danger"])
+            tracker["defender_danger_cover_steps"] += int(defense["danger"] and defense["cover_corridor"])
+            tracker["defender_block_steps"] += int(step_ctx.skill_name == "block")
+            tracker["defender_pass_steps"] += int(step_ctx.skill_name == "pass")
+            tracker["defender_gk_near_steps"] += int(defense["defense_phase"] and defense["gk_near"])
+            if defense["defense_phase"]:
+                tracker["defender_corridor_distance_sum"] += float(defense["corridor_distance_mm"])
+
+        tracker["post_takeover_progress_sum"] += evaluation.terms["ball_progress_post_takeover"]
+        tracker["goal"] = tracker["goal"] or step_ctx.goal_scored
+
+    def _defense_metrics_from_obs(self, obs: BackendObservation) -> Dict[str, float | bool]:
+        own_goal = np.asarray([-float(GOAL_X), 0.0], dtype=np.float32)
+        ball = np.asarray([float(obs.ball_x), float(obs.ball_y)], dtype=np.float32)
+        robot = np.asarray([float(obs.robot_x), float(obs.robot_y)], dtype=np.float32)
+        goal_to_ball = ball - own_goal
+        denom = float(np.dot(goal_to_ball, goal_to_ball))
+        if denom <= 1.0:
+            projection = 0.0
+            corridor_distance = float(np.linalg.norm(robot - own_goal))
+        else:
+            projection = float(np.clip(np.dot(robot - own_goal, goal_to_ball) / denom, 0.0, 1.0))
+            closest = own_goal + projection * goal_to_ball
+            corridor_distance = float(np.linalg.norm(robot - closest))
+
+        defense_phase = bool(float(obs.ball_x) < 250.0)
+        danger = bool(float(obs.ball_x) < -500.0 and abs(float(obs.ball_y)) < 1800.0)
+        goal_side = bool(float(obs.robot_x) <= float(obs.ball_x) + 250.0)
+        cover_corridor = bool(defense_phase and goal_side and 0.05 <= projection <= 0.95 and corridor_distance <= 750.0)
+
+        gk_near = False
+        for pose in obs.teammate_poses:
+            tx, ty = float(pose[0]), float(pose[1])
+            if tx < -3500.0 and math.hypot(float(obs.robot_x) - tx, float(obs.robot_y) - ty) < 650.0:
+                gk_near = True
+                break
+
+        return {
+            "defense_phase": defense_phase,
+            "danger": danger,
+            "goal_side": goal_side,
+            "cover_corridor": cover_corridor,
+            "gk_near": gk_near,
+            "corridor_distance_mm": corridor_distance,
+        }
+
+    def _augment_stage8_defense_reward(self, evaluation: StepEvaluation, step_ctx: StepContext) -> StepEvaluation:
+        if step_ctx.stage != 8:
+            return evaluation
+
+        defense = self._defense_metrics_from_obs(step_ctx.obs)
+        defense_phase = bool(defense["defense_phase"])
+        danger = bool(defense["danger"])
+        goal_side = bool(defense["goal_side"])
+        cover_corridor = bool(defense["cover_corridor"])
+        gk_near = bool(defense["gk_near"])
+        corridor_distance = float(defense["corridor_distance_mm"])
+
+        own_goal_x = -float(GOAL_X)
+        threat_reduction = 0.0
+        if step_ctx.prev_obs is not None:
+            prev_dist = math.hypot(float(step_ctx.prev_obs.ball_x) - own_goal_x, float(step_ctx.prev_obs.ball_y))
+            cur_dist = math.hypot(float(step_ctx.obs.ball_x) - own_goal_x, float(step_ctx.obs.ball_y))
+            threat_reduction = float(np.clip((cur_dist - prev_dist) / 300.0, -1.0, 1.0))
+
+        # Possession race: reward.py scaffolds first_to_ball/bad_duel fields (StepContext,
+        # StepEvaluation) but environment.py hardcodes both to False at construction time
+        # (see the `first_to_ball=False, bad_duel=False` StepContext(...) call above) --
+        # the signal was never actually wired up anywhere in the codebase, so no checkpoint
+        # has ever been trained to care about winning the ball ahead of the opponent. Live
+        # match telemetry (10-match batches, 2026-08-10/11) confirms this gap empirically:
+        # B-Human's possession proxy consistently ran ~2-3x the RL team's. This computes a
+        # real possession-transition signal here (stage-8 only, self-contained, does not
+        # touch the shared single-agent reward.py path) using the same
+        # BALL_CONTROL_RADIUS_MM=350mm convention already validated by
+        # multiagent_teacher.py/tools/summarize_v5_vs_bhuman_matches.py's possession/
+        # recovery proxies.
+        possession_control_mm = 350.0
+        contest_radius_mm = 1200.0
+        own_ball_dist = math.hypot(float(step_ctx.obs.ball_rel_x), float(step_ctx.obs.ball_rel_y))
+        opp_dist = float(step_ctx.obs.nearest_opponent_dist)
+        we_control = own_ball_dist <= possession_control_mm and opp_dist > possession_control_mm
+        won_ball_race = False
+        contest_closing = 0.0
+        contested = opp_dist <= contest_radius_mm
+        if step_ctx.prev_obs is not None:
+            prev_own_ball_dist = math.hypot(float(step_ctx.prev_obs.ball_rel_x), float(step_ctx.prev_obs.ball_rel_y))
+            prev_opp_dist = float(step_ctx.prev_obs.nearest_opponent_dist)
+            prev_we_control = prev_own_ball_dist <= possession_control_mm and prev_opp_dist > possession_control_mm
+            won_ball_race = we_control and not prev_we_control
+            # Dense pursuit gradient, POSITIVE-ONLY and only while an opponent contests.
+            # Measured across three 10-match batches (2026-08-10/11), the striker's mean
+            # closing rate on the ball is NEGATIVE whenever an opponent is within 600mm
+            # (-4 to -8 mm/step) and positive otherwise: the policy systematically concedes
+            # every 50/50. `approach_ball` (+0.02) is the only pursuit term in the stage-8
+            # weights and is ~150x weaker than the collision penalty below, so conceding is
+            # the reward-optimal action. Rewarding only the CLOSING direction (never
+            # penalising the retreat) avoids the repair3 failure mode, where a symmetric
+            # possession_lost penalty taught the policy to avoid duels altogether
+            # (1W-9D-0L, 2/10 stalled, possession unchanged).
+            if contested:
+                contest_closing = float(np.clip((prev_own_ball_dist - own_ball_dist) / 40.0, 0.0, 1.0))
+
+        # Contest-aware collision relief. `_derive_collision` lumps FALLING
+        # (motion_engine_fall_state) together with mere obstacle arm/foot contact, and
+        # stage 8 weights the lump at -3.0. Physically winning a contested ball against a
+        # real B-Human opponent almost always involves incidental contact, so the lump term
+        # makes every duel strictly negative-EV. Falling stays fully penalised (it is a real
+        # failure); incidental contact while genuinely contesting the ball is discounted.
+        fall_event = int(step_ctx.obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE
+        # Widened from (ball<=800 AND opp<=800), which fired 0/6 episodes in the repair4
+        # run's telemetry while the raw collision term still averaged 7.5 hits/episode
+        # (= -22.5 reward at weight -3.0, i.e. 3x the +7.0 goal bonus). The tight gate
+        # required the SAME robot to be simultaneously on the ball and body-to-body with
+        # an opponent on the very frame of contact, which almost never coincides. Any
+        # non-falling contact while near the ball is the contact we want to stop taxing.
+        near_ball_contact = own_ball_dist <= 1200.0
+        collision_relief = 0.0
+        if step_ctx.collision and near_ball_contact and not fall_event:
+            collision_relief = -0.75 * float(evaluation.weighted_terms.get("collision", 0.0))
+
+        terms = dict(evaluation.terms)
+        weighted_terms = dict(evaluation.weighted_terms)
+        defense_terms = {
+            "defense_goal_side": 1.0 if defense_phase and goal_side else 0.0,
+            "defense_cover_corridor": 1.0 if defense_phase and cover_corridor else 0.0,
+            "defense_danger_cover": 1.0 if danger and cover_corridor else 0.0,
+            "defense_block": 1.0 if danger and step_ctx.skill_name == "block" else 0.0,
+            "defense_pass_clear": 1.0 if defense_phase and step_ctx.skill_name == "pass" and not danger else 0.0,
+            "defense_threat_reduction": threat_reduction if defense_phase else 0.0,
+            "defense_abandon": 1.0 if defense_phase and not goal_side else 0.0,
+            "defense_far_corridor": float(np.clip(corridor_distance / 1800.0, 0.0, 1.0)) if defense_phase else 0.0,
+            "defense_gk_near": 1.0 if defense_phase and gk_near else 0.0,
+            "defense_collision": 1.0 if step_ctx.collision else 0.0,
+            "possession_won": 1.0 if won_ball_race else 0.0,
+            "possession_held": 1.0 if we_control else 0.0,
+            "contest_closing": contest_closing,
+            "collision_contest_relief": collision_relief,
+        }
+        defense_weights = {
+            "defense_goal_side": 0.035,
+            "defense_cover_corridor": 0.060,
+            "defense_danger_cover": 0.050,
+            "defense_block": 0.030,
+            "defense_pass_clear": 0.020,
+            "defense_threat_reduction": 0.030,
+            "defense_abandon": -0.070,
+            "defense_far_corridor": -0.035,
+            "defense_gk_near": -0.080,
+            "defense_collision": -0.120,
+            "possession_won": 0.150,
+            "possession_held": 0.015,
+            "contest_closing": 0.120,
+            # Already an absolute reward delta (computed from the collision term itself),
+            # so it passes through with weight 1.0 rather than being scaled again.
+            "collision_contest_relief": 1.000,
+        }
+        for name, value in defense_terms.items():
+            terms[name] = float(value)
+            weighted_terms[name] = float(defense_weights[name] * value)
+
+        return replace(
+            evaluation,
+            terms=terms,
+            weighted_terms=weighted_terms,
+            total_reward=float(sum(weighted_terms.values())),
+        )
+
+    def _derive_collision(self, obs: BackendObservation) -> bool:
+        fall_event = int(obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE
+        contact_event = bool(obs.obstacle_arm_contact or obs.obstacle_foot_contact)
+        return bool(fall_event or contact_event)
+
+    def _update_fallen_stuck_counter(self, obs: BackendObservation) -> bool:
+        if int(obs.motion_engine_fall_state) > UPRIGHT_MAX_FALL_STATE:
+            self._fallen_consecutive_steps += 1
+        else:
+            self._fallen_consecutive_steps = 0
+        return bool(
+            self._episode_stage_id >= FALLEN_STUCK_MIN_STAGE
+            and FALLEN_STUCK_TERMINATE_STEPS > 0
+            and self._fallen_consecutive_steps >= FALLEN_STUCK_TERMINATE_STEPS
+        )
+
+    def _derive_corridor_open(self, obs: BackendObservation) -> bool:
+        if int(obs.obstacle_front_count) <= 0:
+            return True
+        if float(obs.nearest_front_obstacle_dist) >= 700.0:
+            return True
+        return float(obs.shot_opening_with_obstacles) >= 0.35
+
+    def _running_metrics_snapshot(self) -> Dict[str, float]:
+        tracker = self._episode_tracker
+        steps = max(1, self._episode_step)
+        walk_steps = max(1, tracker["walk_steps"])
+        dribble_steps = max(1, tracker["dribble_steps"])
+        shoot_steps = max(1, tracker["shoot_steps"])
+        return {
+            "reward_total": float(tracker["reward_total"]),
+            "thrash_rate": float(tracker["thrash_count"] / steps),
+            "collision_step_rate": float(tracker["collision_count"] / steps),
+            "fall_step_rate": float(tracker["fall_step_count"] / steps),
+            "fall_consecutive_max": float(tracker["fall_consecutive_max"]),
+            "walk_compat_rate": float(tracker["good_walk_steps"] / walk_steps),
+            "dribble_compat_rate": float(tracker["good_dribble_steps"] / dribble_steps),
+            "shoot_compat_rate": float(tracker["good_shoot_steps"] / shoot_steps),
+            "takeover_entered": float(bool(tracker["takeover_entered"])),
+            "takeover_hold_max": float(tracker["takeover_hold_max"]),
+            "stable_takeover_steps": float(tracker["stable_takeover_steps"]),
+            "incompatible_takeover_steps": float(tracker["incompatible_takeover_requests"]),
+            "incompatible_takeover_rate": float(
+                tracker["incompatible_takeover_requests"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "walk_in_stable_takeover_rate": float(
+                tracker["walk_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "stand_in_stable_takeover_rate": float(
+                tracker["stand_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_incompatible_takeover_steps": float(tracker["policy_incompatible_takeover_requests"]),
+            "policy_incompatible_takeover_rate": float(
+                tracker["policy_incompatible_takeover_requests"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_walk_in_stable_takeover_rate": float(
+                tracker["policy_walk_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "policy_stand_in_stable_takeover_rate": float(
+                tracker["policy_stand_in_stable_takeover_steps"] / max(1, tracker["stable_takeover_steps"])
+            ),
+            "target_repair_rate": float(tracker["target_repair_count"] / steps),
+            "policy_target_error_mean": float(
+                tracker["policy_target_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "policy_theta_error_mean": float(
+                tracker["policy_theta_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
+            "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
+            "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
+            "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
+            "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "pose_jump_rate": float(tracker["pose_jump_steps"] / steps),
+            "pose_jump_max_mm": float(tracker["pose_jump_max_mm"]),
+            "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
+            "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
+            "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
+            "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
+            "ball_export_fresh_rate": float(tracker["ball_export_fresh_steps"] / steps),
+            "ball_export_source_estimated_rate": float(tracker["ball_export_source_estimated_steps"] / steps),
+            "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
+            "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
+            "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "opponent_seen_rate": float(tracker["opponent_seen_steps"] / steps),
+            "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
+            "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
+            "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),
+            "ball_semi_trusted_rate": float(tracker["ball_semi_trusted_steps"] / steps),
+            "ball_degraded_rate": float(tracker["ball_degraded_steps"] / steps),
+            "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
+            "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
+            "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "fov_perception_failure_rate": float(
+                tracker["fov_not_seen_steps"] / max(1, tracker["fov_steps"])
+            ),
+            "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
+            "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
+            "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
+            "first_non_synthetic_ball_after_reset_ms": float(tracker["first_non_synthetic_ball_after_reset_ms"] or 0.0),
+            "first_trusted_ball_after_reset_ms": float(tracker["first_trusted_ball_after_reset_ms"] or 0.0),
+            "first_natural_ball_seen_after_reset_ms": float(tracker["first_natural_ball_seen_after_reset_ms"] or 0.0),
+        }
+
+    def _finalize_episode_metrics(self) -> Dict[str, float]:
+        tracker = self._episode_tracker
+        steps = max(1, self._episode_step)
+        walk_steps = tracker["walk_steps"]
+        dribble_steps = tracker["dribble_steps"]
+        shoot_steps = tracker["shoot_steps"]
+
+        walk_compat_rate = float(tracker["good_walk_steps"] / max(1, walk_steps))
+        dribble_compat_rate = float(tracker["good_dribble_steps"] / max(1, dribble_steps))
+        shoot_compat_rate = float(tracker["good_shoot_steps"] / max(1, shoot_steps))
+        bad_walk_rate = float(tracker["bad_walk_steps"] / max(1, walk_steps))
+        bad_dribble_rate = float(tracker["bad_dribble_steps"] / max(1, dribble_steps))
+        bad_shoot_rate = float(tracker["bad_shoot_steps"] / max(1, shoot_steps))
+        thrash_rate = float(tracker["thrash_count"] / steps)
+        collision_episode = float(tracker["collision_count"] > 0)
+        mean_time_to_takeover = float(tracker["takeover_first_step"] or self.cfg.max_episode_steps)
+        takeover_success = bool(tracker["takeover_entered"] and tracker["takeover_hold_max"] >= 2)
+        stable_takeover_steps = max(1, tracker["stable_takeover_steps"])
+        incompatible_takeover_rate = float(tracker["incompatible_takeover_requests"] / stable_takeover_steps)
+        walk_in_stable_takeover_rate = float(tracker["walk_in_stable_takeover_steps"] / stable_takeover_steps)
+        stand_in_stable_takeover_rate = float(tracker["stand_in_stable_takeover_steps"] / stable_takeover_steps)
+        policy_incompatible_takeover_rate = float(
+            tracker["policy_incompatible_takeover_requests"] / stable_takeover_steps
+        )
+        policy_walk_in_stable_takeover_rate = float(
+            tracker["policy_walk_in_stable_takeover_steps"] / stable_takeover_steps
+        )
+        policy_stand_in_stable_takeover_rate = float(
+            tracker["policy_stand_in_stable_takeover_steps"] / stable_takeover_steps
+        )
+
+        clean_walk = bool(walk_steps > 0 and walk_compat_rate >= 0.7 and tracker["thrash_count"] == 0)
+        if self._episode_stage_id < 0:
+            clean_takeover = bool(takeover_success and tracker["thrash_count"] == 0 and tracker["collision_count"] == 0)
+        else:
+            # Tolerate a small incompatibility fraction instead of requiring
+            # exactly zero: one walk/stand step in the stable envelope used to
+            # zero the whole episode, masking otherwise-clean handoffs and
+            # leaving no gradient signal for partial success.
+            clean_takeover = bool(
+                takeover_success
+                and incompatible_takeover_rate <= 0.15
+                and policy_incompatible_takeover_rate <= 0.15
+            )
+        # thrash_rate-based gate (was thrash_count <= 1, which is unreachable at a
+        # normal thrash_rate of ~0.07 ≈ 17 thrash steps/episode and made clean_finish
+        # structurally 0 even when the dribble genuinely advanced the ball past the
+        # 0.2 progress bar). Mirrors the de-brittled clean_takeover and the stage-1
+        # _behavior_is_stable threshold (thrash_max=0.10).
+        clean_finish = bool(
+            tracker["good_finish_steps"] > 0
+            and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
+            and thrash_rate <= 0.10
+        )
+        # Shoot-aware finish for stage 1+: clean_finish can be satisfied by
+        # dribble/progress only, which is useful but overstates shooting sanity.
+        shoot_finish = bool(
+            tracker["shoot_finish_steps"] > 0
+            and (tracker["goal"] or tracker["post_takeover_progress_sum"] > 0.2)
+            and thrash_rate <= 0.10
+        )
+        clean_episode = bool(clean_takeover and clean_finish and tracker["collision_count"] == 0)
+
+        obstacle_clearance_success = 0.0
+        if self._episode_stage_id >= 2 and tracker["obstacle_present_steps"] > 0:
+            obstacle_clearance_success = float(clean_takeover and tracker["collision_count"] == 0 and tracker["clearance_positive_steps"] > 0)
+
+        corridor_keep_rate = 0.0
+        if self._episode_stage_id >= 3 and tracker["obstacle_present_steps"] > 0:
+            corridor_keep_rate = float(tracker["corridor_keep_steps"] / tracker["obstacle_present_steps"])
+
+        dynamic_obstacle_success = 0.0
+        if self._episode_stage_id >= 3 and tracker["dynamic_updates"] > 0:
+            dynamic_obstacle_success = float(clean_takeover and tracker["collision_count"] == 0 and corridor_keep_rate >= 0.5)
+
+        stability_score = float(
+            np.clip(
+                0.4 * (1.0 - thrash_rate)
+                + 0.2 * walk_compat_rate
+                + 0.2 * dribble_compat_rate
+                + 0.2 * shoot_compat_rate,
+                0.0,
+                1.0,
+            )
+        )
+        defense_phase_steps = max(1, int(tracker["defense_phase_steps"]))
+        defender_danger_steps = max(1, int(tracker["defender_danger_steps"]))
+        defender_goal_side_rate = float(tracker["defender_goal_side_steps"] / defense_phase_steps)
+        defender_cover_corridor_rate = float(tracker["defender_cover_corridor_steps"] / defense_phase_steps)
+        defender_danger_cover_rate = float(tracker["defender_danger_cover_steps"] / defender_danger_steps)
+        defender_gk_near_rate = float(tracker["defender_gk_near_steps"] / defense_phase_steps)
+        defender_corridor_distance_mean = float(tracker["defender_corridor_distance_sum"] / max(1, tracker["defense_phase_steps"]))
+        defender_skill_balance = float(
+            np.clip(
+                float(tracker["skill_counts"].get("walk", 0) + tracker["skill_counts"].get("stand", 0) + tracker["skill_counts"].get("block", 0))
+                / steps,
+                0.0,
+                1.0,
+            )
+        )
+        defender_score = float(
+            np.clip(
+                0.35 * defender_goal_side_rate
+                + 0.35 * defender_cover_corridor_rate
+                + 0.15 * defender_danger_cover_rate
+                + 0.10 * (1.0 - collision_episode)
+                + 0.05 * (1.0 - defender_gk_near_rate),
+                0.0,
+                1.0,
+            )
+        )
+
+        return {
+            "stage_id": float(self._episode_stage_id),
+            "production_scenario_active": float(self._current_production_scenario is not None),
+            "production_scenario_name": "" if self._current_production_scenario is None else self._current_production_scenario.name,
+            "production_scenario_obstacles": "" if self._current_production_scenario is None else self._current_production_scenario.obstacles,
+            "production_scenario_contrast": float(
+                self._current_production_scenario is not None and self._current_production_scenario.is_contrast
+            ),
+            "steps": float(self._episode_step),
+            "episode_reward_mean": float(tracker["reward_total"] / steps),
+            "episode_reward_total": float(tracker["reward_total"]),
+            "clean_walk": float(clean_walk),
+            "clean_takeover": float(clean_takeover),
+            "clean_finish": float(clean_finish),
+            "shoot_finish": float(shoot_finish),
+            "clean_episode": float(clean_episode),
+            "collision_episode": collision_episode,
+            "fall_step_rate": float(tracker["fall_step_count"] / steps),
+            "fallen_stuck_episode": float(bool(tracker["fallen_stuck_episode"])),
+            "fall_consecutive_max": float(tracker["fall_consecutive_max"]),
+            "takeover_success": float(takeover_success),
+            # Disambiguates policy_incompatible_takeover_rate==0: with the max(1,..)
+            # denominator, "no takeover at all" reads identically to "clean takeover".
+            # Condition incompat metrics on this to tell failure (never reached the
+            # ball) apart from success (dribbled cleanly).
+            "takeover_occurred": float(tracker["stable_takeover_steps"] > 0),
+            "goal_rate": float(tracker["goal"]),
+            "thrash_rate": thrash_rate,
+            "mean_time_to_takeover": mean_time_to_takeover,
+            "stable_takeover_steps": float(tracker["stable_takeover_steps"]),
+            "incompatible_takeover_steps": float(tracker["incompatible_takeover_requests"]),
+            "incompatible_takeover_rate": incompatible_takeover_rate,
+            "walk_in_stable_takeover_rate": walk_in_stable_takeover_rate,
+            "stand_in_stable_takeover_rate": stand_in_stable_takeover_rate,
+            "policy_incompatible_takeover_steps": float(tracker["policy_incompatible_takeover_requests"]),
+            "policy_incompatible_takeover_rate": policy_incompatible_takeover_rate,
+            "policy_walk_in_stable_takeover_rate": policy_walk_in_stable_takeover_rate,
+            "policy_stand_in_stable_takeover_rate": policy_stand_in_stable_takeover_rate,
+            "walk_compat_rate": walk_compat_rate,
+            "dribble_compat_rate": dribble_compat_rate,
+            "shoot_compat_rate": shoot_compat_rate,
+            "shoot_finish_steps": float(tracker["shoot_finish_steps"]),
+            "shoot_zone_rate": float(tracker["shoot_zone_steps"] / steps),
+            "shoot_distance_ready_rate": float(tracker["shoot_distance_ready_steps"] / steps),
+            "shoot_angle_ready_rate": float(tracker["shoot_angle_ready_steps"] / steps),
+            "shoot_fresh_ready_rate": float(tracker["shoot_fresh_ready_steps"] / steps),
+            "shoot_open_ready_rate": float(tracker["shoot_open_ready_steps"] / steps),
+            "shoot_geometry_ready_rate": float(tracker["shoot_geometry_ready_steps"] / steps),
+            "bad_walk_rate": bad_walk_rate,
+            "bad_dribble_rate": bad_dribble_rate,
+            "bad_shoot_rate": bad_shoot_rate,
+            "policy_stand_rate": float(tracker["policy_skill_counts"].get("stand", 0) / steps),
+            "policy_walk_rate": float(tracker["policy_skill_counts"].get("walk", 0) / steps),
+            "policy_dribble_rate": float(tracker["policy_skill_counts"].get("dribble", 0) / steps),
+            "policy_shoot_rate": float(tracker["policy_skill_counts"].get("shoot", 0) / steps),
+            "policy_pass_rate": float(tracker["policy_skill_counts"].get("pass", 0) / steps),
+            "policy_block_rate": float(tracker["policy_skill_counts"].get("block", 0) / steps),
+            "policy_mark_rate": float(tracker["policy_skill_counts"].get("mark", 0) / steps),
+            "executed_stand_rate": float(tracker["skill_counts"].get("stand", 0) / steps),
+            "executed_walk_rate": float(tracker["skill_counts"].get("walk", 0) / steps),
+            "executed_dribble_rate": float(tracker["skill_counts"].get("dribble", 0) / steps),
+            "executed_shoot_rate": float(tracker["skill_counts"].get("shoot", 0) / steps),
+            "executed_pass_rate": float(tracker["skill_counts"].get("pass", 0) / steps),
+            "executed_block_rate": float(tracker["skill_counts"].get("block", 0) / steps),
+            "executed_mark_rate": float(tracker["skill_counts"].get("mark", 0) / steps),
+            "policy_skill_prob_walk_mean": float(tracker["policy_skill_prob_sums"].get("walk", 0.0) / steps),
+            "policy_skill_prob_dribble_mean": float(tracker["policy_skill_prob_sums"].get("dribble", 0.0) / steps),
+            "policy_skill_prob_shoot_mean": float(tracker["policy_skill_prob_sums"].get("shoot", 0.0) / steps),
+            "policy_skill_entropy": float(tracker["policy_skill_entropy_sum"] / steps),
+            "policy_param_std_mean": float(tracker["policy_param_std_sum"] / steps),
+            "obstacle_clearance_success": obstacle_clearance_success,
+            "dynamic_obstacle_success": dynamic_obstacle_success,
+            "corridor_keep_rate": corridor_keep_rate,
+            "defense_phase_rate": float(tracker["defense_phase_steps"] / steps),
+            "defender_goal_side_rate": defender_goal_side_rate,
+            "defender_cover_corridor_rate": defender_cover_corridor_rate,
+            "defender_danger_cover_rate": defender_danger_cover_rate,
+            "defender_gk_near_rate": defender_gk_near_rate,
+            "defender_corridor_distance_mean": defender_corridor_distance_mean,
+            "defender_skill_balance": defender_skill_balance,
+            "defender_score": defender_score,
+            "ball_progress_post_takeover_mean": float(tracker["post_takeover_progress_sum"] / steps),
+            "post_takeover_finishing_rate": float(tracker["post_takeover_finishing_steps"] / steps),
+            "stability_score": stability_score,
+            "skill_projection_rate": float(tracker["skill_projection_count"] / steps),
+            "handoff_override_rate": float(tracker["handoff_override_count"] / steps),
+            "target_repair_rate": float(tracker["target_repair_count"] / steps),
+            "policy_target_error_mean": float(
+                tracker["policy_target_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "policy_theta_error_mean": float(
+                tracker["policy_theta_error_sum"] / max(1, tracker["policy_target_quality_count"])
+            ),
+            "synthetic_pose_rate": float(tracker["synthetic_pose_steps"] / steps),
+            "synthetic_ball_rate": float(tracker["synthetic_ball_steps"] / steps),
+            "obs_mode_estimated_rate": float(tracker["obs_mode_estimated_steps"] / steps),
+            "obs_mode_corrected_rate": float(tracker["obs_mode_corrected_steps"] / steps),
+            "pose_alignment_warning_rate": float(tracker["pose_alignment_warning_steps"] / steps),
+            "pose_jump_rate": float(tracker["pose_jump_steps"] / steps),
+            "pose_jump_max_mm": float(tracker["pose_jump_max_mm"]),
+            "ball_stale_rate": float(tracker["ball_stale_steps"] / steps),
+            "ball_collapsed_rate": float(tracker["ball_collapsed_steps"] / steps),
+            "corrected_exported_robot_pose_rate": float(tracker["corrected_exported_robot_pose_steps"] / steps),
+            "corrected_exported_ball_rate": float(tracker["corrected_exported_ball_steps"] / steps),
+            "ball_export_fresh_rate": float(tracker["ball_export_fresh_steps"] / steps),
+            "ball_export_source_estimated_rate": float(tracker["ball_export_source_estimated_steps"] / steps),
+            "ball_export_source_reset_rate": float(tracker["ball_export_source_reset_steps"] / steps),
+            "ball_export_source_dynamic_rate": float(tracker["ball_export_source_dynamic_steps"] / steps),
+            "natural_ball_seen_rate": float(tracker["natural_ball_seen_steps"] / steps),
+            "opponent_seen_rate": float(tracker["opponent_seen_steps"] / steps),
+            "natural_ball_consistent_rate": float(tracker["natural_ball_consistent_steps"] / steps),
+            "ball_visible_rate": float(tracker["ball_visible_steps"] / steps),
+            "ball_trusted_rate": float(tracker["ball_trusted_steps"] / steps),
+            "ball_semi_trusted_rate": float(tracker["ball_semi_trusted_steps"] / steps),
+            "ball_degraded_rate": float(tracker["ball_degraded_steps"] / steps),
+            "ball_rescued_rate": float(tracker["ball_rescued_steps"] / steps),
+            "ball_lost_rate": float(tracker["ball_lost_steps"] / steps),
+            "misleading_seen_synthetic_rate": float(tracker["misleading_seen_synthetic_steps"] / steps),
+            "fov_perception_failure_rate": float(
+                tracker["fov_not_seen_steps"] / max(1, tracker["fov_steps"])
+            ),
+            "ball_confidence_score_mean": float(tracker["ball_confidence_score_sum"] / steps),
+            "first_ball_seen_after_reset_ms": float(tracker["first_ball_seen_after_reset_ms"] or 0.0),
+            "first_fresh_export_after_reset_ms": float(tracker["first_fresh_export_after_reset_ms"] or 0.0),
+            "first_non_synthetic_ball_after_reset_ms": float(tracker["first_non_synthetic_ball_after_reset_ms"] or 0.0),
+            "first_trusted_ball_after_reset_ms": float(tracker["first_trusted_ball_after_reset_ms"] or 0.0),
+            "first_natural_ball_seen_after_reset_ms": float(tracker["first_natural_ball_seen_after_reset_ms"] or 0.0),
+            "reward_terms_sum": dict(tracker["reward_terms_sum"]),
+            "reward_weighted_terms_sum": dict(tracker["reward_weighted_terms_sum"]),
+            "skill_counts": dict(tracker["skill_counts"]),
+            "policy_skill_counts": dict(tracker["policy_skill_counts"]),
+            "target_repair_reason_counts": dict(tracker["target_repair_reason_counts"]),
+        }
+
+    def _build_info(
+        self,
+        *,
+        obs: BackendObservation,
+        policy_action: StructuredSkillAction | None,
+        executed_action: StructuredSkillAction | None,
+        evaluation: StepEvaluation | None,
+        projection_applied: bool,
+        dynamic_update_applied: bool,
+        policy_skill_raw: float = 0.0,
+        policy_skill_round: int = 0,
+        policy_compact_skill_index: int = 0,
+        policy_skill_probs: Mapping[str, float] | None = None,
+        policy_skill_entropy: float = 0.0,
+        policy_param_std_mean: float = 0.0,
+        policy_residual_x: float = 0.0,
+        policy_residual_y: float = 0.0,
+        policy_residual_theta: float = 0.0,
+        policy_target_error_mm: float = 0.0,
+        policy_theta_error_rad: float = 0.0,
+        handoff_override_applied: bool = False,
+        target_repair_applied: bool = False,
+        target_repair_reason: str = "",
+        fallen_stuck: bool = False,
+        done: bool = False,
+    ) -> Dict[str, object]:
+        raw_obs = asdict(obs)
+        ball_masks = _ball_observation_masks(obs)
+        policy_skill_probs = policy_skill_probs or {name: 0.0 for name in SKILL_ORDER}
+        policy_dribble_margin = (
+            float(policy_skill_probs.get("dribble", 0.0) - policy_skill_probs.get("walk", 0.0))
+            if sum(float(value) for value in policy_skill_probs.values()) > 0.0
+            else (1.0 if policy_action is not None and policy_action.skill_name == "dribble" else -1.0 if policy_action is not None and policy_action.skill_name == "walk" else 0.0)
+        )
+        info: Dict[str, object] = {
+            "state": self.get_global_state(),
+            "obs_feature_names": OBS_FEATURE_NAMES,
+            "backend_mode": self.cfg.backend.mode,
+            "configured_obs_mode": self.cfg.backend.obs_mode,
+            "stage_id": self._episode_stage_id,
+            "stage_name": self._episode_stage_spec.name,
+            "production_scenario_active": bool(self._current_production_scenario is not None),
+            "production_scenario_name": "" if self._current_production_scenario is None else self._current_production_scenario.name,
+            "production_scenario_obstacles": "" if self._current_production_scenario is None else self._current_production_scenario.obstacles,
+            "production_scenario_contrast": bool(
+                self._current_production_scenario is not None and self._current_production_scenario.is_contrast
+            ),
+            "active_skill_mask": skill_mask(self._episode_stage_spec.active_skill_names),
+            "stage_skill_mask": stage_skill_mask(self._episode_stage_id),
+            "shoot_armed_mask": int(bool(self._gate_decision.shoot_armed)) if self._gate_decision is not None else 0,
+            "dribble_armed_mask": int(bool(self._gate_decision.dribble_armed)) if self._gate_decision is not None else 0,
+            "bridge_obs_ready": obs.obs_ready,
+            "bridge_frame": obs.frame,
+            "obs_export_mode": int(obs.obs_export_mode),
+            "corrected_exported_robot_pose": bool(obs.corrected_exported_robot_pose),
+            "corrected_exported_ball": bool(obs.corrected_exported_ball),
+            "ball_export_source": int(obs.ball_export_source),
+            "ball_export_fresh": bool(obs.ball_export_fresh),
+            "natural_time_since_ball_seen": float(obs.natural_time_since_ball_seen),
+            "natural_ball_seen_percentage": float(obs.natural_ball_seen_percentage),
+            "natural_ball_consistent_with_game_state": bool(obs.natural_ball_consistent_with_game_state),
+            "reset_applied_frame": int(obs.reset_applied_frame),
+            "dynamic_applied_frame": int(obs.dynamic_applied_frame),
+            "reset_applied_age_ms": int(obs.frame - obs.reset_applied_frame) if obs.reset_applied_frame > 0 and obs.frame >= obs.reset_applied_frame else -1,
+            "dynamic_applied_age_ms": int(obs.frame - obs.dynamic_applied_frame) if obs.dynamic_applied_frame > 0 and obs.frame >= obs.dynamic_applied_frame else -1,
+            "synthetic_pose_observation": bool(obs.synthetic_pose_observation),
+            "synthetic_ball_observation": bool(obs.synthetic_ball_observation),
+            "synthetic_pose_reason": obs.synthetic_pose_reason,
+            "synthetic_ball_reason": obs.synthetic_ball_reason,
+            "pose_alignment_error_mm": float(obs.pose_alignment_error_mm),
+            "pose_alignment_warning": bool(obs.pose_alignment_warning),
+            "ball_observation_stale": bool(obs.ball_observation_stale),
+            "ball_observation_collapsed": bool(obs.ball_observation_collapsed),
+            "estimated_robot_x": float(obs.estimated_robot_x),
+            "estimated_robot_y": float(obs.estimated_robot_y),
+            "estimated_robot_theta": float(obs.estimated_robot_theta),
+            "estimated_ball_x": float(obs.estimated_ball_x),
+            "estimated_ball_y": float(obs.estimated_ball_y),
+            "raw_obs": raw_obs,
+            "policy_skill_name": None if policy_action is None else policy_action.skill_name,
+            "executed_skill_name": None if executed_action is None else executed_action.skill_name,
+            "policy_skill_raw": float(policy_skill_raw),
+            "policy_skill_round": int(policy_skill_round),
+            "policy_skill_index": int(policy_skill_round),
+            "policy_compact_skill_index": int(policy_compact_skill_index),
+            "policy_skill_dribble_margin": float(policy_dribble_margin),
+            "policy_skill_entropy": float(policy_skill_entropy),
+            "policy_param_std_mean": float(policy_param_std_mean),
+            "policy_residual_x": float(policy_residual_x),
+            "policy_residual_y": float(policy_residual_y),
+            "policy_residual_theta": float(policy_residual_theta),
+            "policy_target_error_mm": float(policy_target_error_mm),
+            "policy_theta_error_rad": float(policy_theta_error_rad),
+            "handoff_override_enabled": bool(self.cfg.enable_handoff_override),
+            "handoff_override_applied": bool(handoff_override_applied),
+            "target_repair_applied": bool(target_repair_applied),
+            "target_repair_reason": str(target_repair_reason),
+            "fallen_stuck": bool(fallen_stuck),
+            "fallen_consecutive_steps": int(self._fallen_consecutive_steps),
+            "policy_target_x": 0.0 if policy_action is None else float(policy_action.target_x),
+            "policy_target_y": 0.0 if policy_action is None else float(policy_action.target_y),
+            "policy_target_theta": 0.0 if policy_action is None else float(policy_action.target_theta),
+            "executed_target_x": 0.0 if executed_action is None else float(executed_action.target_x),
+            "executed_target_y": 0.0 if executed_action is None else float(executed_action.target_y),
+            "executed_target_theta": 0.0 if executed_action is None else float(executed_action.target_theta),
+            "projection_applied": bool(projection_applied),
+            "dynamic_update_applied": bool(dynamic_update_applied),
+            "skill_history": tuple(self._skill_history),
+            "running_metrics": self._running_metrics_snapshot(),
+            # Compatibility shims for existing tooling
+            "requested_skill": obs.requested_skill,
+            "requested_pass_target": obs.requested_pass_target,
+            "ball_x": obs.ball_x,
+            "ball_y": obs.ball_y,
+            "robot_x": obs.robot_x,
+            "robot_y": obs.robot_y,
+            "robot_theta": obs.robot_theta,
+            "ball_rel_x": obs.ball_rel_x,
+            "ball_rel_y": obs.ball_rel_y,
+            "time_since_ball_seen": obs.time_since_ball_seen,
+            "ball_seen_percentage": obs.ball_seen_percentage,
+            "ball_consistent_with_game_state": obs.ball_consistent_with_game_state,
+            "shot_quality_no_obstacles": obs.shot_quality_no_obstacles,
+            "shot_opening_with_obstacles": obs.shot_opening_with_obstacles,
+            "pass_options_count": obs.pass_options_count,
+            **ball_masks,
+        }
+        for skill_name in SKILL_ORDER:
+            info[f"policy_skill_prob_{skill_name}"] = float(policy_skill_probs.get(skill_name, 0.0))
+        if evaluation is not None:
+            info.update(evaluation.as_dict())
+        if done:
+            info["episode_done"] = True
+        return info

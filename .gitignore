@@ -3,3 +3,30 @@ __pycache__/
 bridge/__pycache__/
 bridge/rlbridge_oneshot_*
 bridge/tmp*/
+# Environment variables
+.env
+
+# Local editor/runtime settings
+settings.local.json
+
+# Local agent/tooling metadata
+.codex
+.codex/
+AGENTS.md
+
+.venv/
+.deps/
+runs/
+
+# Local SDD / agent tooling (not part of the repository)
+.atl/
+openspec/
+
+# --- session hardening (large/transient; keep ONNX + docs + py tracked) ---
+*.log
+*.npz
+/dev/shm/
+runs/tmp_*/
+*.partial.npz
+# ONNX weights, policy manifests (ppo_*.json) and run scripts (tools/*.sh) are tracked.
+# NOTE: ppo_*.onnx (weights) at repo ROOT ARE deliverables — tracked, not ignored.

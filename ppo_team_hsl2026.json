@@ -1,0 +1,37 @@
+{
+  "format": "onnx",
+  "obs_size_input": 47,
+  "obs_size_env": 47,
+  "obs_size_model_trained": 47,
+  "skill_order": [
+    "stand",
+    "walk",
+    "shoot",
+    "pass",
+    "dribble",
+    "block",
+    "mark",
+    "observe"
+  ],
+  "active_skills": [
+    "stand",
+    "walk",
+    "dribble",
+    "shoot",
+    "pass"
+  ],
+  "gate_config": {
+    "shoot_open_enter": 0.3,
+    "shoot_open_exit": 0.2
+  },
+  "role_onehot_indices": {
+    "is_striker": 44,
+    "is_open_support": 45,
+    "is_off_ball_support": 46
+  },
+  "checkpoint": "/home/luis/GitHub/RL/runs/multiagent_stage7_v2b_teamrewards/checkpoint_stage7_step7500.pt",
+  "checkpoint_sha256": "f84d3b1bb9eee279def9a1eb8b446a6bdc9b631f3eb22618cf25d7bef25a0a13",
+  "onnx_sha256": "7126a01ccda2de17fa63af6d2067d29edd505d9602ca8c50fea83483a75e3320",
+  "normalization_contract": "ppo_obs_v47_team_hsl2026",
+  "deterministic": true
+}

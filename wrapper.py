@@ -1,490 +1,237 @@
-"""
-wrapper.py — NaoSoccerEnvWrapper: adapta NaoSoccerEnv para skrl MAPPO.
-
-Alineado con contrato BHuman:
-  - Curriculum advancement basado en takeover metrics, no touch/goal/win legacy
-  - Métricas BHuman-aware: handoff_reached_rate, takeover_ready_rate, takeover_success_rate, etc.
-  - Estado global para critic centralizado (CTDE)
-"""
-
 from __future__ import annotations
 
-from collections import deque
-from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict
 
 import numpy as np
 
-from config import (
-    CURRICULUM, CurriculumStageConfig,
-    GLOBAL_STATE, OBS, ACTION,
-)
-from environment import NaoSoccerEnv
+from action import StructuredSkillAction, action_from_numpy
+from environment import RealSimRobotEnv
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CURRICULUM MANAGER — BHuman-aware advancement
-# ─────────────────────────────────────────────────────────────────────────────
-
-class CurriculumManager:
-    """
-    Manages curriculum advancement with BHuman-aware metrics.
-
-    Advancement metrics:
-      - takeover_rate: fraction of episodes where BHuman accepted takeover
-      - takeover_success_rate: fraction of takeovers that succeeded
-      - win_rate: fraction of episodes won
-      - support_quality: fraction with good spacing metrics
-
-    Early takeover stages can additionally require semantic guard rails:
-      - minimum playBall entry rate
-      - minimum takeover success rate
-      - maximum ready_but_walk rates
-    """
-
-    def __init__(self, stages: List[CurriculumStageConfig] = CURRICULUM):
-        self._stages = stages
-        self._current_idx = 0
-        self._window: deque = deque(maxlen=stages[0].advance_window)
-        self._playball_window: deque = deque(maxlen=stages[0].advance_window)
-        self._takeover_success_window: deque = deque(maxlen=stages[0].advance_window)
-        self._ready_but_walk_window: deque = deque(maxlen=stages[0].advance_window)
-        self._ready_touch_but_walk_window: deque = deque(maxlen=stages[0].advance_window)
-
-    @property
-    def current_stage(self) -> CurriculumStageConfig:
-        return self._stages[self._current_idx]
-
-    @property
-    def stage_id(self) -> int:
-        return self._current_idx
-
-    @property
-    def is_final_stage(self) -> bool:
-        return self._current_idx == len(self._stages) - 1
-
-    def record_episode(self,
-                       own_score: int,
-                       opp_score: int,
-                       takeover_count: int = 0,
-                       takeover_success_count: int = 0,
-                       handoff_achieved: bool = False,
-                       tkready_achieved: bool = False,
-                       playball_achieved: bool = False,
-                       ready_but_walk_rate: float = 0.0,
-                       ready_touch_but_walk_rate: float = 0.0,
-                       support_quality: float = 0.0) -> bool:
-        """
-        Record episode result and evaluate advancement.
-
-        Returns True if advanced to next stage.
-        """
-        stage = self.current_stage
-        metric = stage.advance_metric
-
-        if metric == "takeover_rate":
-            success = float(tkready_achieved)
-        elif metric == "takeover_success_rate":
-            if takeover_count > 0:
-                success = float(takeover_success_count / takeover_count)
-            else:
-                success = 0.0
-        elif metric == "win_rate":
-            success = float(own_score > opp_score)
-        elif metric == "support_quality":
-            success = support_quality
-        else:
-            success = float(own_score > opp_score)
-
-        self._window.append(float(success))
-        self._playball_window.append(float(playball_achieved))
-        self._takeover_success_window.append(
-            float(takeover_success_count / takeover_count) if takeover_count > 0 else 0.0
-        )
-        self._ready_but_walk_window.append(float(ready_but_walk_rate))
-        self._ready_touch_but_walk_window.append(float(ready_touch_but_walk_rate))
-
-        if self._window.maxlen != stage.advance_window:
-            self._window = deque(self._window, maxlen=stage.advance_window)
-            self._playball_window = deque(self._playball_window, maxlen=stage.advance_window)
-            self._takeover_success_window = deque(
-                self._takeover_success_window, maxlen=stage.advance_window
-            )
-            self._ready_but_walk_window = deque(
-                self._ready_but_walk_window, maxlen=stage.advance_window
-            )
-            self._ready_touch_but_walk_window = deque(
-                self._ready_touch_but_walk_window, maxlen=stage.advance_window
-            )
-
-        if (len(self._window) == stage.advance_window
-                and not self.is_final_stage):
-            rate = float(np.mean(self._window))
-            playball_rate = float(np.mean(self._playball_window)) if self._playball_window else 0.0
-            takeover_success_rate = (
-                float(np.mean(self._takeover_success_window))
-                if self._takeover_success_window else 0.0
-            )
-            ready_but_walk_mean = (
-                float(np.mean(self._ready_but_walk_window))
-                if self._ready_but_walk_window else 0.0
-            )
-            ready_touch_but_walk_mean = (
-                float(np.mean(self._ready_touch_but_walk_window))
-                if self._ready_touch_but_walk_window else 0.0
-            )
-            guard_ok = (
-                playball_rate >= stage.min_playball_entry_rate
-                and takeover_success_rate >= stage.min_takeover_success_rate
-                and ready_but_walk_mean <= stage.max_ready_but_walk_rate
-                and ready_touch_but_walk_mean <= stage.max_ready_touch_but_walk_rate
-            )
-            if rate >= stage.advance_threshold and guard_ok:
-                self._advance()
-                return True
-
-        return False
-
-    def _advance(self):
-        self._current_idx += 1
-        new_stage = self.current_stage
-        self._window = deque(maxlen=new_stage.advance_window)
-        self._playball_window = deque(maxlen=new_stage.advance_window)
-        self._takeover_success_window = deque(maxlen=new_stage.advance_window)
-        self._ready_but_walk_window = deque(maxlen=new_stage.advance_window)
-        self._ready_touch_but_walk_window = deque(maxlen=new_stage.advance_window)
-        print(f"\n[Curriculum] Advanced to Stage {self._current_idx}: {new_stage.name}")
-
-    def jump_to_stage(self, stage_idx: int):
-        if not (0 <= stage_idx < len(self._stages)):
-            raise ValueError(f"stage_idx={stage_idx} out of range [0, {len(self._stages)-1}]")
-        self._current_idx = stage_idx
-        new_stage = self.current_stage
-        self._window = deque(maxlen=new_stage.advance_window)
-        self._playball_window = deque(maxlen=new_stage.advance_window)
-        self._takeover_success_window = deque(maxlen=new_stage.advance_window)
-        self._ready_but_walk_window = deque(maxlen=new_stage.advance_window)
-        self._ready_touch_but_walk_window = deque(maxlen=new_stage.advance_window)
-        print(f"[Curriculum] jump_to_stage -> Stage {stage_idx}: {new_stage.name}")
-
-    def get_progress_stats(self) -> Dict[str, Any]:
-        stage = self.current_stage
-        rate = float(np.mean(self._window)) if self._window else 0.0
-        return {
-            "stage_id": self._current_idx,
-            "stage_name": stage.name,
-            "advance_metric": stage.advance_metric,
-            "current_rate": rate,
-            "playball_entry_rate": (
-                float(np.mean(self._playball_window)) if self._playball_window else 0.0
-            ),
-            "takeover_success_rate": (
-                float(np.mean(self._takeover_success_window))
-                if self._takeover_success_window else 0.0
-            ),
-            "ready_but_walk_rate": (
-                float(np.mean(self._ready_but_walk_window))
-                if self._ready_but_walk_window else 0.0
-            ),
-            "ready_touch_but_walk_rate": (
-                float(np.mean(self._ready_touch_but_walk_window))
-                if self._ready_touch_but_walk_window else 0.0
-            ),
-            "advance_threshold": stage.advance_threshold,
-            "window_fill": f"{len(self._window)}/{stage.advance_window}",
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BHUMAN METRICS AGGREGATOR
-# ─────────────────────────────────────────────────────────────────────────────
-
-class BHumanMetricsAggregator:
-    """
-    Aggregates BHuman-specific metrics across episodes.
-
-    Reports:
-      - handoff_reached_rate: how often the RL reached the handoff geometry
-      - takeover_ready_rate: how often BHuman accepted takeover for real
-      - takeover_success_rate: success rate of BHuman executions
-      - bhuman_exec_success_rate: = takeover_success_rate (alias)
-      - support_quality_rate: spacing quality
-      - anti_blocking_rate: how often agents avoid blocking
-    """
-
-    def __init__(self, window_size: int = 100):
-        self._window_size = window_size
-        self._handoff_reached: deque = deque(maxlen=window_size)
-        self._takeover_ready: deque = deque(maxlen=window_size)
-        self._takeover_success: deque = deque(maxlen=window_size)
-        self._takeover_success_dribble: deque = deque(maxlen=window_size)
-        self._takeover_success_duel: deque = deque(maxlen=window_size)
-        self._takeover_success_shoot: deque = deque(maxlen=window_size)
-        self._takeover_success_pass: deque = deque(maxlen=window_size)
-        self._takeover_success_dribble_duel: deque = deque(maxlen=window_size)
-        self._takeover_coverage_dribble_duel: deque = deque(maxlen=window_size)
-        self._takeover_coverage_shoot: deque = deque(maxlen=window_size)
-        self._takeover_coverage_pass: deque = deque(maxlen=window_size)
-        self._playball_entry: deque = deque(maxlen=window_size)
-        self._ready_but_walk: deque = deque(maxlen=window_size)
-        self._ready_touch_but_walk: deque = deque(maxlen=window_size)
-        self._support_quality: deque = deque(maxlen=window_size)
-        self._anti_blocking: deque = deque(maxlen=window_size)
-        self._goals: deque = deque(maxlen=window_size)
-        self._wins: deque = deque(maxlen=window_size)
-
-    def record(self,
-               handoff_achieved: bool,
-               tkready_achieved: bool,
-               takeover_count: int,
-               takeover_success_count: int,
-               takeover_count_dribble: int,
-               takeover_count_duel: int,
-               takeover_count_shoot: int,
-               takeover_count_pass: int,
-               takeover_success_dribble: int,
-               takeover_success_duel: int,
-               takeover_success_shoot: int,
-               takeover_success_pass: int,
-               playball_achieved: bool,
-               ready_but_walk_rate: float,
-               ready_touch_but_walk_rate: float,
-               own_score: int,
-               opp_score: int,
-               support_quality: float = 0.5,
-               blocking_events: int = 0):
-        self._handoff_reached.append(float(handoff_achieved))
-        self._takeover_ready.append(float(tkready_achieved))
-        if takeover_count > 0:
-            self._takeover_success.append(float(takeover_success_count / takeover_count))
-        else:
-            self._takeover_success.append(0.0)
-        dribble_duel_count = takeover_count_dribble + takeover_count_duel
-        dribble_duel_success = takeover_success_dribble + takeover_success_duel
-        self._takeover_success_dribble.append(
-            float(takeover_success_dribble / takeover_count_dribble) if takeover_count_dribble > 0 else 0.0
-        )
-        self._takeover_success_duel.append(
-            float(takeover_success_duel / takeover_count_duel) if takeover_count_duel > 0 else 0.0
-        )
-        self._takeover_success_shoot.append(
-            float(takeover_success_shoot / takeover_count_shoot) if takeover_count_shoot > 0 else 0.0
-        )
-        self._takeover_success_pass.append(
-            float(takeover_success_pass / takeover_count_pass) if takeover_count_pass > 0 else 0.0
-        )
-        self._takeover_success_dribble_duel.append(
-            float(dribble_duel_success / dribble_duel_count) if dribble_duel_count > 0 else 0.0
-        )
-        self._takeover_coverage_dribble_duel.append(1.0 if dribble_duel_count > 0 else 0.0)
-        self._takeover_coverage_shoot.append(1.0 if takeover_count_shoot > 0 else 0.0)
-        self._takeover_coverage_pass.append(1.0 if takeover_count_pass > 0 else 0.0)
-        self._playball_entry.append(float(playball_achieved))
-        self._ready_but_walk.append(float(ready_but_walk_rate))
-        self._ready_touch_but_walk.append(float(ready_touch_but_walk_rate))
-        self._support_quality.append(support_quality)
-        self._anti_blocking.append(1.0 if blocking_events == 0 else 0.0)
-        self._goals.append(float(own_score > 0))
-        self._wins.append(float(own_score > opp_score))
-
-    def get_metrics(self) -> Dict[str, float]:
-        return {
-            "handoff_reached_rate": self._safe_mean(self._handoff_reached),
-            "takeover_ready_rate": self._safe_mean(self._takeover_ready),
-            "takeover_success_rate": self._safe_mean(self._takeover_success),
-            "bhuman_exec_success_rate": self._safe_mean(self._takeover_success),
-            "takeover_success_rate_dribble": self._safe_mean(self._takeover_success_dribble),
-            "takeover_success_rate_duel": self._safe_mean(self._takeover_success_duel),
-            "takeover_success_rate_shoot": self._safe_mean(self._takeover_success_shoot),
-            "takeover_success_rate_pass": self._safe_mean(self._takeover_success_pass),
-            "takeover_success_rate_dribble_duel": self._safe_mean(self._takeover_success_dribble_duel),
-            "takeover_coverage_rate_dribble_duel": self._safe_mean(self._takeover_coverage_dribble_duel),
-            "takeover_coverage_rate_shoot": self._safe_mean(self._takeover_coverage_shoot),
-            "takeover_coverage_rate_pass": self._safe_mean(self._takeover_coverage_pass),
-            "playball_entry_rate": self._safe_mean(self._playball_entry),
-            "ready_but_walk_rate": self._safe_mean(self._ready_but_walk),
-            "ready_touch_but_walk_rate": self._safe_mean(self._ready_touch_but_walk),
-            "support_quality_rate": self._safe_mean(self._support_quality),
-            "anti_blocking_rate": self._safe_mean(self._anti_blocking),
-            "goal_rate": self._safe_mean(self._goals),
-            "win_rate": self._safe_mean(self._wins),
-        }
-
-    @staticmethod
-    def _safe_mean(d: deque) -> float:
-        return float(np.mean(d)) if d else 0.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WRAPPER PRINCIPAL
-# ─────────────────────────────────────────────────────────────────────────────
-
-class NaoSoccerEnvWrapper:
-    """
-    Wrapper over NaoSoccerEnv for skrl MAPPO compatibility.
-
-    Adds:
-      - "state": global state vector for centralized critic
-      - BHuman-aware curriculum management
-      - BHuman metrics aggregation
-    """
-
-    def __init__(self,
-                 stage_cfg: Optional[CurriculumStageConfig] = None,
-                 curriculum_stages: Optional[List[CurriculumStageConfig]] = None,
-                 use_fov: bool = True,
-                 seed: Optional[int] = None):
-
-        self._curriculum_stages = curriculum_stages or CURRICULUM
-
-        if stage_cfg is None:
-            stage_cfg = self._curriculum_stages[0]
-
-        self._env = NaoSoccerEnv(stage_cfg=stage_cfg, use_fov=use_fov, seed=seed)
-        self.curriculum_manager = CurriculumManager(self._curriculum_stages)
-        self.metrics = BHumanMetricsAggregator()
-
-        # PettingZoo interface
-        self.possible_agents = self._env.possible_agents
-        self.observation_spaces = self._env.observation_spaces
-        self.action_spaces = self._env.action_spaces
-        self.metadata = self._env.metadata
-
-        # Shared observation space for centralized critic
-        import gymnasium as gym
+class RealSimRobotEnvWrapper:
+    def __init__(self, env: RealSimRobotEnv):
+        self._env = env
+        self.possible_agents = env.possible_agents
+        self.observation_spaces = env.observation_spaces
+        self.action_spaces = env.action_spaces
         self.shared_observation_spaces = {
-            aid: gym.spaces.Box(
-                low=-np.inf, high=np.inf,
-                shape=(GLOBAL_STATE.total,), dtype=np.float32
-            )
-            for aid in self.possible_agents
+            agent: env.observation_spaces[agent] for agent in env.possible_agents
         }
 
     @property
-    def agents(self) -> List[str]:
+    def agents(self):
         return self._env.agents
 
-    def observation_space(self, agent):
-        return self._env.observation_space(agent)
-
-    def action_space(self, agent):
-        return self._env.action_space(agent)
-
     def reset(self, seed=None, options=None):
-        self._sync_stage()
-        obs, infos = self._env.reset(seed=seed, options=options)
-        self._inject_global_state(infos)
-        return obs, infos
+        return self._env.reset(seed=seed, options=options)
 
-    def step(self, actions):
-        obs, rewards, terminateds, truncateds, infos = self._env.step(actions)
-        self._inject_global_state(infos)
-        return obs, rewards, terminateds, truncateds, infos
-
-    def record_episode_metrics(self,
-                               own_score: int,
-                               opp_score: int,
-                               infos: Dict[str, Dict]) -> bool:
-        """
-        Record episode metrics and check for curriculum advancement.
-
-        Call this at the end of each episode from train.py.
-        Returns True if curriculum advanced.
-        """
-        # Extract BHuman metrics from last info
-        sample_info = next(iter(infos.values())) if infos else {}
-        takeover_count = sample_info.get("episode_takeover_count", 0)
-        takeover_success = sample_info.get("episode_takeover_success", 0)
-        # handoff_achieved = True if handoff_ready envelope was reached at any point
-        handoff_achieved = sample_info.get("episode_handoff_achieved", False)
-        tkready_achieved = sample_info.get("episode_tkready_achieved", False)
-        playball_achieved = sample_info.get("episode_playball_achieved", False)
-        ready_but_walk_rate = float(sample_info.get("episode_ready_but_walk_rate", 0.0))
-        ready_touch_but_walk_rate = float(
-            sample_info.get("episode_ready_touch_but_walk_rate", 0.0)
-        )
-
-        # Record in metrics aggregator
-        self.metrics.record(
-            handoff_achieved=handoff_achieved,
-            tkready_achieved=tkready_achieved,
-            takeover_count=takeover_count,
-            takeover_success_count=takeover_success,
-            takeover_count_dribble=int(sample_info.get("episode_takeover_count_dribble", 0)),
-            takeover_count_duel=int(sample_info.get("episode_takeover_count_duel", 0)),
-            takeover_count_shoot=int(sample_info.get("episode_takeover_count_shoot", 0)),
-            takeover_count_pass=int(sample_info.get("episode_takeover_count_pass", 0)),
-            takeover_success_dribble=int(sample_info.get("episode_takeover_success_dribble", 0)),
-            takeover_success_duel=int(sample_info.get("episode_takeover_success_duel", 0)),
-            takeover_success_shoot=int(sample_info.get("episode_takeover_success_shoot", 0)),
-            takeover_success_pass=int(sample_info.get("episode_takeover_success_pass", 0)),
-            playball_achieved=playball_achieved,
-            ready_but_walk_rate=ready_but_walk_rate,
-            ready_touch_but_walk_rate=ready_touch_but_walk_rate,
-            own_score=own_score,
-            opp_score=opp_score,
-        )
-
-        # Record in curriculum manager
-        return self.curriculum_manager.record_episode(
-            own_score=own_score,
-            opp_score=opp_score,
-            takeover_count=takeover_count,
-            takeover_success_count=takeover_success,
-            handoff_achieved=handoff_achieved,
-            tkready_achieved=tkready_achieved,
-            playball_achieved=playball_achieved,
-            ready_but_walk_rate=ready_but_walk_rate,
-            ready_touch_but_walk_rate=ready_touch_but_walk_rate,
-        )
-
-    def set_curriculum_stage(self, stage_idx: int):
-        if 0 <= stage_idx < len(self._curriculum_stages):
-            self.curriculum_manager.jump_to_stage(stage_idx)
-            self._env.set_stage(self._curriculum_stages[stage_idx])
-
-    def _sync_stage(self):
-        self._env.set_stage(self.curriculum_manager.current_stage)
-
-    def _inject_global_state(self, infos):
-        global_state = self._env.get_global_state()
-        for aid in infos:
-            infos[aid]["state"] = global_state
-
-    def collect_episode(self, policy_fn=None, seed=None) -> Dict[str, Any]:
-        obs, _ = self.reset(seed=seed)
-        total_rewards = {aid: 0.0 for aid in self.agents}
-        steps = 0
-
-        while self.agents:
-            if policy_fn is not None:
-                actions = policy_fn(obs)
+    def step(self, actions: Dict[str, np.ndarray | StructuredSkillAction | dict]):
+        converted = {}
+        for agent, action in actions.items():
+            if isinstance(action, dict):
+                converted[agent] = action
+            elif isinstance(action, StructuredSkillAction):
+                converted[agent] = action.as_dict()
             else:
-                actions = {
-                    aid: self.action_space(aid).sample()
-                    for aid in self.agents
-                }
-
-            obs, rewards, terminateds, truncateds, infos = self.step(actions)
-            steps += 1
-
-            for aid, r in rewards.items():
-                total_rewards[aid] = total_rewards.get(aid, 0.0) + r
-
-            if truncateds.get("__all__") or terminateds.get("__all__"):
-                break
-
-        bhuman_metrics = self.metrics.get_metrics()
-
-        return {
-            "steps": steps,
-            "own_score": self._env._game.own_score,
-            "opp_score": self._env._game.opp_score,
-            "total_rewards": total_rewards,
-            "mean_reward": float(np.mean(list(total_rewards.values()))) if total_rewards else 0.0,
-            "stage_id": self.curriculum_manager.stage_id,
-            "stage_name": self.curriculum_manager.current_stage.name,
-            **bhuman_metrics,
-        }
+                raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+                payload = action_from_numpy(raw_action).as_dict()
+                payload["policy_skill_raw"] = float(raw_action[0]) if raw_action.size > 0 else 0.0
+                converted[agent] = payload
+        return self._env.step(converted)
 
     def close(self):
         self._env.close()
+
+    def collect_episode(self, policy_fn, seed=None, capture_steps: bool = False):
+        obs, infos = self.reset(seed=seed)
+        rewards = {agent: 0.0 for agent in self.possible_agents}
+        steps = 0
+        reward_terms_sum = defaultdict(float)
+        weighted_terms_sum = defaultdict(float)
+        final_info = None
+        step_records = []
+        while self.agents:
+            action_dict = policy_fn(obs, infos)
+            obs, step_rewards, terminateds, truncateds, infos = self.step(action_dict)
+            steps += 1
+            final_info = infos.get(self.possible_agents[0], final_info)
+            for agent, value in step_rewards.items():
+                rewards[agent] += value
+            info = infos.get(self.possible_agents[0], {})
+            for key, value in info.get("reward_terms", {}).items():
+                reward_terms_sum[key] += float(value)
+            for key, value in info.get("reward_weighted_terms", {}).items():
+                weighted_terms_sum[key] += float(value)
+            if capture_steps:
+                raw_obs = info.get("raw_obs", {})
+                step_records.append(
+                    {
+                        "step": int(steps),
+                        "configured_obs_mode": info.get("configured_obs_mode"),
+                        "production_scenario_name": info.get("production_scenario_name", ""),
+                        "production_scenario_obstacles": info.get("production_scenario_obstacles", ""),
+                        "production_scenario_contrast": int(bool(info.get("production_scenario_contrast", False))),
+                        "reward": float(step_rewards.get(self.possible_agents[0], 0.0)),
+                        "policy_skill_name": info.get("policy_skill_name"),
+                        "executed_skill_name": info.get("executed_skill_name"),
+                        "preferred_skill_name": info.get("preferred_skill_name"),
+                        "policy_skill_raw": float(info.get("policy_skill_raw", 0.0)),
+                        "policy_skill_round": int(info.get("policy_skill_round", 0)),
+                        "policy_skill_index": int(info.get("policy_skill_index", 0)),
+                        "policy_compact_skill_index": int(info.get("policy_compact_skill_index", 0)),
+                        "policy_skill_dribble_margin": float(info.get("policy_skill_dribble_margin", 0.0)),
+                        "policy_skill_entropy": float(info.get("policy_skill_entropy", 0.0)),
+                        "policy_param_std_mean": float(info.get("policy_param_std_mean", 0.0)),
+                        "policy_skill_prob_stand": float(info.get("policy_skill_prob_stand", 0.0)),
+                        "policy_skill_prob_walk": float(info.get("policy_skill_prob_walk", 0.0)),
+                        "policy_skill_prob_dribble": float(info.get("policy_skill_prob_dribble", 0.0)),
+                        "policy_skill_prob_shoot": float(info.get("policy_skill_prob_shoot", 0.0)),
+                        "policy_skill_prob_pass": float(info.get("policy_skill_prob_pass", 0.0)),
+                        "policy_skill_prob_block": float(info.get("policy_skill_prob_block", 0.0)),
+                        "policy_skill_prob_mark": float(info.get("policy_skill_prob_mark", 0.0)),
+                        "policy_skill_prob_observe": float(info.get("policy_skill_prob_observe", 0.0)),
+                        "policy_residual_x": float(info.get("policy_residual_x", 0.0)),
+                        "policy_residual_y": float(info.get("policy_residual_y", 0.0)),
+                        "policy_residual_theta": float(info.get("policy_residual_theta", 0.0)),
+                        "policy_target_error_mm": float(info.get("policy_target_error_mm", 0.0)),
+                        "policy_theta_error_rad": float(info.get("policy_theta_error_rad", 0.0)),
+                        "handoff_override_applied": int(bool(info.get("handoff_override_applied", False))),
+                        "target_repair_applied": int(bool(info.get("target_repair_applied", False))),
+                        "target_repair_reason": info.get("target_repair_reason"),
+                        "policy_target_x": float(info.get("policy_target_x", 0.0)),
+                        "policy_target_y": float(info.get("policy_target_y", 0.0)),
+                        "policy_target_theta": float(info.get("policy_target_theta", 0.0)),
+                        "executed_target_x": float(info.get("executed_target_x", 0.0)),
+                        "executed_target_y": float(info.get("executed_target_y", 0.0)),
+                        "executed_target_theta": float(info.get("executed_target_theta", 0.0)),
+                        "projection_applied": int(bool(info.get("projection_applied", False))),
+                        "synthetic_pose_observation": int(bool(info.get("synthetic_pose_observation", False))),
+                        "synthetic_ball_observation": int(bool(info.get("synthetic_ball_observation", False))),
+                        "synthetic_pose_reason": info.get("synthetic_pose_reason"),
+                        "synthetic_ball_reason": info.get("synthetic_ball_reason"),
+                        "ball_regime": info.get("ball_regime"),
+                        "ball_confidence_score": float(info.get("ball_confidence_score", 0.0)),
+                        "ball_visible_mask": int(bool(info.get("ball_visible_mask", False))),
+                        "ball_trusted_mask": int(bool(info.get("ball_trusted_mask", False))),
+                        "ball_semi_trusted_mask": int(bool(info.get("ball_semi_trusted_mask", False))),
+                        "ball_degraded_mask": int(bool(info.get("ball_degraded_mask", False))),
+                        "ball_rescued_mask": int(bool(info.get("ball_rescued_mask", False))),
+                        "ball_lost_mask": int(bool(info.get("ball_lost_mask", False))),
+                        "obs_export_mode": int(info.get("obs_export_mode", 0)),
+                        "corrected_exported_robot_pose": int(bool(info.get("corrected_exported_robot_pose", False))),
+                        "corrected_exported_ball": int(bool(info.get("corrected_exported_ball", False))),
+                        "ball_export_source": int(info.get("ball_export_source", 0)),
+                        "ball_export_fresh": int(bool(info.get("ball_export_fresh", False))),
+                        "natural_time_since_ball_seen": float(info.get("natural_time_since_ball_seen", 0.0)),
+                        "natural_ball_seen_percentage": float(info.get("natural_ball_seen_percentage", 0.0)),
+                        "natural_ball_consistent_with_game_state": int(bool(info.get("natural_ball_consistent_with_game_state", False))),
+                        "pose_alignment_error_mm": float(info.get("pose_alignment_error_mm", 0.0)),
+                        "pose_alignment_warning": int(bool(info.get("pose_alignment_warning", False))),
+                        "ball_observation_stale": int(bool(info.get("ball_observation_stale", False))),
+                        "ball_observation_collapsed": int(bool(info.get("ball_observation_collapsed", False))),
+                        "estimated_robot_x": float(info.get("estimated_robot_x", 0.0)),
+                        "estimated_robot_y": float(info.get("estimated_robot_y", 0.0)),
+                        "estimated_ball_x": float(info.get("estimated_ball_x", 0.0)),
+                        "estimated_ball_y": float(info.get("estimated_ball_y", 0.0)),
+                        "takeover_envelope": int(bool(info.get("takeover_envelope", False))),
+                        "walk_zone": int(bool(info.get("walk_zone", False))),
+                        "dribble_zone": int(bool(info.get("dribble_zone", False))),
+                        "shoot_zone": int(bool(info.get("shoot_zone", False))),
+                        "bridge_frame": int(info.get("bridge_frame", 0)),
+                        "ball_rel_x": float(raw_obs.get("ball_rel_x", 0.0)),
+                        "ball_rel_y": float(raw_obs.get("ball_rel_y", 0.0)),
+                        "ball_x": float(raw_obs.get("ball_x", 0.0)),
+                        "ball_y": float(raw_obs.get("ball_y", 0.0)),
+                        "robot_x": float(raw_obs.get("robot_x", 0.0)),
+                        "robot_y": float(raw_obs.get("robot_y", 0.0)),
+                        "robot_theta": float(raw_obs.get("robot_theta", 0.0)),
+                        "time_since_ball_seen": float(raw_obs.get("time_since_ball_seen", 0.0)),
+                        "ball_seen_percentage": float(raw_obs.get("ball_seen_percentage", 0.0)),
+                        "shot_opening_with_obstacles": float(raw_obs.get("shot_opening_with_obstacles", 0.0)),
+                        "nearest_opponent_front_dist": float(raw_obs.get("nearest_opponent_front_dist", 0.0)),
+                        "nearest_front_obstacle_dist": float(raw_obs.get("nearest_front_obstacle_dist", 0.0)),
+                    }
+                )
+            if not self.agents or any(terminateds.values()) or any(truncateds.values()):
+                break
+        episode_metrics = {}
+        if final_info is not None:
+            episode_metrics = dict(final_info.get("episode_metrics", {}))
+        return {
+            "steps": steps,
+            "mean_reward": float(np.mean(list(rewards.values()))),
+            "total_rewards": rewards,
+            "reward_terms_sum": dict(reward_terms_sum),
+            "reward_weighted_terms_sum": dict(weighted_terms_sum),
+            "episode_metrics": episode_metrics,
+            "ball_semantics": {
+                "ball_trusted_rate": float(episode_metrics.get("ball_trusted_rate", 0.0)),
+                "ball_rescued_rate": float(episode_metrics.get("ball_rescued_rate", 0.0)),
+                "ball_confidence_score_mean": float(episode_metrics.get("ball_confidence_score_mean", 0.0)),
+                "first_trusted_ball_after_reset_ms": float(episode_metrics.get("first_trusted_ball_after_reset_ms", 0.0)),
+            },
+            "final_info": final_info,
+            "step_records": step_records,
+        }
+
+    def collect_parallel_episode_batch(self, policy_fn, seed=None) -> list[dict]:
+        """Collect finished episode metrics from all parallel slots in one eval batch.
+
+        The visible training env already steps one independent SimRobot slot per
+        agent.  Standard eval uses only player_1, which wastes the other slots.
+        This batch collector preserves the environment/action/observation path
+        and simply returns every slot that reached an episode boundary.
+        """
+        obs, infos = self.reset(seed=seed)
+        rewards = {agent: 0.0 for agent in self.possible_agents}
+        steps = 0
+        reward_terms_sum = {agent: defaultdict(float) for agent in self.possible_agents}
+        weighted_terms_sum = {agent: defaultdict(float) for agent in self.possible_agents}
+        final_infos = {}
+
+        while self.agents:
+            action_dict = policy_fn(obs, infos)
+            obs, step_rewards, terminateds, truncateds, infos = self.step(action_dict)
+            steps += 1
+            for agent, value in step_rewards.items():
+                rewards[agent] += float(value)
+            for agent, info in infos.items():
+                final_infos[agent] = info
+                for key, value in info.get("reward_terms", {}).items():
+                    reward_terms_sum[agent][key] += float(value)
+                for key, value in info.get("reward_weighted_terms", {}).items():
+                    weighted_terms_sum[agent][key] += float(value)
+            if not self.agents or any(terminateds.values()) or any(truncateds.values()):
+                break
+
+        results: list[dict] = []
+        for agent in self.possible_agents:
+            final_info = final_infos.get(agent)
+            if final_info is None:
+                continue
+            episode_metrics = dict(final_info.get("episode_metrics", {}))
+            if not episode_metrics:
+                continue
+            results.append(
+                {
+                    "steps": steps,
+                    "mean_reward": float(rewards.get(agent, 0.0)),
+                    "total_rewards": {agent: float(rewards.get(agent, 0.0))},
+                    "reward_terms_sum": dict(reward_terms_sum[agent]),
+                    "reward_weighted_terms_sum": dict(weighted_terms_sum[agent]),
+                    "episode_metrics": episode_metrics,
+                    "ball_semantics": {
+                        "ball_trusted_rate": float(episode_metrics.get("ball_trusted_rate", 0.0)),
+                        "ball_rescued_rate": float(episode_metrics.get("ball_rescued_rate", 0.0)),
+                        "ball_confidence_score_mean": float(episode_metrics.get("ball_confidence_score_mean", 0.0)),
+                        "first_trusted_ball_after_reset_ms": float(
+                            episode_metrics.get("first_trusted_ball_after_reset_ms", 0.0)
+                        ),
+                    },
+                    "final_info": final_info,
+                    "parallel_agent_id": agent,
+                    "step_records": [],
+                }
+            )
+        return results

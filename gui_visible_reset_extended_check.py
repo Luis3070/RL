@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+import argparse
+
+from config import SIMROBOT_BIN
+from pybh_backend import PyBHBackend, WorldPlayerSpec
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Check visible SimRobot extended reset with teammates and opponents.")
+    parser.add_argument("--simrobot-profile", choices=("2d", "3d"), default="2d")
+    parser.add_argument("--launch-simrobot", action="store_true")
+    parser.add_argument("--simrobot-bin", default=SIMROBOT_BIN)
+    parser.add_argument("--timeout-ms", type=int, default=30000)
+    parser.add_argument("--request-timeout-ms", type=int, default=None)
+    parser.add_argument("--reset-obs-timeout-ms", type=int, default=None)
+    parser.add_argument("--status-log-interval-s", type=float, default=1.0)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    backend = PyBHBackend(
+        mode="simrobot_visible",
+        simrobot_profile=args.simrobot_profile,
+        obs_timeout_ms=args.timeout_ms,
+        visible_request_timeout_ms=args.request_timeout_ms,
+        visible_reset_obs_timeout_ms=args.reset_obs_timeout_ms,
+        visible_status_log_interval_s=args.status_log_interval_s,
+        simrobot_launch=args.launch_simrobot,
+        simrobot_bin=args.simrobot_bin,
+    )
+    backend.start()
+    try:
+        print("Abre SimRobot y vuelve aca cuando la escena visible ya este cargada.", flush=True)
+        input("Cuando la simulacion ya este corriendo, presiona Enter para enviar el reset...")
+        print("Enviando reset extendido y esperando confirmacion de SimRobot...", flush=True)
+        obs = backend.reset(
+            ball_pos=[0.0, 0.0],
+            robot_pos=[-1200.0, 0.0],
+            robot_theta=0.0,
+            teammates=(
+                WorldPlayerSpec(number=2, x=-400.0, y=700.0, theta=0.0),
+                WorldPlayerSpec(number=3, x=-400.0, y=-700.0, theta=0.0),
+            ),
+            opponents=(
+                WorldPlayerSpec(number=1, x=1200.0, y=500.0, theta=3.14),
+                WorldPlayerSpec(number=2, x=1200.0, y=-500.0, theta=3.14),
+            ),
+        )
+        print(
+            "reset ok "
+            f"obs_ready={int(obs.obs_ready)} "
+            f"robot=({obs.robot_x:.1f},{obs.robot_y:.1f},{obs.robot_theta:.2f}) "
+            f"ball=({obs.ball_x:.1f},{obs.ball_y:.1f})",
+            flush=True,
+        )
+        input("Verifica posiciones en la GUI y presiona Enter para cerrar...")
+    finally:
+        backend.close()
+
+
+if __name__ == "__main__":
+    main()
