@@ -4,10 +4,10 @@ Guidance for Claude Code sessions working in this repository.
 
 ## Repository layout transition
 
-The repository moved from ~80 flat root modules to the `rlfootball` package. Older documents, notes, branches and commit messages still use the flat names (`train.py`, `config.py`, `from config import ...`).
+The repository moved from ~80 flat root modules to the `rlfootball` package. Older documents and notes still use the flat names (`train.py`, `config.py`, `from config import ...`).
 
 - Translate old names through the "Module map" in `docs/REPO_LAYOUT.md` (old -> new path, one row per module). Rule: `<name>.py` -> `rlfootball/<sub>/<name>.py`; names did not change.
-- Integration rules (where new code goes, PR checklist, porting old branches): `docs/PROJECT_STRUCTURE.md`.
+- Integration rules (where new code goes, PR checklist, porting work written against the old layout): `docs/PROJECT_STRUCTURE.md`.
 - Entry points are modules: `python train.py` -> `python -m rlfootball.training.train`.
 
 Where things go:
@@ -184,7 +184,7 @@ cmake --build "$SABANAHERONS_DIR/Build/Linux/CMake/Develop" --target SimulatedNa
 
 ## Removed or historical (do not follow old instructions)
 
-- `bridge/` subprocess stack: removed (commit `a1da9e9`); `pybh` runs in-process.
+- No `bridge/` subprocess stack: `pybh` runs in-process.
 - Root-level `FOR_TRAIN_PRODUCTION.md` and the `.docs/` folder no longer exist; their material lives in `docs/` and `docs/notes/`.
 - The "graph coordination (wrapper only, no retraining)" sprint is a historical plan: `docs/notes/10-graph-coordination-post-production-roadmap.md`. It is not an active constraint.
 - Windows-specific setup from the old instructions was dropped; the supported flow is Linux.
@@ -198,4 +198,4 @@ cmake --build "$SABANAHERONS_DIR/Build/Linux/CMake/Develop" --target SimulatedNa
 - `docs/05-premisas-irrompibles.md`: hard constraints (field bounds, skill properties)
 - `docs/12-wire-rl-realista-final.md`: wiring diagram (Python <-> C++)
 - `docs/37-striker-v2b-to-v4.2-and-cpp-transplant.md`, `docs/38-merged-striker-defender-and-naov6-transplant.md`: striker v4.2 and merged v5 policies
-- `docs/BRANCHES.md`, `docs/PAPER_TRACEABILITY.md`: branch registry, paper claims to evidence
+- `docs/PAPER_TRACEABILITY.md`: paper claims to evidence

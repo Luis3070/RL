@@ -143,12 +143,9 @@ LOC = lines. Imp = importers (root modules / tools+scripts / tests).
 | `test_wire_audit.py` | `tests/test_wire_audit.py` | test | 99 | 0/0/0 | Tests for wire_audit |
 | `test_world_spec_contract.py` | `tests/test_world_spec_contract.py` | test | 78 | 0/0/0 | Tests for world-spec contract |
 
-## Final all-learned team (commit `30b28ac`)
+## Final all-learned team files
 
-Commit `30b28ac` ("Final all-learned team", branch `rl-v3a-multiagent-defender`) was written on the flat layout.
-Its files were ported in four commits (`3a5f884`, `141bddd`, `bf11344`, `5fdcb98`). Old path in `30b28ac` -> new path:
-
-`chore/organizar-repo-paper` absorbs `30b28ac` (and `2f51520`, the docs 37 and 38 edits) in the flat layout through merge `3b08527`. When this branch merges that one, the flat copies are removed and the ported versions below win; the `.docs/FIGURES/*` generators and tables went to `tools/paper/` and `results/paper/`.
+The final all-learned team files, old path -> new path. The `.docs/FIGURES/*` generators and tables live in `tools/paper/` and `results/paper/`.
 
 | Old path | New path | Note |
 |---|---|---|
@@ -167,9 +164,9 @@ Its files were ported in four commits (`3a5f884`, `141bddd`, `bf11344`, `5fdcb98
 | `For the final version/results/ablation_heldout_per_checkpoint.csv` | `results/paper/ablation_heldout_per_checkpoint.csv` | Same blob |
 | `ppo_team_hsl2026_final_alllearned.onnx`, `ppo_coord_hsl2026_final_learned_coordinator.onnx` (repo root) | `models/team/<same name>.onnx` | No `.json` manifests exist |
 
-Dropped duplicates (byte-identical blobs, checked with `git rev-parse` on `30b28ac`): `For the final version/models/final_team_policy_iter12.onnx` (same as `ppo_team_hsl2026_final_alllearned.onnx`) and `For the final version/models/learned_coordinator_v2.onnx` (same as `ppo_coord_hsl2026_final_learned_coordinator.onnx`).
+Dropped duplicates (byte-identical files): `For the final version/models/final_team_policy_iter12.onnx` (same as `ppo_team_hsl2026_final_alllearned.onnx`) and `For the final version/models/learned_coordinator_v2.onnx` (same as `ppo_coord_hsl2026_final_learned_coordinator.onnx`).
 
-Convention kept in the ported scripts: `tools/eval` and `tools/paper` scripts import a sibling script by bare module name (`paper_match_stats` and `select_rule_setting` import `analyze_full_probe`; `paper_figures_final` imports `paper_figures_icra`), after inserting their own directory into `sys.path`. Run them as plain scripts (`python tools/eval/paper_match_stats.py`), not with `-m`.
+Convention in these scripts: `tools/eval` and `tools/paper` scripts import a sibling script by bare module name (`paper_match_stats` and `select_rule_setting` import `analyze_full_probe`; `paper_figures_final` imports `paper_figures_icra`), after inserting their own directory into `sys.path`. Run them as plain scripts (`python tools/eval/paper_match_stats.py`), not with `-m`.
 
 ## Running entry points
 
@@ -255,7 +252,7 @@ only risk is stale bare `import config` in code that relied on the repo root bei
 - Rule: `<name>.py` -> `rlfootball/<sub>/<name>.py`; tests -> `tests/<name>.py`. Names never change.
 - Imports: `import X` / `from X import ...` -> `from rlfootball.<sub>.X import ...` (AST rewrite; function-level imports included).
 - Commands: `python X.py` -> `python -m rlfootball.<sub>.X`.
-- Use `git mv` so history follows; do the move in one commit per subpackage.
+- Use `git mv` so history follows; do each move in one commit per subpackage.
 - Policy artifacts (`ppo_*.onnx/json`, C++ side) are loaded by filename from `models/`, not by module name: unaffected.
 - `ROOT_DIR` depth changes from `.` to `rlfootball/core/`; every `ROOT = Path(__file__).resolve().parent` must be re-pointed.
 

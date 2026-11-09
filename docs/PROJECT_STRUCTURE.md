@@ -100,10 +100,10 @@ Most common old names:
 | `diag_n6_slots.py` | `rlfootball/diagnostics/diag_n6_slots.py` |
 | `test_wire_audit.py` | `tests/test_wire_audit.py` |
 
-### Porting a branch or PR written against the old layout
+### Porting work written against the old layout
 
-1. Find where the branch diverged: `git merge-base <your-branch> <new-base>`. List what you changed: `git diff --stat <merge-base>..<your-branch>`.
-2. Update from the new base with a rebase (`git rebase <new-base>`) or a merge (`git merge <new-base>`). The moves were done with `git mv`, so Git detects renames and applies your edits to the moved files; `git log --follow rlfootball/core/config.py` shows the pre-move history.
+1. Find where your branch diverged: `git merge-base <your-branch> <new-base>`. List what you changed: `git diff --stat <merge-base>..<your-branch>`.
+2. Update from the new base with a rebase (`git rebase <new-base>`) or a merge (`git merge <new-base>`). Files were moved with `git mv`, so Git detects renames and applies your edits to the moved files; `git log --follow rlfootball/core/config.py` shows the pre-move history.
 3. Resolve rename conflicts on the new path. If Git reports modify/delete on an old flat file, apply your change to the file's new location (table above) and `git add` it.
 4. Rewrite leftover flat imports in your own code. Find them with `rg -n '^\s*(from|import) (config|action|observation|gate|reward|environment|train)\b' <your files>` and rewrite them to `rlfootball.<sub>.<name>` (use `sd` for mechanical replacements, then review the diff). A stale bare `import config` raises `ImportError`; it does not silently pick another module.
 5. Rewrite shell launchers: `$PY X.py` becomes `$PY -m rlfootball.<sub>.X`, and hardcoded `/home/<user>/...` paths become `RL_REPO_DIR` / `SABANAHERONS_DIR` (see section 4).
@@ -166,7 +166,7 @@ Add `docs/NN-title.md` with the next free number (the highest is 42; 08 is absen
 
 ### Branch and PR workflow
 
-1. Branch from `rl-v4.2-multiagent-gk`, the current integration branch (the most recently updated project branch; see [BRANCHES.md](BRANCHES.md)); one feature or fix per branch. Once this layout lands on `main`, branch from `main` instead.
+1. Branch from `main`; one feature or fix per branch.
 2. Commit in small, reviewable units with Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), keeping tests and docs with the change.
 3. Never commit `runs/`, `.env`, datasets (`*.npz`), logs (`*.log`), or credentials. They are gitignored; do not force-add them.
 4. Open a PR only after the checklist in section 5 passes. In the description state what changed, which old names it touches, and what was run.
@@ -175,7 +175,7 @@ Add `docs/NN-title.md` with the next free number (the highest is 42; 08 is absen
 
 - Multi-agent training in this repository requires branch `rl-simrobot3d` of `SabanaHerons2026`; deploying ONNX policies uses `hsl2026-ppo-team-v4`. Check the right branch is checked out before running.
 - After changing `RLSharedState` (or `RLSkillProvider.cpp`, `Module.cpp`), rebuild `pybh` (`Make/Python`, `python3 setup.py build_ext --inplace`) and `SimulatedNao`; otherwise Python and SimRobot read different shared-memory layouts.
-- Do not edit the sibling repository from a PR of this one. C++ changes go through their own branch and PR in `SabanaHerons2026`; mention the required commit or branch in this PR's description.
+- Do not edit the sibling repository from a PR of this one. C++ changes go through their own branch and PR in `SabanaHerons2026`; mention the required `SabanaHerons2026` revision in this PR's description.
 
 ## 5. Verification checklist before opening a PR
 

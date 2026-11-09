@@ -3,7 +3,7 @@
 Index of every file under `docs/` (working notes live in `docs/notes/`). Most documents are working logs written during development; many are in Spanish (column `Lang`).
 Descriptions are derived from each file's title and opening lines.
 Most documents refer to modules by their pre-refactor flat names (for example `train.py`); the old-to-new table is in [REPO_LAYOUT.md](REPO_LAYOUT.md).
-Related: [root README](../README.md), [project structure and integration guide](PROJECT_STRUCTURE.md), [branch registry](BRANCHES.md), [paper traceability](PAPER_TRACEABILITY.md).
+Related: [root README](../README.md), [project structure and integration guide](PROJECT_STRUCTURE.md), [paper traceability](PAPER_TRACEABILITY.md).
 
 Topics: `bridge` (RL to B-Human/SimRobot wiring and environment), `striker`, `defender`, `goalkeeper`, `multiagent`, `audit` (validation, evaluation, stability).
 

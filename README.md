@@ -21,13 +21,13 @@ See [docs/README.md](docs/README.md) for the index.
 
 Python talks to B-Human in-process through `pybh` (see `rlfootball/core/pybh_backend.py`).
 `rlfootball/core/config.py` expects `SabanaHerons2026` as a sibling directory of this repository.
-The old `bridge/` subprocess stack was removed in commit `a1da9e9` ("pybh-clean: drop legacy subprocess stack").
+The in-process `pybh` binding is the only supported bridge; there is no subprocess stack.
 
 Required `SabanaHerons2026` branches:
 
 | Purpose | Branch |
 |---|---|
-| Multi-agent training in this repo | `rl-simrobot3d` (bridge version 30, multi-agent fields; as stated in `docs/notes/HANDOFF.md`) |
+| Multi-agent training in this repo | `rl-simrobot3d` (bridge version 30, multi-agent fields) |
 | Deploying the ONNX policies | `hsl2026-ppo-team-v4` (striker v4.2: [docs/37](docs/37-striker-v2b-to-v4.2-and-cpp-transplant.md); merged brain v5: [docs/38](docs/38-merged-striker-defender-and-naov6-transplant.md)) |
 
 ## Repository map
@@ -282,7 +282,6 @@ The other analysis scripts in `tools/eval/` (`analyze_full_probe.py`, `offline_h
 | Document | Content |
 |---|---|
 | [docs/README.md](docs/README.md) | Index of all documentation |
-| [docs/BRANCHES.md](docs/BRANCHES.md) | Branch registry and consolidation record |
 | [docs/PAPER_TRACEABILITY.md](docs/PAPER_TRACEABILITY.md) | Paper claims mapped to repository evidence |
 | [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) | Project structure, old-to-new transition guide and integration rules |
 | [CLAUDE.md](CLAUDE.md) | Project instructions for Claude Code sessions |
